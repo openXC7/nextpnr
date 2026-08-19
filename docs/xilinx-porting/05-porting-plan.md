@@ -205,11 +205,25 @@ FASM writers (write_ibufds_gte2/write_gtp_pll/write_gtp_channel/
 write_gtx_pll/write_gtx_channel, 1.4k lines).  GT pads (OPAD/IPAD) are
 exempted from the IO-buffer xform, the IOSTANDARD check, and the IO FASM
 path.  The fork's GT-clock template route (`NEXTPNR_GT_CLK_BODGE`) is a
-virtex7-specific bodge and is NOT ported (noted).  PCIE_2_1 writer not
-ported.
+virtex7-specific bodge and is NOT ported (noted).  PCIE_2_1 writer and
+pack plumbing ported as a follow-up (see below).
 Validated: GTPE2_CHANNEL+GTPE2_COMMON design (gtp-gtx-tests/gtp_channel)
 P&R on xc7a200tfbg484-1 completes with 171 GTPE2 FASM features emitted;
 blinky + litex-ddr-arty-s7 regressions and all 5 unit tests pass.
+
+### WP7b — PCIE_2_1 hard block — ✅ DONE
+Ported the 640-line `write_pcie_2_1` FASM writer (PG054 PCIe config
+space: BARs, AER/MSI/MSI-X/PM caps, link control, pipe/misc registers)
+plus the pack-time plumbing mirroring PS7: `PCIE_2_1`→`PCIE_2_1_PCIE_2_1`
+retype in `pack_io.cc` and `preplace_unique` binding on the unique PCIE
+site in `pack_clocking.cc`.
+Validated end-to-end at bitstream level on xc7k325tffg676-1: synthetic
+PCIE_2_1 design places at PCIE_BOT_X189Y167 and emits 190 features; all
+370 set bits are legal in the openXC7 kintex7 segbits; prjxray-alt
+fasm2frames + xc7frames2bit produce a bitstream; bit2fasm roundtrip
+reproduces all 123 non-zero features bit-for-bit (0 mismatches).
+Regression battery (blinky-arty, qmtech blinky, litex-ddr-arty-s7) and
+archcheck pass.
 
 ### WP8 — EXCLUDED: UltraScale / UltraScale+ porting (xc7-only decision)
 
