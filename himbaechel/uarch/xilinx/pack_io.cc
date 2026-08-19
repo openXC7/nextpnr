@@ -363,10 +363,73 @@ void XC7Packer::pack_io()
     }
     // Decompose macro IO primitives to smaller primitives that map logically to the actual IO Bels
     for (auto &iob : pad_and_buf) {
-        if (packed_cells.count(iob.second.cell->name))
+        auto pad_cell = iob.first;
+        auto buf_cell = iob.second.cell;
+        if (packed_cells.count(buf_cell->name))
             continue;
-        decompose_iob(iob.second.cell, true, str_or_default(iob.first->attrs, id_IOSTANDARD, ""));
-        packed_cells.insert(iob.second.cell->name);
+
+        // GT clock buffers: constrain the IBUFDS_GTE2 to the GT tile's
+        // dedicated buffer site, then cluster the consumers (port of
+        // nextpnr-xilinx pack_io_xc7.cc)
+        if (buf_cell->type == id_IBUFDS_GTE2) {
+            BelId pad_bel;
+            if (pad_cell->attrs.count(id_BEL))
+                pad_bel = ctx->getBelByNameStr(pad_cell->attrs.at(id_BEL).as_string());
+            if (pad_bel == BelId())
+                log_error("IBUFDS_GTE2 pad %s is not constrained\n", pad_cell->name.c_str(ctx));
+            constrain_ibufds_gt_site(buf_cell, pad_bel);
+            NetInfo *net = buf_cell->getPort(id_O);
+            if (net == nullptr)
+                log_error("IBUFDS_GTE2 instance %s output port is not connected\n", buf_cell->name.c_str(ctx));
+            // Accepted silicon-legal consumers: GTPE2/GTXE2_COMMON (QPLL
+            // clustering), GTXE2_CHANNEL direct (CPLL mode), or a fabric
+            // clock buffer (MGT REFCLK straight into BUFG/BUFH/BUFR).
+            CellInfo *gt_common = nullptr;
+            bool has_gtxe2_channel_direct = false, has_bufg_direct = false;
+            for (auto &usr : net->users) {
+                if (usr.cell->type.in(id_GTPE2_COMMON, id_GTXE2_COMMON))
+                    gt_common = usr.cell;
+                else if (usr.cell->type == id_GTXE2_CHANNEL)
+                    has_gtxe2_channel_direct = true;
+                else if (usr.cell->type.in(id_BUFG, id_BUFH, id_BUFHCE, id_BUFR))
+                    has_bufg_direct = true;
+            }
+            if (gt_common) {
+                constrain_gt(pad_cell, gt_common);
+                packed_cells.insert(buf_cell->name);
+                continue;
+            }
+            if (has_gtxe2_channel_direct || has_bufg_direct) {
+                packed_cells.insert(buf_cell->name);
+                continue;
+            }
+            log_error("IBUFDS_GTE2 instance %s output port must be connected to a GTPE2_COMMON, GTXE2_COMMON, "
+                      "GTXE2_CHANNEL, or BUFG/BUFH/BUFR\n",
+                      buf_cell->name.c_str(ctx));
+        }
+
+        // This OBUF is integrated into the GTP/GTX channel pad and does not need placing
+        if (buf_cell->type == id_OBUF) {
+            NetInfo *net = buf_cell->getPort(id_I);
+            if (net && net->driver.cell && net->driver.cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL)) {
+                packed_cells.insert(buf_cell->name);
+                constrain_gt(pad_cell, net->driver.cell);
+                continue;
+            }
+        }
+        // This IBUF is integrated into the GTP/GTX channel pad and does not need placing
+        if (buf_cell->type == id_IBUF) {
+            NetInfo *net = buf_cell->getPort(id_O);
+            if (net && net->users.entries() == 1 &&
+                (*net->users.begin()).cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL)) {
+                packed_cells.insert(buf_cell->name);
+                constrain_gt(pad_cell, (*net->users.begin()).cell);
+                continue;
+            }
+        }
+
+        decompose_iob(buf_cell, true, str_or_default(iob.first->attrs, id_IOSTANDARD, ""));
+        packed_cells.insert(buf_cell->name);
     }
     flush_cells();
 
@@ -416,6 +479,8 @@ void XC7Packer::pack_io()
         CellInfo *ci = cell.second.get();
         if (!ci->attrs.count(id_BEL) && ci->bel == BelId())
             continue;
+        if (!hriobuf_rules.count(ci->type) && !hpiobuf_rules.count(ci->type))
+            continue; // not an IO-buffer cell (e.g. a GT channel bel)
         std::string belname =
                 ci->attrs.count(id_BEL) ? ci->attrs[id_BEL].as_string() : std::string(ctx->nameOfBel(ci->bel));
         size_t pos = belname.find(".");
@@ -423,6 +488,8 @@ void XC7Packer::pack_io()
             rules = hpiobuf_rules;
         else if (belname.substr(pos + 1, 5) == "IOB33")
             rules = hriobuf_rules;
+        else if (belname.substr(pos + 1, 3) == "PAD")
+            continue; // GT pads (OPAD/IPAD): no IO-buffer decomposition (handled by GT clustering)
         else
             log_error("Unexpected IOBUF BEL %s\n", belname.c_str());
         if (rules.count(ci->type)) {
@@ -464,6 +531,13 @@ void XC7Packer::pack_io()
 
 void XC7Packer::check_valid_pad(CellInfo *ci, std::string type)
 {
+    // GT pads (OPAD/IPAD sites) don't need IOSTANDARD constraints
+    {
+        std::string belname = ci->bel != BelId() ? ctx->nameOfBel(ci->bel)
+                                                 : str_or_default(ci->attrs, id_BEL);
+        if (boost::contains(belname, "OPAD") || boost::contains(belname, "IPAD"))
+            return;
+    }
     auto iostandard_id = id_IOSTANDARD;
     auto iostandard_attr = ci->attrs.find(iostandard_id);
     if (iostandard_attr == ci->attrs.end())
@@ -1086,6 +1160,248 @@ void XC7Packer::pack_cfg()
         if (ci->type.in(id_BSCAN, id_DCIRESET_DCIRESET, id_DNA_PORT_DNA_PORT, id_EFUSE_USR_EFUSE_USR, id_ICAP_ICAP,
                         id_FRAME_ECC_FRAME_ECC, id_STARTUP_STARTUP, id_USR_ACCESS_USR_ACCESS))
             preplace_unique(ci);
+    }
+}
+
+
+SiteIndex XC7Packer::get_gt_site(BelId pad_bel)
+{
+    int tile = pad_bel.tile;
+    const auto &sites = uarch->tile_extra_data(tile)->sites;
+    for (int32_t i = 0; i < int32_t(sites.ssize()); i++) {
+        std::string name = IdString(sites[i].name_prefix).str(ctx);
+        if (boost::starts_with(name, "GTPE2_") || boost::starts_with(name, "GTXE2_"))
+            return SiteIndex(tile, i);
+    }
+    NPNR_ASSERT_FALSE("failed to find GTP/GTX site for pad");
+}
+
+void XC7Packer::constrain_ibufds_gt_site(CellInfo *buf_cell, BelId pad_bel)
+{
+    // Port of nextpnr-xilinx constrain_ibufds_gt_site: the IBUFDS_GTE2 site
+    // is hardwired to the GT pad pair it buffers (GTREFCLK0 = lower buffer,
+    // GTREFCLK1 = upper), so compute the site-local y from the pad's
+    // position among the tile's four GT pads.
+    int tile = pad_bel.tile;
+    SiteIndex pad_site = uarch->get_bel_site(pad_bel);
+    const auto &sites = uarch->tile_extra_data(tile)->sites;
+    int32_t min_pad_y = INT_MAX, max_pad_y = 0, pad_y = -1;
+    int32_t min_buf_y = INT_MAX, max_buf_y = 0, buf_x = -1;
+    for (int32_t i = 0; i < int32_t(sites.ssize()); i++) {
+        const auto &s = sites[i];
+        std::string name = IdString(s.name_prefix).str(ctx);
+        if (boost::starts_with(name, "IPAD_")) {
+            int32_t sy = s.rel_y;
+            if (sy < min_pad_y) min_pad_y = sy;
+            if (max_pad_y < sy) max_pad_y = sy;
+            if (i == pad_site.site) pad_y = sy;
+        }
+        if (boost::starts_with(name, "IBUFDS_GTE2_")) {
+            int32_t sy = s.rel_y;
+            if (sy < min_buf_y) min_buf_y = sy;
+            if (max_buf_y < sy) max_buf_y = sy;
+            if (buf_x < 0) buf_x = s.rel_x;
+        }
+    }
+    if (pad_y < 0)
+        log_error("failed to find IBUFDS_GTE2 site for pad '%s'\n", ctx->nameOfBel(pad_bel));
+    NPNR_ASSERT(min_pad_y < max_pad_y);
+    NPNR_ASSERT(min_buf_y < max_buf_y);
+    NPNR_ASSERT(buf_x >= 0);
+
+    int32_t rel_buf_y = (pad_y - min_pad_y) >> 1;
+    int32_t buf_y = min_buf_y + rel_buf_y;
+
+    SiteIndex buf_site;
+    for (int32_t i = 0; i < int32_t(sites.ssize()); i++) {
+        const auto &s = sites[i];
+        std::string name = IdString(s.name_prefix).str(ctx);
+        if (boost::starts_with(name, "IBUFDS_GTE2_") && s.rel_x == buf_x && s.rel_y == buf_y) {
+            buf_site = SiteIndex(tile, i);
+            break;
+        }
+    }
+    NPNR_ASSERT(buf_site != SiteIndex());
+    BelId buf_bel = uarch->get_site_bel(buf_site, id_IBUFDS_GTE2);
+    NPNR_ASSERT(buf_bel != BelId());
+    ctx->bindBel(buf_bel, buf_cell, STRENGTH_LOCKED);
+    buf_cell->params[ctx->id("_REL_BUF_Y")] = Property(rel_buf_y);
+    log_info("    Constraining '%s' to site '%s'\n", buf_cell->name.c_str(ctx),
+             uarch->get_site_name(buf_site).c_str(ctx));
+}
+
+void XC7Packer::constrain_gt(CellInfo *pad_cell, CellInfo *gt_cell)
+{
+    BelId pad_bel;
+    if (pad_cell->attrs.count(id_BEL))
+        pad_bel = ctx->getBelByNameStr(pad_cell->attrs.at(id_BEL).as_string());
+    if (pad_bel == BelId())
+        log_error("Pad cell %s has not been placed\n", pad_cell->name.c_str(ctx));
+
+    if (gt_cell->bel != BelId()) {
+        if (gt_cell->bel.tile != pad_bel.tile)
+            log_error("Location of pad %s on tile %d conflicts with previous placement of %s on tile %d\n",
+                      pad_cell->name.c_str(ctx), pad_bel.tile, gt_cell->name.c_str(ctx), gt_cell->bel.tile);
+        return;
+    }
+    SiteIndex gt_site = get_gt_site(pad_bel);
+    BelId gt_bel = uarch->get_site_bel(gt_site, gt_cell->type);
+    NPNR_ASSERT(gt_bel != BelId());
+    ctx->bindBel(gt_bel, gt_cell, STRENGTH_LOCKED);
+    log_info("    Constraining '%s' to site '%s'\n", gt_cell->name.c_str(ctx),
+             uarch->get_site_name(gt_site).c_str(ctx));
+}
+
+void XC7Packer::pack_gt()
+{
+    // Port of nextpnr-xilinx pack_gt_xc7.cc
+    log_info("Packing Gigabit Transceivers..\n");
+
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+
+        if (ci->type == id_GTPE2_COMMON || ci->type == id_GTXE2_COMMON) {
+            const IdString refclk0_used_attr = ctx->id("_GTREFCLK0_USED"),
+                           refclk1_used_attr = ctx->id("_GTREFCLK1_USED");
+            bool refclk0_used = false, refclk1_used = false;
+            bool is_gtp = ci->type == id_GTPE2_COMMON;
+
+            fold_inverter(ci, "DRPCLK");
+            if (is_gtp) {
+                fold_inverter(ci, "PLL0LOCKDETCLK");
+                fold_inverter(ci, "PLL1LOCKDETCLK");
+            } else {
+                fold_inverter(ci, "QPLLLOCKDETCLK");
+            }
+
+            for (auto &port : ci->ports) {
+                std::string port_name = port.first.str(ctx);
+                NetInfo *port_net = port.second.net;
+                bool used = port_net != nullptr && port_net->name != ctx->id("$PACKER_VCC_NET") &&
+                            port_net->name != ctx->id("$PACKER_GND_NET");
+                bool internal_refclk = false;
+
+                if (port_name == "DRPCLK") {
+                    ci->params[ctx->id("_DRPCLK_USED")] = Property(used);
+                } else if (boost::starts_with(port_name, "GTREFCLK")) {
+                    if (port_net == nullptr)
+                        continue;
+                    CellInfo *driver = port_net->driver.cell;
+                    if (driver == nullptr)
+                        log_error("Port %s connected to net %s has no driver!\n", port_name.c_str(),
+                                  port_net->name.c_str(ctx));
+                    if (!used || driver->type == id_PSEUDO_GND || driver->type == id_PSEUDO_VCC) {
+                        // refclk input tied to a constant: unused, not a clock
+                        ci->disconnectPort(port.first);
+                        continue;
+                    }
+                    if (driver->type != id_IBUFDS_GTE2) {
+                        if (driver->type != id_BUFGCTRL)
+                            log_error("%s COMMON GTREFCLK connected to unsupported cell type %s\n",
+                                      is_gtp ? "GTPE2" : "GTXE2", driver->type.c_str(ctx));
+                        // Vivado internally always connects to GTGREFCLK0
+                        auto gtg_port = is_gtp ? id_GTGREFCLK0 : id_GTGREFCLK;
+                        log_warning("Internal REFCLK is used for instance '%s', which is not recommended. "
+                                    "Connecting refclock to port %s instead.\n",
+                                    ci->name.c_str(ctx), gtg_port.c_str(ctx));
+                        ci->renamePort(port.first, gtg_port);
+                        internal_refclk = true;
+                        ci->params[ctx->id("_GTGREFCLK_USED")] = Property(1, 1);
+                    } else { // driver is IBUFDS_GTE2
+                        if (used) {
+                            int64_t rel_buf_y = ci->params.count(ctx->id("_REL_BUF_Y"))
+                                                        ? 0
+                                                        : int_or_default(driver->params, ctx->id("_REL_BUF_Y"), 0);
+                            // GTREFCLK0 is hardwired to the lower IBUFDS_GTE2,
+                            // GTREFCLK1 to the upper: disconnect (no routing
+                            // needed) and mark the used input
+                            ci->disconnectPort(port.first);
+                            if (rel_buf_y == 1) {
+                                refclk1_used = true;
+                                ci->params[refclk1_used_attr] = Property(1, 1);
+                            } else {
+                                refclk0_used = true;
+                                ci->params[refclk0_used_attr] = Property(1, 1);
+                            }
+                            continue;
+                        }
+                    }
+                    if (!internal_refclk) {
+                        if (boost::ends_with(port_name, "0")) {
+                            refclk0_used = used;
+                            ci->params[refclk0_used_attr] = Property(used);
+                        } else {
+                            refclk1_used = used;
+                            ci->params[refclk1_used_attr] = Property(used);
+                        }
+                    }
+                }
+            }
+            ci->params[ctx->id("_BOTH_GTREFCLK_USED")] = Property(refclk0_used && refclk1_used);
+        } else if (ci->type == id_GTPE2_CHANNEL || ci->type == id_GTXE2_CHANNEL) {
+            bool is_gtp = ci->type == id_GTPE2_CHANNEL;
+            for (auto p : {"CLKRSVD0", "CLKRSVD1", "CPLLLOCKDETCLK", "DMONITORCLK", "DRPCLK", "GTGREFCLK",
+                           "PMASCANCLK0", "PMASCANCLK1", "PMASCANCLK2", "PMASCANCLK3", "QPLLLOCKDETCLK", "RXUSRCLK",
+                           "RXUSRCLK2", "SCANCLK", "SIGVALIDCLK", "TSTCLK0", "TSTCLK1", "TXPHDLYTSTCLK", "TXUSRCLK",
+                           "TXUSRCLK2"})
+                fold_inverter(ci, p);
+
+            // Collect bracket-named ports first to avoid iterator
+            // invalidation when renamePort erases+inserts
+            std::vector<std::pair<IdString, IdString>> to_rename;
+            for (auto &port : ci->ports) {
+                std::string port_name = port.first.str(ctx);
+                NetInfo *net = ci->getPort(port.first);
+
+                if (net != nullptr && ((boost::starts_with(port_name, "PLL") && boost::ends_with(port_name, "CLK")) ||
+                                       (boost::contains(port_name, "REFCLK") || boost::starts_with(port_name, "QPLL"))) &&
+                    !boost::contains(port_name, "CLKMONITOR") && !boost::contains(port_name, "CLKLOST")) {
+                    if (net->name == ctx->id("$PACKER_GND_NET") || net->name == ctx->id("$PACKER_VCC_NET")) {
+                        ci->disconnectPort(port.first);
+                        continue;
+                    }
+                    CellInfo *driver = net->driver.cell;
+                    if (driver == nullptr || driver->type == id_PSEUDO_GND || driver->type == id_PSEUDO_VCC) {
+                        ci->disconnectPort(port.first);
+                        continue;
+                    }
+                    IdString common_type = is_gtp ? id_GTPE2_COMMON : id_GTXE2_COMMON;
+                    // GTX CPLL mode: GTXE2_CHANNEL.GTREFCLK* may be driven
+                    // directly by IBUFDS_GTE2 (no COMMON in the design)
+                    if (driver->type != common_type && driver->type != id_IBUFDS_GTE2)
+                        log_error("The clock port '%s' of the %s instance %s can only be driven by the clock "
+                                  "outputs of a %s or an IBUFDS_GTE2 instance, but not %s\n",
+                                  port_name.c_str(), is_gtp ? "GTPE2_CHANNEL" : "GTXE2_CHANNEL",
+                                  ci->name.c_str(ctx), common_type.c_str(ctx), driver->type.c_str(ctx));
+                    if (driver->type == common_type) {
+                        auto drv_port = net->driver.port.str(ctx);
+                        auto port_prefix = port_name.substr(0, 4);
+                        auto port_suffix = port_name.substr(4);
+                        if (!boost::starts_with(drv_port, port_prefix) || !boost::ends_with(drv_port, port_suffix))
+                            log_error("The port %s of a %s instance can only be connected to the port %sOUT%s "
+                                      "of a %s instance, but not to %s.\n",
+                                      port_name.c_str(), is_gtp ? "GTPE2_CHANNEL" : "GTXE2_CHANNEL",
+                                      port_prefix.c_str(), port_suffix.c_str(), common_type.c_str(ctx),
+                                      drv_port.c_str());
+                    }
+                    bool used = net->name != ctx->id("$PACKER_VCC_NET") && net->name != ctx->id("$PACKER_GND_NET");
+                    if (used && port_name == "GTREFCLK0")
+                        ci->params[ctx->id("_GTREFCLK0_USED")] = Property(1, 1);
+                    if (used && port_name == "GTREFCLK1")
+                        ci->params[ctx->id("_GTREFCLK1_USED")] = Property(1, 1);
+                    // hardwired; disconnect
+                    ci->disconnectPort(port.first);
+                }
+                if (boost::contains(port_name, "[") && boost::contains(port_name, "]")) {
+                    std::string new_port_name = port_name;
+                    boost::replace_all(new_port_name, "[", "");
+                    boost::replace_all(new_port_name, "]", "");
+                    to_rename.emplace_back(ctx->id(port_name), ctx->id(new_port_name));
+                }
+            }
+            for (auto &pr : to_rename)
+                ci->renamePort(pr.first, pr.second);
+        }
     }
 }
 

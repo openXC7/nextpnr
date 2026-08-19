@@ -204,6 +204,12 @@ struct XC7Packer : public XilinxPacker
     void pack_idelayctrl();
     void pack_cfg();
 
+    // GT transceivers
+    SiteIndex get_gt_site(BelId pad_bel);
+    void constrain_ibufds_gt_site(CellInfo *buf_cell, BelId pad_bel);
+    void constrain_gt(CellInfo *pad_cell, CellInfo *gt_cell);
+    void pack_gt();
+
     // Clocking
     void prepare_clocking();
     void pack_plls();

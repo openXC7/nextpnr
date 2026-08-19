@@ -198,12 +198,18 @@ USR_ACCESSE2, DCIRESET — single-site preplacement per fork
 `pack_io_xc7.cc:1232` (`d42d6c9b`) + FASM emission. Depends on the
 preplacement mechanism from WP1.
 
-### WP7 — GT transceivers (GTPE2/GTXE2) (larger) — 🔄 subagent in flight
-Port `pack_gt_xc7.cc` (380 L) + `fasm.cc` GT writers (GTP/GTX channel,
-common, IBUFDS_GTE2 refclk, PLL remap) via bindBel instead of the fork's
-BEL-attr strings. Depends on WP0 (kintex7/virtex7 devices). The fork's
-GT-clock template route (`NEXTPNR_GT_CLK_BODGE`) is a virtex7-specific
-bodge and is NOT ported.
+### WP7 — GT transceivers (GTPE2/GTXE2) (larger) — ✅ DONE
+Ported `pack_gt_xc7.cc` (pack_gt/constrain_gt/constrain_ibufds_gt_site via
+bindBel + SiteIndex instead of the fork's BEL-attr strings) and the five
+FASM writers (write_ibufds_gte2/write_gtp_pll/write_gtp_channel/
+write_gtx_pll/write_gtx_channel, 1.4k lines).  GT pads (OPAD/IPAD) are
+exempted from the IO-buffer xform, the IOSTANDARD check, and the IO FASM
+path.  The fork's GT-clock template route (`NEXTPNR_GT_CLK_BODGE`) is a
+virtex7-specific bodge and is NOT ported (noted).  PCIE_2_1 writer not
+ported.
+Validated: GTPE2_CHANNEL+GTPE2_COMMON design (gtp-gtx-tests/gtp_channel)
+P&R on xc7a200tfbg484-1 completes with 171 GTPE2 FASM features emitted;
+blinky + litex-ddr-arty-s7 regressions and all 5 unit tests pass.
 
 ### WP8 — EXCLUDED: UltraScale / UltraScale+ porting (xc7-only decision)
 

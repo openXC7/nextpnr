@@ -1357,6 +1357,18 @@ struct FasmBackend
         for (auto &cell : ctx->cells) {
             CellInfo *ci = cell.second.get();
             if (ci->type == id_PAD) {
+                // GT pads are configured by the GT writers, not the IO path
+                // (their tiles have no HCLK/IOI structure)
+                if (ci->bel != BelId()) {
+                    // GT pads live in the GT/OPAD tiles and are configured by
+                    // the GT writers, not the IO path
+                    std::string belname = ctx->nameOfBel(ci->bel);
+                    if (boost::contains(belname, "OPAD") || boost::contains(belname, "IPAD") ||
+                        boost::contains(belname, "GTPE2_") || boost::contains(belname, "GTXE2_")) {
+                        blank();
+                        continue;
+                    }
+                }
                 write_io_config(ci);
                 blank();
             } else if (ci->type.in(id_ILOGICE3_IFF, id_OLOGICE2_OUTFF, id_OLOGICE3_OUTFF, id_OSERDESE2_OSERDESE2,
@@ -2185,6 +2197,1307 @@ struct FasmBackend
         }
     }
 
+    void write_ibufds_gte2(CellInfo * ci)
+    {
+        push(uarch->tile_name(ci->bel.tile));
+        Loc siteLoc = uarch->rel_site_loc(uarch->get_bel_site(ci->bel));
+        push("IBUFDS_GTE2_Y" + std::to_string(siteLoc.y));
+        write_bit("IN_USE");
+        auto clkcm_cfg = bool_or_default(ci->params, ctx->id("CLKCM_CFG"), true);
+        if (!clkcm_cfg) log_warning("%s/%s: According to ug482, CLKCM_CFG should always be on\n",
+                                    ci->hierpath.c_str(ctx), ci->name.c_str(ctx));
+        write_bit("CLKCM_CFG", clkcm_cfg);
+        auto clkrcv_trst = bool_or_default(ci->params, ctx->id("CLKRCV_TRST"), true);
+        if (!clkrcv_trst) log_warning("%s/%s: According to ug482, CLKRCV_TRST should always be on\n",
+                                       ci->hierpath.c_str(ctx), ci->name.c_str(ctx));
+        write_bit("CLKRCV_TRST", clkrcv_trst);
+        pop(2);
+    }
+    void write_gtp_pll(CellInfo *ci)
+    {
+        push(uarch->tile_name(ci->bel.tile));
+
+        push("GTPE2_COMMON");
+        write_bit("IN_USE");
+        write_bit("ENABLE_DRP", bool_or_default(ci->params, ctx->id("_DRPCLK_USED"), false));
+        write_bit("BOTH_GTREFCLK_USED", bool_or_default(ci->params, ctx->id("_BOTH_GTREFCLK_USED"), false));
+        write_bit("GTREFCLK0_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK0_USED"), false));
+        write_bit("GTREFCLK1_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK1_USED"), false));
+        write_bit("GTGREFCLK0_USED", bool_or_default(ci->params, ctx->id("_GTGREFCLK_USED"), false));
+        auto clkswing_cfg = int_or_default(ci->params, ctx->id("CLKSWING_CFG"), 3);
+        if (clkswing_cfg != 3) log_warning("%s/%s: According to ug482, CLK should always be 0b11\n",
+                                           ci->hierpath.c_str(ctx), ci->name.c_str(ctx));
+        write_int_vector("IBUFDS_GTE2.CLKSWING_CFG[1:0]", clkswing_cfg, 2);
+        write_bit("INV_DRPCLK", bool_or_default(ci->params, ctx->id("IS_DRPCLK_INVERTED")));
+        write_bit("INV_PLL0LOCKDETCLK", bool_or_default(ci->params, ctx->id("IS_PLL0LOCKDETCLK_INVERTED")));
+        write_bit("INV_PLL1LOCKDETCLK", bool_or_default(ci->params, ctx->id("IS_PLL1LOCKDETCLK_INVERTED")));
+
+        auto bias_cfg = int_or_default(ci->params, ctx->id("BIAS_CFG"), 0);
+        write_int_vector("BIAS_CFG[63:0]", bias_cfg, 64);
+        auto common_cfg = int_or_default(ci->params, ctx->id("COMMON_CFG"), 0);
+        write_int_vector("COMMON_CFG[31:0]", common_cfg, 32);
+
+        // according to ug482, these attributes contain magic undocumented and reserved wizard values
+        write_int_vector("PLL0_CFG[20:0]", 0b111110000001111011100, 21);
+        write_int_vector("PLL1_CFG[20:0]", 0b111110000001111011100, 21);
+        write_int_vector("PLL0_INIT_CFG[4:0]", 0b11110, 5);
+        write_int_vector("PLL1_INIT_CFG[4:0]", 0b11110, 5);
+        write_int_vector("PLL0_LOCK_CFG[8:0]", 0b111101000, 9);
+        write_int_vector("PLL1_LOCK_CFG[8:0]", 0b111101000, 9);
+
+        auto pll0_refclk_div = int_or_default(ci->params, ctx->id("PLL0_REFCLK_DIV"), 1);
+        if (pll0_refclk_div < 1 || pll0_refclk_div > 2)
+            log_error("PLL0_REFCLK_DIV can only be 1 or 2, but is: %d", pll0_refclk_div);
+        write_bit("PLL0_REFCLK_DIV[4]", pll0_refclk_div == 1);
+        auto pll1_refclk_div = int_or_default(ci->params, ctx->id("PLL1_REFCLK_DIV"), 1);
+        if (pll1_refclk_div < 1 || pll1_refclk_div > 2)
+            log_error("PLL1_REFCLK_DIV can only be 1 or 2, but is: %d", pll1_refclk_div);
+        write_bit("PLL1_REFCLK_DIV[4]", pll1_refclk_div == 1);
+
+        auto pll0_fbdiv = int_or_default(ci->params, ctx->id("PLL0_FBDIV"), 1);
+        if (pll0_fbdiv < 1 || pll0_fbdiv > 5)
+            log_error("PLL0_FBDIV can only be 1, 2, 3, 4 or 5, but is: %d", pll0_fbdiv);
+        if (pll0_fbdiv == 1) write_bit("PLL0_FBDIV[4]");
+        else write_int_vector("PLL0_FBDIV[1:0]", pll0_fbdiv - 2, 2);
+        auto pll1_fbdiv = int_or_default(ci->params, ctx->id("PLL1_FBDIV"), 1);
+        if (pll1_fbdiv < 1 || pll1_fbdiv > 5)
+            log_error("PLL1_FBDIV can only be 1, 2, 3, 4 or 5, but is: %d", pll1_fbdiv);
+        if (pll1_fbdiv == 1) write_bit("PLL1_FBDIV[4]");
+        else write_int_vector("PLL1_FBDIV[1:0]", pll1_fbdiv - 2, 2);
+
+        auto pll0_fbdiv_45 = int_or_default(ci->params, ctx->id("PLL0_FBDIV_45"), 4);
+        if (pll0_fbdiv_45 < 4 || pll0_fbdiv_45 > 5)
+            log_error("PLL0_FBDIV_45 can only be 4 or 5, but is: %d", pll0_fbdiv);
+        write_bit("PLL0_FBDIV_45[0]", pll0_fbdiv_45 == 5);
+        auto pll1_fbdiv_45 = int_or_default(ci->params, ctx->id("PLL1_FBDIV_45"), 4);
+        if (pll1_fbdiv_45 < 4 || pll1_fbdiv_45 > 5)
+            log_error("PLL1_FBDIV_45 can only be 4 or 5, but is: %d", pll1_fbdiv);
+        write_bit("PLL1_FBDIV_45[0]", pll1_fbdiv_45 == 5);
+
+        auto pll0_dmon_cfg = bool_or_default(ci->params, ctx->id("PLL0_DMON_CFG"), false);
+        write_bit("PLL0_DMON_CFG[0]", pll0_dmon_cfg);
+        auto pll1_dmon_cfg = bool_or_default(ci->params, ctx->id("PLL1_DMON_CFG"), false);
+        write_bit("PLL1_DMON_CFG[0]", pll1_dmon_cfg);
+
+        auto rsvd_attr0 = int_or_default(ci->params, ctx->id("RSVD_ATTR0"), 0);
+        write_int_vector("RSVD_ATTR0[15:0]", rsvd_attr0, 16);
+        auto rsvd_attr1 = int_or_default(ci->params, ctx->id("RSVD_ATTR1"), 0);
+        write_int_vector("RSVD_ATTR1[15:0]", rsvd_attr1, 16);
+
+        auto pll_clkout_cfg = int_or_default(ci->params, ctx->id("PLL_CLKOUT_CFG"), 0);
+        write_int_vector("PLL_CLKOUT_CFG[7:0]", pll_clkout_cfg, 8);
+        pop(); // GTPE2_COMMON
+
+        pop(); // tile name
+    }
+    void write_gtp_channel(CellInfo *ci)
+    {
+        push(uarch->tile_name(ci->bel.tile));
+        push("GTPE2_CHANNEL");
+
+        write_bit("IN_USE");
+
+        auto write_str_bool = [&](std::string attribute, std::string bit, std::string deflt = "FALSE") {
+            auto val = str_or_default(ci->params, ctx->id(attribute), deflt);
+            boost::algorithm::to_upper(val);
+            write_bit(bit, val == "TRUE");
+        };
+
+        auto acjtag_debug_mode = bool_or_default(ci->params, ctx->id("ACJTAG_DEBUG_MODE"), false);
+        write_bit("ACJTAG_DEBUG_MODE[0]", acjtag_debug_mode);
+        auto acjtag_mode = bool_or_default(ci->params, ctx->id("ACJTAG_MODE"), false);
+        write_bit("ACJTAG_MODE[0]", acjtag_mode);
+        auto acjtag_reset = bool_or_default(ci->params, ctx->id("ACJTAG_RESET"), false);
+        write_bit("ACJTAG_RESET[0]", acjtag_reset);
+
+        auto adapt_cfg0 = int_or_default(ci->params, ctx->id("ADAPT_CFG0"), 0);
+        write_int_vector("ADAPT_CFG0[19:0]", adapt_cfg0, 20);
+
+        write_str_bool("ALIGN_COMMA_DOUBLE", "ALIGN_COMMA_DOUBLE");
+
+        auto align_comma_enable = int_or_default(ci->params, ctx->id("ALIGN_COMMA_ENABLE"), 0b1111111111);
+        write_int_vector("ALIGN_COMMA_ENABLE[9:0]", align_comma_enable, 10);
+
+        auto align_comma_word = int_or_default(ci->params, ctx->id("ALIGN_COMMA_WORD"), 1);
+        if (align_comma_word < 1 || 2 < align_comma_word)
+            log_error("ALIGN_COMMA_WORD may only be 1 or 2, but is: %d\n", align_comma_word);
+        if (align_comma_word == 1)
+            write_bit("ALIGN_COMMA_WORD[0]");
+        else
+            write_bit("ALIGN_COMMA_WORD[1]");
+
+        write_str_bool("ALIGN_MCOMMA_DET", "ALIGN_MCOMMA_DET");
+        auto align_mcomma_value = int_or_default(ci->params, ctx->id("ALIGN_MCOMMA_VALUE"), 0b1010000011);
+        write_int_vector("ALIGN_MCOMMA_VALUE[9:0]", align_mcomma_value, 10);
+
+        write_str_bool("ALIGN_PCOMMA_DET", "ALIGN_PCOMMA_DET");
+        auto align_pcomma_value = int_or_default(ci->params, ctx->id("ALIGN_PCOMMA_VALUE"), 0b0101111100);
+        write_int_vector("ALIGN_PCOMMA_VALUE[9:0]", align_pcomma_value, 10);
+
+        auto cbcc_data_source_sel = str_or_default(ci->params, ctx->id("CBCC_DATA_SOURCE_SEL"), "DECODED");
+        if (cbcc_data_source_sel == "DECODED") write_bit("CBCC_DATA_SOURCE_SEL.DECODED");
+
+        auto cfok_cfg = get_or_default(ci->params, ctx->id("CFOK_CFG"), Property(int64_t(0))).as_int64();
+        write_int_vector("CFOK_CFG[42:0]", cfok_cfg, 43);
+        auto cfok_cfg2 = int_or_default(ci->params, ctx->id("CFOK_CFG2"), 0);
+        write_int_vector("CFOK_CFG2[6:0]", cfok_cfg2, 7);
+        auto cfok_cfg3 = int_or_default(ci->params, ctx->id("CFOK_CFG3"), 0);
+        write_int_vector("CFOK_CFG3[6:0]", cfok_cfg3, 7);
+        auto cfok_cfg4 = bool_or_default(ci->params, ctx->id("CFOK_CFG4"), false);
+        write_bit("CFOK_CFG4[0]", cfok_cfg4);
+        auto cfok_cfg5 = int_or_default(ci->params, ctx->id("CFOK_CFG5"), 0);
+        write_int_vector("CFOK_CFG5[1:0]", cfok_cfg5, 2);
+        auto cfok_cfg6 = int_or_default(ci->params, ctx->id("CFOK_CFG6"), 0);
+        write_int_vector("CFOK_CFG6[3:0]", cfok_cfg6, 4);
+
+        write_str_bool("CHAN_BOND_KEEP_ALIGN", "CHAN_BOND_KEEP_ALIGN");
+        auto chan_bond_max_skew = int_or_default(ci->params, ctx->id("CHAN_BOND_MAX_SKEW"), 0);
+        if (chan_bond_max_skew < 1 || 14 < chan_bond_max_skew)
+            log_error("CHAN_BOND_MAX_SKEW may only range from 1 to 14, but is: %d\n", chan_bond_max_skew);
+        write_int_vector("CHAN_BOND_MAX_SKEW[3:0]", chan_bond_max_skew, 4);
+
+        auto chan_bond_seq_1_enable = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_ENABLE"), 0);
+        write_int_vector("CHAN_BOND_SEQ_1_ENABLE[3:0]", chan_bond_seq_1_enable, 4);
+        auto chan_bond_seq_1_1 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_1"), 0);
+        write_int_vector("CHAN_BOND_SEQ_1_1[9:0]", chan_bond_seq_1_1, 10);
+        auto chan_bond_seq_1_2 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_2"), 0);
+        write_int_vector("CHAN_BOND_SEQ_1_2[9:0]", chan_bond_seq_1_2, 10);
+        auto chan_bond_seq_1_3 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_3"), 0);
+        write_int_vector("CHAN_BOND_SEQ_1_3[9:0]", chan_bond_seq_1_3, 10);
+        auto chan_bond_seq_1_4 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_4"), 0);
+        write_int_vector("CHAN_BOND_SEQ_1_4[9:0]", chan_bond_seq_1_4, 10);
+
+        write_str_bool("CHAN_BOND_SEQ_2_USE", "CHAN_BOND_SEQ_2_USE");
+        auto chan_bond_seq_2_enable = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_ENABLE"), 0);
+        write_int_vector("CHAN_BOND_SEQ_2_ENABLE[3:0]", chan_bond_seq_2_enable, 4);
+        auto chan_bond_seq_2_1 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_1"), 0);
+        write_int_vector("CHAN_BOND_SEQ_2_1[9:0]", chan_bond_seq_2_1, 10);
+        auto chan_bond_seq_2_2 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_2"), 0);
+        write_int_vector("CHAN_BOND_SEQ_2_2[9:0]", chan_bond_seq_2_2, 10);
+        auto chan_bond_seq_2_3 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_3"), 0);
+        write_int_vector("CHAN_BOND_SEQ_2_3[9:0]", chan_bond_seq_2_3, 10);
+        auto chan_bond_seq_2_4 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_4"), 0);
+        write_int_vector("CHAN_BOND_SEQ_2_4[9:0]", chan_bond_seq_2_4, 10);
+
+        auto chan_bond_seq_len = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_LEN"), 0);
+        if (chan_bond_seq_len < 1 || 4 < chan_bond_seq_len)
+            log_error("CHAN_BOND_SEQ_LEN may only range from 1 to 4, but is: %d\n", chan_bond_seq_len);
+        write_int_vector("CHAN_BOND_SEQ_LEN[1:0]", chan_bond_seq_len - 1, 2);
+
+        auto clk_common_swing = bool_or_default(ci->params, ctx->id("CLK_COMMON_SWING"), false);
+        write_bit("CLK_COMMON_SWING[0]", clk_common_swing);
+        write_str_bool("CLK_COR_KEEP_IDLE", "CLK_COR_KEEP_IDLE");
+        auto clk_cor_max_lat = int_or_default(ci->params, ctx->id("CLK_COR_MAX_LAT"), 0);
+        write_int_vector("CLK_COR_MAX_LAT[5:0]", clk_cor_max_lat, 6);
+        auto clk_cor_min_lat = int_or_default(ci->params, ctx->id("CLK_COR_MIN_LAT"), 0);
+        write_int_vector("CLK_COR_MIN_LAT[5:0]", clk_cor_min_lat, 6);
+        write_str_bool("CLK_COR_PRECEDENCE", "CLK_COR_PRECEDENCE");
+        auto clk_cor_repeat_wait = int_or_default(ci->params, ctx->id("CLK_COR_REPEAT_WAIT"), 0);
+        write_int_vector("CLK_COR_REPEAT_WAIT[4:0]", clk_cor_repeat_wait, 5);
+
+        auto clk_cor_seq_1_enable = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_ENABLE"), 0);
+        write_int_vector("CLK_COR_SEQ_1_ENABLE[3:0]", clk_cor_seq_1_enable, 4);
+        auto clk_cor_seq_1_1 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_1"), 0);
+        write_int_vector("CLK_COR_SEQ_1_1[9:0]", clk_cor_seq_1_1, 10);
+        auto clk_cor_seq_1_2 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_2"), 0);
+        write_int_vector("CLK_COR_SEQ_1_2[9:0]", clk_cor_seq_1_2, 10);
+        auto clk_cor_seq_1_3 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_3"), 0);
+        write_int_vector("CLK_COR_SEQ_1_3[9:0]", clk_cor_seq_1_3, 10);
+        auto clk_cor_seq_1_4 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_4"), 0);
+        write_int_vector("CLK_COR_SEQ_1_4[9:0]", clk_cor_seq_1_4, 10);
+
+        write_str_bool("CLK_COR_SEQ_2_USE", "CLK_COR_SEQ_2_USE");
+        auto clk_cor_seq_2_enable = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_ENABLE"), 0);
+        write_int_vector("CLK_COR_SEQ_2_ENABLE[3:0]", clk_cor_seq_2_enable, 4);
+        auto clk_cor_seq_2_1 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_1"), 0);
+        write_int_vector("CLK_COR_SEQ_2_1[9:0]", clk_cor_seq_2_1, 10);
+        auto clk_cor_seq_2_2 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_2"), 0);
+        write_int_vector("CLK_COR_SEQ_2_2[9:0]", clk_cor_seq_2_2, 10);
+        auto clk_cor_seq_2_3 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_3"), 0);
+        write_int_vector("CLK_COR_SEQ_2_3[9:0]", clk_cor_seq_2_3, 10);
+        auto clk_cor_seq_2_4 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_4"), 0);
+        write_int_vector("CLK_COR_SEQ_2_4[9:0]", clk_cor_seq_2_4, 10);
+
+        auto clk_cor_seq_len = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_LEN"), 0);
+        if (clk_cor_seq_len < 1 || 4 < clk_cor_seq_len)
+            log_error("CLK_COR_SEQ_LEN may only range from 1 to 4, but is: %d\n", clk_cor_seq_len);
+        write_int_vector("CLK_COR_SEQ_LEN[1:0]", clk_cor_seq_len - 1, 2);
+
+        write_str_bool("CLK_CORRECT_USE", "CLK_CORRECT_USE");
+
+        write_str_bool("DEC_MCOMMA_DETECT", "DEC_MCOMMA_DETECT");
+        write_str_bool("DEC_PCOMMA_DETECT", "DEC_PCOMMA_DETECT");
+        write_str_bool("DEC_VALID_COMMA_ONLY", "DEC_VALID_COMMA_ONLY");
+
+        auto dmonitor_cfg = int_or_default(ci->params, ctx->id("DMONITOR_CFG"), 0x008101);
+        write_int_vector("DMONITOR_CFG[23:0]", dmonitor_cfg, 24);
+
+        auto es_clk_phase_sel = bool_or_default(ci->params, ctx->id("ES_CLK_PHASE_SEL"), false);
+        write_bit("ES_CLK_PHASE_SEL[0]", es_clk_phase_sel);
+        auto es_control = int_or_default(ci->params, ctx->id("ES_CONTROL"), 0);
+        write_int_vector("ES_CONTROL[5:0]", es_control, 6);
+        write_str_bool("ES_ERRDET_EN", "ES_ERRDET_EN");
+        write_str_bool("ES_EYE_SCAN_EN", "ES_EYE_SCAN_EN");
+        auto es_horz_offset = int_or_default(ci->params, ctx->id("ES_HORZ_OFFSET"), 0x010);
+        write_int_vector("ES_HORZ_OFFSET[11:0]", es_horz_offset, 12);
+        auto es_pma_cfg = int_or_default(ci->params, ctx->id("ES_PMA_CFG"), 0);
+        write_int_vector("ES_PMA_CFG[9:0]", es_pma_cfg, 10);
+        auto es_prescale = int_or_default(ci->params, ctx->id("ES_PRESCALE"), 0);
+        write_int_vector("ES_PRESCALE[4:0]", es_prescale, 5);
+        auto es_qual_mask = int_or_default(ci->params, ctx->id("ES_QUAL_MASK"), 0);
+        write_int_vector("ES_QUAL_MASK[79:0]", es_qual_mask, 80);
+        auto es_qualifier = int_or_default(ci->params, ctx->id("ES_QUALIFIER"), 0);
+        write_int_vector("ES_QUALIFIER[79:0]", es_qualifier, 80);
+        auto es_sdata_mask = int_or_default(ci->params, ctx->id("ES_SDATA_MASK"), 0);
+        write_int_vector("ES_SDATA_MASK[79:0]", es_sdata_mask, 80);
+        auto es_vert_offset = int_or_default(ci->params, ctx->id("ES_VERT_OFFSET"), 0);
+        write_int_vector("ES_VERT_OFFSET[8:0]", es_vert_offset, 9);
+
+        auto fts_deskew_seq_enable = int_or_default(ci->params, ctx->id("FTS_DESKEW_SEQ_ENABLE"), 0b1111);
+        write_int_vector("FTS_DESKEW_SEQ_ENABLE[3:0]", fts_deskew_seq_enable, 4);
+        auto fts_lane_deskew_cfg = int_or_default(ci->params, ctx->id("FTS_LANE_DESKEW_CFG"), 0);
+        write_int_vector("FTS_LANE_DESKEW_CFG[3:0]", fts_lane_deskew_cfg, 4);
+        write_str_bool("FTS_LANE_DESKEW_EN", "FTS_LANE_DESKEW_EN");
+
+        auto gearbox_mode = int_or_default(ci->params, ctx->id("GEARBOX_MODE"), 0);
+        write_int_vector("GEARBOX_MODE[2:0]", gearbox_mode, 3);
+
+        auto write_inv = [&](std::string name) {
+            write_bit("INV_" + name, bool_or_default(ci->params, ctx->id("IS_" + name + "_INVERTED"), false));
+        };
+        // only these have been fuzzed yet,
+        write_inv("DMONITORCLK");
+        write_inv("DRPCLK");
+        write_inv("RXUSRCLK");
+        write_inv("SIGVALIDCLK");
+        write_inv("TXPHDLYTSTCLK");
+        write_inv("TXUSRCLK");
+        write_inv("CLKRSVD0");
+        write_inv("CLKRSVD1");
+        write_inv("RXUSRCLK2");
+        write_inv("TXUSRCLK2");
+
+        auto loopback_cfg = bool_or_default(ci->params, ctx->id("LOOPBACK_CFG"), false);
+        write_bit("LOOPBACK_CFG[0]", loopback_cfg);
+
+        auto outrefclk_sel_inv = int_or_default(ci->params, ctx->id("OUTREFCLK_SEL_INV"), 0);
+        write_int_vector("OUTREFCLK_SEL_INV[1:0]", outrefclk_sel_inv, 2);
+
+        write_str_bool("PCS_PCIE_EN", "PCS_PCIE_EN");
+
+        auto rsvd_attr = int_or_default(ci->params, ctx->id("PCS_RSVD_ATTR"), 0);
+        write_int_vector("PCS_RSVD_ATTR[47:0]", rsvd_attr, 48);
+
+        auto pd_trans_time_from_p2 = int_or_default(ci->params, ctx->id("PD_TRANS_TIME_FROM_P2"), 0);
+        write_int_vector("PD_TRANS_TIME_FROM_P2[11:0]", pd_trans_time_from_p2, 12);
+        auto pd_trans_time_none_p2 = int_or_default(ci->params, ctx->id("PD_TRANS_TIME_NONE_P2"), 0);
+        write_int_vector("PD_TRANS_TIME_NONE_P2[7:0]", pd_trans_time_none_p2, 8);
+        auto pd_trans_time_to_p2 = int_or_default(ci->params, ctx->id("PD_TRANS_TIME_TO_P2"), 0);
+        write_int_vector("PD_TRANS_TIME_TO_P2[7:0]", pd_trans_time_to_p2, 8);
+
+        auto pma_loopback_cfg = bool_or_default(ci->params, ctx->id("PMA_LOOPBACK_CFG"), false);
+        write_bit("PMA_LOOPBACK_CFG[0]", pma_loopback_cfg);
+        auto pma_rsv = int_or_default(ci->params, ctx->id("PMA_RSV"), 0);
+        write_int_vector("PMA_RSV[31:0]", pma_rsv, 32);
+        auto pma_rsv2 = int_or_default(ci->params, ctx->id("PMA_RSV2"), 0);
+        write_int_vector("PMA_RSV2[31:0]", pma_rsv2, 32);
+        auto pma_rsv3 = int_or_default(ci->params, ctx->id("PMA_RSV3"), 0);
+        write_int_vector("PMA_RSV3[1:0]", pma_rsv3, 2);
+        auto pma_rsv4 = int_or_default(ci->params, ctx->id("PMA_RSV4"), 0);
+        write_int_vector("PMA_RSV4[3:0]", pma_rsv4, 4);
+        auto pma_rsv5 = bool_or_default(ci->params, ctx->id("PMA_RSV5"), false);
+        write_bit("PMA_RSV5[0]", pma_rsv5);
+        auto pma_rsv6 = bool_or_default(ci->params, ctx->id("PMA_RSV6"), false);
+        write_bit("PMA_RSV6[0]", pma_rsv6);
+        auto pma_rsv7 = bool_or_default(ci->params, ctx->id("PMA_RSV7"), false);
+        write_bit("PMA_RSV7[0]", pma_rsv7);
+
+        auto rx_bias_cfg = int_or_default(ci->params, ctx->id("RX_BIAS_CFG"), 0);
+        write_int_vector("RX_BIAS_CFG[15:0]", rx_bias_cfg, 16);
+
+        auto rx_buffer_cfg = int_or_default(ci->params, ctx->id("RX_BUFFER_CFG"), 0);
+        write_int_vector("RX_BUFFER_CFG[5:0]", rx_buffer_cfg, 6);
+        auto rx_clkmux_en = bool_or_default(ci->params, ctx->id("RX_CLKMUX_EN"), false);
+        write_bit("RX_CLKMUX_EN[0]", rx_clkmux_en);
+        auto rx_cm_sel = int_or_default(ci->params, ctx->id("RX_CM_SEL"), 0);
+        write_int_vector("RX_CM_SEL[1:0]", rx_cm_sel, 2);
+        auto rx_cm_trim = int_or_default(ci->params, ctx->id("RX_CM_TRIM"), 0);
+        write_int_vector("RX_CM_TRIM[3:0]", rx_cm_trim, 4);
+        auto rx_data_width = int_or_default(ci->params, ctx->id("RX_DATA_WIDTH"), 0);
+        switch (rx_data_width) {
+            case 16:
+                rx_data_width = 2; break;
+            case 20:
+                rx_data_width = 3; break;
+            case 32:
+                rx_data_width = 4; break;
+            case 40:
+                rx_data_width = 5; break;
+            default:
+                log_error("Invalid RX_DATA_WIDTH parameter '%d' for GTPE2_CHANNEL instance %s\n", rx_data_width, ci->name.c_str(ctx));
+        }
+        write_int_vector("RX_DATA_WIDTH[2:0]", rx_data_width, 3);
+        auto rx_ddi_sel = int_or_default(ci->params, ctx->id("RX_DDI_SEL"), 0);
+        write_int_vector("RX_DDI_SEL[5:0]", rx_ddi_sel, 6);
+        auto rx_debug_cfg = int_or_default(ci->params, ctx->id("RX_DEBUG_CFG"), 0);
+        write_int_vector("RX_DEBUG_CFG[13:0]", rx_debug_cfg, 14);
+        write_str_bool("RX_DEFER_RESET_BUF_EN", "RX_DEFER_RESET_BUF_EN");
+        write_str_bool("RX_DISPERR_SEQ_MATCH", "RX_DISPERR_SEQ_MATCH");
+        auto rx_os_cfg = int_or_default(ci->params, ctx->id("RX_OS_CFG"), 0);
+        write_int_vector("RX_OS_CFG[12:0]", rx_os_cfg, 13);
+        auto rx_sig_valid_dly = int_or_default(ci->params, ctx->id("RX_SIG_VALID_DLY"), 0) - 1;
+        write_int_vector("RX_SIG_VALID_DLY[4:0]", rx_sig_valid_dly, 5);
+        auto rx_xclk_sel = str_or_default(ci->params, ctx->id("RX_XCLK_SEL"), "RXUSR");
+        if (rx_xclk_sel != "RXUSR" && rx_xclk_sel != "RXREC")
+            log_error("RX_XCLK_SEL may only have values 'RXREC' or 'RXUSR' but is: '%s'\n", rx_xclk_sel.c_str());
+        write_bit("RX_XCLK_SEL.RXUSR", rx_xclk_sel == "RXUSR");
+        auto rx_clk25_div = int_or_default(ci->params, ctx->id("RX_CLK25_DIV"), 0) - 1;
+        write_int_vector("RX_CLK25_DIV[4:0]", rx_clk25_div, 5);
+
+        auto rxbuf_addr_mode = str_or_default(ci->params, ctx->id("RXBUF_ADDR_MODE"), "PMA");
+        if (rxbuf_addr_mode != "FULL" && rxbuf_addr_mode != "FAST")
+            log_error("RXBUF_ADDR_MODE may only have values 'FULL' or 'FAST' but is: '%s'\n", rxbuf_addr_mode.c_str());
+        write_bit("RXBUF_ADDR_MODE.FAST", rxbuf_addr_mode == "FAST");
+        auto rxbuf_eidle_hi_cnt = int_or_default(ci->params, ctx->id("RXBUF_EIDLE_HI_CNT"), 0);
+        write_int_vector("RXBUF_EIDLE_HI_CNT[3:0]", rxbuf_eidle_hi_cnt, 4);
+        auto rxbuf_eidle_lo_cnt = int_or_default(ci->params, ctx->id("RXBUF_EIDLE_LO_CNT"), 0);
+        write_int_vector("RXBUF_EIDLE_LO_CNT[3:0]", rxbuf_eidle_lo_cnt, 4);
+        write_str_bool("RXBUF_EN", "RXBUF_EN", "TRUE");
+        write_str_bool("RXBUF_RESET_ON_CB_CHANGE", "RXBUF_RESET_ON_CB_CHANGE", "TRUE");
+        write_str_bool("RXBUF_RESET_ON_COMMAALIGN", "RXBUF_RESET_ON_COMMAALIGN");
+        write_str_bool("RXBUF_RESET_ON_EIDLE", "RXBUF_RESET_ON_EIDLE");
+        write_str_bool("RXBUF_RESET_ON_RATE_CHANGE", "RXBUF_RESET_ON_RATE_CHANGE", "TRUE");
+        write_str_bool("RXBUF_THRESH_OVRD", "RXBUF_THRESH_OVRD");
+        auto rxbuf_thresh_ovflw = int_or_default(ci->params, ctx->id("RXBUF_THRESH_OVFLW"), 0);
+        write_int_vector("RXBUF_THRESH_OVFLW[5:0]", rxbuf_thresh_ovflw, 6);
+        auto rxbuf_thresh_undflw = int_or_default(ci->params, ctx->id("RXBUF_THRESH_UNDFLW"), 0);
+        write_int_vector("RXBUF_THRESH_UNDFLW[5:0]", rxbuf_thresh_undflw, 6);
+        auto rxbufreset_time = int_or_default(ci->params, ctx->id("RXBUFRESET_TIME"), 0);
+        write_int_vector("RXBUFRESET_TIME[4:0]", rxbufreset_time, 5);
+
+        auto rxcdr_cfg = get_or_default(ci->params, ctx->id("RXCDR_CFG"),
+            Property("00000000000000000000000000000000000000000000000000000000000000000000000000000000000"));
+        write_vector("RXCDR_CFG[82:0]", bits_from_string_default(rxcdr_cfg, 83));
+        auto rxcdr_fr_reset_on_eidle = bool_or_default(ci->params, ctx->id("RXCDR_FR_RESET_ON_EIDLE"), false);
+        write_bit("RXCDR_FR_RESET_ON_EIDLE[0]", rxcdr_fr_reset_on_eidle);
+        auto rxcdr_ph_reset_on_eidle = bool_or_default(ci->params, ctx->id("RXCDR_PH_RESET_ON_EIDLE"), false);
+        write_bit("RXCDR_PH_RESET_ON_EIDLE[0]", rxcdr_ph_reset_on_eidle);
+        auto rxcdr_hold_during_eidle = bool_or_default(ci->params, ctx->id("RXCDR_HOLD_DURING_EIDLE"), false);
+        write_bit("RXCDR_HOLD_DURING_EIDLE[0]", rxcdr_hold_during_eidle);
+        auto rxcdr_lock_cfg = int_or_default(ci->params, ctx->id("RXCDR_LOCK_CFG"), 0);
+        write_int_vector("RXCDR_LOCK_CFG[5:0]", rxcdr_lock_cfg, 6);
+        auto rxcdrfreqreset_time = int_or_default(ci->params, ctx->id("RXCDRFREQRESET_TIME"), 0);
+        write_int_vector("RXCDRFREQRESET_TIME[4:0]", rxcdrfreqreset_time, 5);
+        auto rxcdrphreset_time = int_or_default(ci->params, ctx->id("RXCDRPHRESET_TIME"), 0);
+        write_int_vector("RXCDRPHRESET_TIME[4:0]", rxcdrphreset_time, 5);
+
+        auto rxdly_cfg = int_or_default(ci->params, ctx->id("RXDLY_CFG"), 0);
+        write_int_vector("RXDLY_CFG[15:0]", rxdly_cfg, 16);
+        auto rxdly_lcfg = int_or_default(ci->params, ctx->id("RXDLY_LCFG"), 0);
+        write_int_vector("RXDLY_LCFG[8:0]", rxdly_lcfg, 9);
+        auto rxdly_tap_cfg = int_or_default(ci->params, ctx->id("RXDLY_TAP_CFG"), 0);
+        write_int_vector("RXDLY_TAP_CFG[15:0]", rxdly_tap_cfg, 16);
+
+        write_str_bool("RXGEARBOX_EN", "RXGEARBOX_EN");
+
+        auto rxiscanreset_time = int_or_default(ci->params, ctx->id("RXISCANRESET_TIME"), 0);
+        write_int_vector("RXISCANRESET_TIME[4:0]", rxiscanreset_time, 5);
+
+        auto rxlpm_bias_startup_disable = bool_or_default(ci->params, ctx->id("RXLPM_BIAS_STARTUP_DISABLE"), false);
+        write_bit("RXLPM_BIAS_STARTUP_DISABLE[0]", rxlpm_bias_startup_disable);
+        auto rxlpm_cfg = int_or_default(ci->params, ctx->id("RXLPM_CFG"), 0);
+        write_int_vector("RXLPM_CFG[3:0]", rxlpm_cfg, 4);
+        auto rxlpm_cfg1 = int_or_default(ci->params, ctx->id("RXLPM_CFG1"), 0);
+        write_int_vector("RXLPM_CFG1[0]", rxlpm_cfg1, 1);
+        auto rxlpm_cm_cfg = int_or_default(ci->params, ctx->id("RXLPM_CM_CFG"), 0);
+        write_int_vector("RXLPM_CM_CFG[0]", rxlpm_cm_cfg, 1);
+        auto rxlpm_gc_cfg = int_or_default(ci->params, ctx->id("RXLPM_GC_CFG"), 0);
+        write_int_vector("RXLPM_GC_CFG[8:0]", rxlpm_gc_cfg, 9);
+        auto rxlpm_gc_cfg2 = int_or_default(ci->params, ctx->id("RXLPM_GC_CFG2"), 0);
+        write_int_vector("RXLPM_GC_CFG2[2:0]", rxlpm_gc_cfg2, 3);
+        auto rxlpm_hf_cfg = int_or_default(ci->params, ctx->id("RXLPM_HF_CFG"), 0);
+        write_int_vector("RXLPM_HF_CFG[13:0]", rxlpm_hf_cfg, 14);
+        auto rxlpm_hf_cfg2 = int_or_default(ci->params, ctx->id("RXLPM_HF_CFG2"), 0);
+        write_int_vector("RXLPM_HF_CFG2[4:0]", rxlpm_hf_cfg2, 5);
+        auto rxlpm_hf_cfg3 = int_or_default(ci->params, ctx->id("RXLPM_HF_CFG3"), 0);
+        write_int_vector("RXLPM_HF_CFG3[3:0]", rxlpm_hf_cfg3, 4);
+        auto rxlpm_hold_during_eidle = bool_or_default(ci->params, ctx->id("RXLPM_HOLD_DURING_EIDLE"), false);
+        write_bit("RXLPM_HOLD_DURING_EIDLE[0]", rxlpm_hold_during_eidle);
+        auto rxlpm_incm_cfg = bool_or_default(ci->params, ctx->id("RXLPM_INCM_CFG"), false);
+        write_bit("RXLPM_INCM_CFG[0]", rxlpm_incm_cfg);
+        auto rxlpm_ipcm_cfg = bool_or_default(ci->params, ctx->id("RXLPM_IPCM_CFG"), false);
+        write_bit("RXLPM_IPCM_CFG[0]", rxlpm_ipcm_cfg);
+        auto rxlpm_lf_cfg = int_or_default(ci->params, ctx->id("RXLPM_LF_CFG"), 0);
+        write_int_vector("RXLPM_LF_CFG[17:0]", rxlpm_lf_cfg, 18);
+        auto rxlpm_lf_cfg2 = int_or_default(ci->params, ctx->id("RXLPM_LF_CFG2"), 0);
+        write_int_vector("RXLPM_LF_CFG2[4:0]", rxlpm_lf_cfg2, 5);
+        auto rxlpm_osint_cfg = int_or_default(ci->params, ctx->id("RXLPM_OSINT_CFG"), 0);
+        write_int_vector("RXLPM_OSINT_CFG[2:0]", rxlpm_osint_cfg, 3);
+        auto rxlpmreset_time = int_or_default(ci->params, ctx->id("RXLPMRESET_TIME"), 0);
+        write_int_vector("RXLPMRESET_TIME[6:0]", rxlpmreset_time, 7);
+
+        auto rxoob_cfg = int_or_default(ci->params, ctx->id("RXOOB_CFG"), 0);
+        write_int_vector("RXOOB_CFG[6:0]", rxoob_cfg, 7);
+        auto rxoob_clk_cfg = str_or_default(ci->params, ctx->id("RXOOB_CLK_CFG"), "PMA");
+        if (rxoob_clk_cfg != "FABRIC" && rxoob_clk_cfg != "PMA")
+            log_error("RXOOB_CLK_CFG may only have values 'FABRIC' or 'PMA' but is: '%s'\n", rxoob_clk_cfg.c_str());
+        write_bit("RXOOB_CLK_CFG.FABRIC", rxoob_clk_cfg == "FABRIC");
+
+        auto rxoscalreset_time = int_or_default(ci->params, ctx->id("RXOSCALRESET_TIME"), 0);
+        write_int_vector("RXOSCALRESET_TIME[4:0]", rxoscalreset_time, 5);
+        auto rxoscalreset_timeout = int_or_default(ci->params, ctx->id("RXOSCALRESET_TIMEOUT"), 0);
+        write_int_vector("RXOSCALRESET_TIMEOUT[4:0]", rxoscalreset_timeout, 5);
+
+        auto rxout_div = std::log2(int_or_default(ci->params, ctx->id("RXOUT_DIV"), 1));
+        write_int_vector("RXOUT_DIV[1:0]", rxout_div, 2);
+
+        auto rxpcsreset_time = int_or_default(ci->params, ctx->id("RXPCSRESET_TIME"), 0);
+        write_int_vector("RXPCSRESET_TIME[4:0]", rxpcsreset_time, 5);
+
+        auto rxph_cfg = int_or_default(ci->params, ctx->id("RXPH_CFG"), 0);
+        write_int_vector("RXPH_CFG[23:0]", rxph_cfg, 24);
+        auto rxph_monitor_sel = int_or_default(ci->params, ctx->id("RXPH_MONITOR_SEL"), 0);
+        write_int_vector("RXPH_MONITOR_SEL[4:0]", rxph_monitor_sel, 5);
+        auto rxphdly_cfg = int_or_default(ci->params, ctx->id("RXPHDLY_CFG"), 0);
+        write_int_vector("RXPHDLY_CFG[23:0]", rxphdly_cfg, 24);
+
+        auto rxpi_cfg0 = int_or_default(ci->params, ctx->id("RXPI_CFG0"), 0);
+        write_int_vector("RXPI_CFG0[2:0]", rxpi_cfg0, 3);
+        auto rxpi_cfg1 = bool_or_default(ci->params, ctx->id("RXPI_CFG1"), false);
+        write_bit("RXPI_CFG1[0]", rxpi_cfg1);
+        auto rxpi_cfg2 = bool_or_default(ci->params, ctx->id("RXPI_CFG2"), false);
+        write_bit("RXPI_CFG2[0]", rxpi_cfg2);
+
+        auto rxpmareset_time = int_or_default(ci->params, ctx->id("RXPMARESET_TIME"), 0);
+        write_int_vector("RXPMARESET_TIME[4:0]", rxpmareset_time, 5);
+
+        auto rxprbs_err_loopback = bool_or_default(ci->params, ctx->id("RXPRBS_ERR_LOOPBACK"), false);
+        write_bit("RXPRBS_ERR_LOOPBACK[0]", rxprbs_err_loopback);
+
+        auto rxslide_auto_wait = int_or_default(ci->params, ctx->id("RXSLIDE_AUTO_WAIT"), 7);
+        write_int_vector("RXSLIDE_AUTO_WAIT[3:0]", rxslide_auto_wait, 4);
+        auto rxslide_mode = str_or_default(ci->params, ctx->id("RXSLIDE_MODE"), "OFF");
+        if (rxslide_mode != "OFF" && rxslide_mode != "AUTO" && rxslide_mode != "PCS" && rxslide_mode != "PMA")
+            log_error("RXSLIDE_MODE may only have values 'OFF', 'AUTO', 'PCS' or 'PMA' but is: '%s'\n", rxslide_mode.c_str());
+        write_bit("RXSLIDE_MODE.AUTO", rxslide_mode == "AUTO");
+        write_bit("RXSLIDE_MODE.PCS",  rxslide_mode == "PCS");
+        write_bit("RXSLIDE_MODE.PMA",  rxslide_mode == "PMA");
+
+        auto rxsync_multilane = bool_or_default(ci->params, ctx->id("RXSYNC_MULTILANE"), false);
+        write_bit("RXSYNC_MULTILANE[0]", rxsync_multilane);
+        auto rxsync_ovrd = bool_or_default(ci->params, ctx->id("RXSYNC_OVRD"), false);
+        write_bit("RXSYNC_OVRD[0]", rxsync_ovrd);
+        auto rxsync_skip_da = bool_or_default(ci->params, ctx->id("RXSYNC_SKIP_DA"), false);
+        write_bit("RXSYNC_SKIP_DA[0]", rxsync_skip_da);
+
+        auto sas_max_com = int_or_default(ci->params, ctx->id("SAS_MAX_COM"), 0);
+        write_int_vector("SAS_MAX_COM[6:0]", sas_max_com, 7);
+        auto sas_min_com = int_or_default(ci->params, ctx->id("SAS_MIN_COM"), 0);
+        write_int_vector("SAS_MIN_COM[6:0]", sas_min_com, 7);
+
+        auto sata_burst_seq_len = int_or_default(ci->params, ctx->id("SATA_BURST_SEQ_LEN"), 0);
+        write_int_vector("SATA_BURST_SEQ_LEN[3:0]", sata_burst_seq_len, 4);
+        auto sata_burst_val = int_or_default(ci->params, ctx->id("SATA_BURST_VAL"), 0);
+        write_int_vector("SATA_BURST_VAL[2:0]", sata_burst_val, 3);
+        auto sata_eidle_val = int_or_default(ci->params, ctx->id("SATA_EIDLE_VAL"), 0);
+        write_int_vector("SATA_EIDLE_VAL[2:0]", sata_eidle_val, 3);
+        auto sata_max_burst = int_or_default(ci->params, ctx->id("SATA_MAX_BURST"), 0);
+        write_int_vector("SATA_MAX_BURST[5:0]", sata_max_burst, 6);
+        auto sata_max_init = int_or_default(ci->params, ctx->id("SATA_MAX_INIT"), 0);
+        write_int_vector("SATA_MAX_INIT[5:0]", sata_max_init, 6);
+        auto sata_max_wake = int_or_default(ci->params, ctx->id("SATA_MAX_WAKE"), 0);
+        write_int_vector("SATA_MAX_WAKE[5:0]", sata_max_wake, 6);
+        auto sata_min_burst = int_or_default(ci->params, ctx->id("SATA_MIN_BURST"), 0);
+        write_int_vector("SATA_MIN_BURST[5:0]", sata_min_burst, 6);
+        auto sata_min_init = int_or_default(ci->params, ctx->id("SATA_MIN_INIT"), 0);
+        write_int_vector("SATA_MIN_INIT[5:0]", sata_min_init, 6);
+        auto sata_min_wake = int_or_default(ci->params, ctx->id("SATA_MIN_WAKE"), 0);
+        write_int_vector("SATA_MIN_WAKE[5:0]", sata_min_wake, 6);
+        auto sata_pll_cfg = str_or_default(ci->params, ctx->id("SATA_PLL_CFG"), "VCO_3000MHZ");
+        if (sata_pll_cfg != "VCO_3000MHZ" && sata_pll_cfg != "VCO_1500MHZ" && sata_pll_cfg != "VCO_750MHZ")
+            log_error("SATA_PLL_CFG may only have values 'VCO_3000MHZ', 'VCO_1500MHZ' or 'VCO_750MHZ' but is: '%s'\n", sata_pll_cfg.c_str());
+        write_bit("SATA_PLL_CFG.VCO_1500MHZ", sata_pll_cfg == "VCO_1500MHZ");
+        write_bit("SATA_PLL_CFG.VCO_750MHZ",  sata_pll_cfg == "VCO_750MHZ");
+
+        write_str_bool("SHOW_REALIGN_COMMA", "SHOW_REALIGN_COMMA");
+
+        auto term_rcal_cfg = int_or_default(ci->params, ctx->id("TERM_RCAL_CFG"), 0);
+        write_int_vector("TERM_RCAL_CFG[14:0]", term_rcal_cfg, 15);
+        auto term_rcal_ovrd = int_or_default(ci->params, ctx->id("TERM_RCAL_OVRD"), 0);
+        write_int_vector("TERM_RCAL_OVRD[2:0]", term_rcal_ovrd, 3);
+
+        auto trans_time_rate = int_or_default(ci->params, ctx->id("TRANS_TIME_RATE"), 0);
+        write_int_vector("TRANS_TIME_RATE[7:0]", trans_time_rate, 8);
+
+        auto tst_rsv = int_or_default(ci->params, ctx->id("TST_RSV"), 0);
+        write_int_vector("TST_RSV[31:0]", tst_rsv, 32);
+
+        auto tx_clkmux_en = bool_or_default(ci->params, ctx->id("TX_CLKMUX_EN"), false);
+        write_bit("TX_CLKMUX_EN[0]", tx_clkmux_en);
+        auto tx_data_width = int_or_default(ci->params, ctx->id("TX_DATA_WIDTH"), 0);
+        switch (tx_data_width) {
+            case 16:
+                tx_data_width = 2; break;
+            case 20:
+                tx_data_width = 3; break;
+            case 32:
+                tx_data_width = 4; break;
+            case 40:
+                tx_data_width = 5; break;
+            default:
+                log_error("Invalid TX_DATA_WIDTH parameter '%d' for GTPE2_CHANNEL instance %s\n", tx_data_width, ci->name.c_str(ctx));
+        }
+        write_int_vector("TX_DATA_WIDTH[2:0]", tx_data_width, 3);
+
+        auto tx_drive_mode = str_or_default(ci->params, ctx->id("TX_DRIVE_MODE"), "DIRECT");
+        if (tx_drive_mode != "DIRECT" && tx_drive_mode != "PIPE")
+            log_error("TX_DRIVE_MODE may only have values 'PIPE' or 'DIRECT' but is: '%s'\n", tx_drive_mode.c_str());
+        write_bit("TX_DRIVE_MODE.PIPE", tx_drive_mode == "PIPE");
+
+        auto tx_eidle_assert_delay = int_or_default(ci->params, ctx->id("TX_EIDLE_ASSERT_DELAY"), 0);
+        write_int_vector("TX_EIDLE_ASSERT_DELAY[2:0]", tx_eidle_assert_delay, 3);
+        auto tx_eidle_deassert_delay = int_or_default(ci->params, ctx->id("TX_EIDLE_DEASSERT_DELAY"), 0);
+        write_int_vector("TX_EIDLE_DEASSERT_DELAY[2:0]", tx_eidle_deassert_delay, 3);
+
+        write_str_bool("TX_LOOPBACK_DRIVE_HIZ", "TX_LOOPBACK_DRIVE_HIZ");
+
+        auto tx_maincursor_sel = bool_or_default(ci->params, ctx->id("TX_MAINCURSOR_SEL"), false);
+        write_bit("TX_MAINCURSOR_SEL[0]", tx_maincursor_sel);
+        auto tx_margin_full_0 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_0"), 0b1001111);
+        write_int_vector("TX_MARGIN_FULL_0[6:0]", tx_margin_full_0, 7);
+        auto tx_margin_full_1 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_1"), 0b1001111);
+        write_int_vector("TX_MARGIN_FULL_1[6:0]", tx_margin_full_1, 7);
+        auto tx_margin_full_2 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_2"), 0b1001111);
+        write_int_vector("TX_MARGIN_FULL_2[6:0]", tx_margin_full_2, 7);
+        auto tx_margin_full_3 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_3"), 0b1000001);
+        write_int_vector("TX_MARGIN_FULL_3[6:0]", tx_margin_full_3, 7);
+        auto tx_margin_full_4 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_4"), 0b1000000);
+        write_int_vector("TX_MARGIN_FULL_4[6:0]", tx_margin_full_4, 7);
+        auto tx_margin_low_0 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_0"), 0b1000111);
+        write_int_vector("TX_MARGIN_LOW_0[6:0]", tx_margin_low_0, 7);
+        auto tx_margin_low_1 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_1"), 0b1000110);
+        write_int_vector("TX_MARGIN_LOW_1[6:0]", tx_margin_low_1, 7);
+        auto tx_margin_low_2 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_2"), 0b1000100);
+        write_int_vector("TX_MARGIN_LOW_2[6:0]", tx_margin_low_2, 7);
+        auto tx_margin_low_3 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_3"), 0b1000000);
+        write_int_vector("TX_MARGIN_LOW_3[6:0]", tx_margin_low_3, 7);
+        auto tx_margin_low_4 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_4"), 0b1000000);
+        write_int_vector("TX_MARGIN_LOW_4[6:0]", tx_margin_low_4, 7);
+        auto tx_predriver_mode = bool_or_default(ci->params, ctx->id("TX_PREDRIVER_MODE"), false);
+        write_bit("TX_PREDRIVER_MODE", tx_predriver_mode);
+        auto tx_rxdetect_cfg = int_or_default(ci->params, ctx->id("TX_RXDETECT_CFG"), 0);
+        write_int_vector("TX_RXDETECT_CFG[13:0]", tx_rxdetect_cfg, 14);
+        auto tx_rxdetect_ref = int_or_default(ci->params, ctx->id("TX_RXDETECT_REF"), 0);
+        write_int_vector("TX_RXDETECT_REF[2:0]", tx_rxdetect_ref, 3);
+        auto tx_xclk_sel = str_or_default(ci->params, ctx->id("TX_XCLK_SEL"), "TXUSR");
+        if (tx_xclk_sel != "TXUSR" && tx_xclk_sel != "TXOUT")
+            log_error("TX_XCLK_SEL may only have values 'TXOUT' or 'TXUSR' but is: '%s'\n", tx_xclk_sel.c_str());
+        write_bit("TX_XCLK_SEL.TXUSR", tx_xclk_sel == "TXUSR");
+        auto tx_clk25_div = int_or_default(ci->params, ctx->id("TX_CLK25_DIV"), 0) - 1;
+        write_int_vector("TX_CLK25_DIV[4:0]", tx_clk25_div, 5);
+        auto tx_deemph0 = int_or_default(ci->params, ctx->id("TX_DEEMPH0"), 0);
+        write_int_vector("TX_DEEMPH0[5:0]", tx_deemph0, 6);
+        auto tx_deemph1 = int_or_default(ci->params, ctx->id("TX_DEEMPH1"), 0);
+        write_int_vector("TX_DEEMPH1[5:0]", tx_deemph1, 6);
+        write_str_bool("TXBUF_EN", "TXBUF_EN");
+        write_str_bool("TXBUF_RESET_ON_RATE_CHANGE", "TXBUF_RESET_ON_RATE_CHANGE", "TRUE");
+        auto txdly_cfg = int_or_default(ci->params, ctx->id("TXDLY_CFG"), 0);
+        write_int_vector("TXDLY_CFG[15:0]", txdly_cfg, 16);
+        auto txdly_lcfg = int_or_default(ci->params, ctx->id("TXDLY_LCFG"), 0);
+        write_int_vector("TXDLY_LCFG[8:0]", txdly_lcfg, 9);
+        auto txdly_tap_cfg = int_or_default(ci->params, ctx->id("TXDLY_TAP_CFG"), 0);
+        write_int_vector("TXDLY_TAP_CFG[15:0]", txdly_tap_cfg, 16);
+        write_str_bool("TXGEARBOX_EN", "TXGEARBOX_EN");
+        auto txoob_cfg = bool_or_default(ci->params, ctx->id("TXOOB_CFG"), false);
+        write_bit("TXOOB_CFG[0]", txoob_cfg);
+        auto txout_div = std::log2(int_or_default(ci->params, ctx->id("TXOUT_DIV"), 1));
+        write_int_vector("TXOUT_DIV[1:0]", txout_div, 2);
+        auto txpcsreset_time = int_or_default(ci->params, ctx->id("TXPCSRESET_TIME"), 0);
+        write_int_vector("TXPCSRESET_TIME[4:0]", txpcsreset_time, 5);
+
+        auto txph_cfg = int_or_default(ci->params, ctx->id("TXPH_CFG"), 0);
+        write_int_vector("TXPH_CFG[15:0]", txph_cfg, 16);
+        auto txph_monitor_sel = int_or_default(ci->params, ctx->id("TXPH_MONITOR_SEL"), 0);
+        write_int_vector("TXPH_MONITOR_SEL[4:0]", txph_monitor_sel, 5);
+        auto txphdly_cfg = int_or_default(ci->params, ctx->id("TXPHDLY_CFG"), 0);
+        write_int_vector("TXPHDLY_CFG[23:0]", txphdly_cfg, 24);
+
+        auto txpi_grey_sel = bool_or_default(ci->params, ctx->id("TXPI_GREY_SEL"), false);
+        write_bit("TXPI_GREY_SEL[0]", txpi_grey_sel);
+        auto txpi_invstrobe_sel = bool_or_default(ci->params, ctx->id("TXPI_INVSTROBE_SEL"), false);
+        write_bit("TXPI_INVSTROBE_SEL[0]", txpi_invstrobe_sel);
+        auto txpi_ppm_cfg = int_or_default(ci->params, ctx->id("TXPI_PPM_CFG"), 0);
+        write_int_vector("TXPI_PPM_CFG[7:0]", txpi_ppm_cfg, 8);
+        auto txpi_ppmclk_sel = str_or_default(ci->params, ctx->id("TXPI_PPMCLK_SEL"), "TXUSRCLK");
+        if (txpi_ppmclk_sel != "TXUSRCLK" && txpi_ppmclk_sel != "TXUSRCLK2")
+            log_error("TXPI_PPMCLK_SEL may only have values 'TXUSRCLK2' or 'TXUSRCLK' but is: '%s'\n", txpi_ppmclk_sel.c_str());
+        write_bit("TXPI_PPMCLK_SEL.TXUSRCLK2", txpi_ppmclk_sel == "TXUSRCLK2");
+        auto txpi_synfreq_ppm = int_or_default(ci->params, ctx->id("TXPI_SYNFREQ_PPM"), 0);
+        if (txpi_synfreq_ppm == 0) log_error("TXPI_SYNFREQ_PPM must not be zero!\n");
+        write_int_vector("TXPI_SYNFREQ_PPM[2:0]", txpi_synfreq_ppm, 3);
+        auto txpi_cfg0 = int_or_default(ci->params, ctx->id("TXPI_CFG0"), 0);
+        write_int_vector("TXPI_CFG0[1:0]", txpi_cfg0, 2);
+        auto txpi_cfg1 = int_or_default(ci->params, ctx->id("TXPI_CFG1"), 0);
+        write_int_vector("TXPI_CFG1[1:0]", txpi_cfg1, 2);
+        auto txpi_cfg2 = int_or_default(ci->params, ctx->id("TXPI_CFG2"), 0);
+        write_int_vector("TXPI_CFG2[1:0]", txpi_cfg2, 2);
+        auto txpi_cfg3 = bool_or_default(ci->params, ctx->id("TXPI_CFG3"), false);
+        write_bit("TXPI_CFG3[0]", txpi_cfg3);
+        auto txpi_cfg4 = bool_or_default(ci->params, ctx->id("TXPI_CFG4"), false);
+        write_bit("TXPI_CFG4[0]", txpi_cfg4);
+        auto txpi_cfg5 = int_or_default(ci->params, ctx->id("TXPI_CFG5"), 0);
+        write_int_vector("TXPI_CFG5[1:0]", txpi_cfg5, 2);
+        auto txpmareset_time = int_or_default(ci->params, ctx->id("TXPMARESET_TIME"), 0);
+        write_int_vector("TXPMARESET_TIME[4:0]", txpmareset_time, 5);
+
+        auto txsync_multilane = bool_or_default(ci->params, ctx->id("TXSYNC_MULTILANE"), false);
+        write_bit("TXSYNC_MULTILANE[0]", txsync_multilane);
+        auto txsync_ovrd = bool_or_default(ci->params, ctx->id("TXSYNC_OVRD"), false);
+        write_bit("TXSYNC_OVRD[0]", txsync_ovrd);
+        auto txsync_skip_da = bool_or_default(ci->params, ctx->id("TXSYNC_SKIP_DA"), false);
+        write_bit("TXSYNC_SKIP_DA[0]", txsync_skip_da);
+
+        auto ucodeer_clr = bool_or_default(ci->params, ctx->id("UCODEER_CLR"), false);
+        write_bit("UCODEER_CLR[0]", ucodeer_clr);
+
+        auto use_pcs_clk_phase_sel = bool_or_default(ci->params, ctx->id("USE_PCS_CLK_PHASE_SEL"), false);
+        write_bit("USE_PCS_CLK_PHASE_SEL[0]", use_pcs_clk_phase_sel);
+
+        pop(); // GTPE2_CHANNEL
+        pop(); // tile name
+    }
+    void write_gtx_pll(CellInfo *ci)
+    {
+        push(uarch->tile_name(ci->bel.tile));
+
+        push("GTXE2_COMMON");
+        write_bit("IN_USE");
+        write_bit("ENABLE_DRP", bool_or_default(ci->params, ctx->id("_DRPCLK_USED"), false));
+        write_bit("BOTH_GTREFCLK_USED", bool_or_default(ci->params, ctx->id("_BOTH_GTREFCLK_USED"), false));
+        write_bit("GTREFCLK0_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK0_USED"), false));
+        write_bit("GTREFCLK1_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK1_USED"), false));
+        if (bool_or_default(ci->params, ctx->id("_GTGREFCLK_USED"), false)) {
+            write_bit("GTREFCLK0_USED");
+            write_bit("GTREFCLK1_USED");
+        }
+        auto clkswing_cfg = int_or_default(ci->params, ctx->id("CLKSWING_CFG"), 3);
+        if (clkswing_cfg != 3) log_warning("%s/%s: According to ug476, CLK should always be 0b11\n",
+                                           ci->hierpath.c_str(ctx), ci->name.c_str(ctx));
+        write_int_vector("IBUFDS_GTE2.CLKSWING_CFG[1:0]", clkswing_cfg, 2);
+        write_bit("INV_DRPCLK", bool_or_default(ci->params, ctx->id("IS_DRPCLK_INVERTED")));
+        write_bit("INV_QPLLLOCKDETCLK", bool_or_default(ci->params, ctx->id("IS_QPLLLOCKDETCLK_INVERTED")));
+
+        write_bit("QPLL_DMONITOR_SEL[0]", bool_or_default(ci->params, ctx->id("QPLL_DMONITOR_SEL")));
+        
+        auto bias_cfg_found = ci->params.find(ctx->id("BIAS_CFG"));
+        auto bias_cfg = bias_cfg_found == ci->params.end() ? 0b1000000000000000000000000000001000000000000UL : bias_cfg_found->second.as_int64();
+        write_int_vector("BIAS_CFG[63:0]", bias_cfg, 64);
+        auto common_cfg = int_or_default(ci->params, ctx->id("COMMON_CFG"), 0);
+        write_int_vector("COMMON_CFG[31:0]", common_cfg, 32);
+
+        // according to ug476, these attributes contain magic undocumented and reserved wizard values
+        // TODO: check values
+        write_int_vector("QPLL_CFG[26:0]", 0b11010000000000111000001, 27);
+        write_int_vector("QPLL_CLKOUT_CFG[3:0]", 0, 4);
+        write_int_vector("QPLL_COARSE_FREQ_OVRD[5:0]", 0b10000, 6);
+        auto coarse_freq_ovrd_en = int_or_default(ci->params, ctx->id("QPLL_COARSE_FREQ_OVRD_EN"), 0);
+        if (coarse_freq_ovrd_en > 0)
+            log_warning("According to UG476, the QPLL_COARSE_FREQ_OVRD_EN attribute must be 0, but it is not. Be sure you know what you are doing.");
+        write_bit("QPLL_COARSE_FREQ_OVRD_EN[0]", coarse_freq_ovrd_en >= 1);
+        write_int_vector("QPLL_INIT_CFG[23:0]", 0b110, 24);
+        write_int_vector("QPLL_LOCK_CFG[15:0]", 0b10000111101000, 16);
+        write_int_vector("QPLL_LPF[3:0]", 0b1111, 4);
+        write_int_vector("QPLL_CP[9:0]", 0b11111, 10);
+        auto cp_monitor_en = int_or_default(ci->params, ctx->id("QPLL_CP_MONITOR_EN"), 0);
+        if (cp_monitor_en > 0)
+            log_warning("According to UG476, the QPLL_CP_MONITOR_EN attribute must be 0, but it is not. Be sure you know what you are doing.");
+        write_bit("QPLL_CP_MONITOR_EN[0]", cp_monitor_en >= 1);
+        write_bit("QPLL_DMONITOR_SEL[0]", 0); // TODO: find real vivado default value
+
+        auto qpll_refclk_div = int_or_default(ci->params, ctx->id("QPLL_REFCLK_DIV"), 1);
+        if (qpll_refclk_div < 1 || qpll_refclk_div > 4)
+            log_error("QPLL_REFCLK_DIV can only range from 1 to 4, but is: %d", qpll_refclk_div);
+        auto real_qpll_refclk_div = qpll_refclk_div == 1 ? 16 : qpll_refclk_div - 2;
+        write_int_vector("QPLL_REFCLK_DIV[4:0]", real_qpll_refclk_div, 5);
+
+        auto qpll_fbdiv = int_or_default(ci->params, ctx->id("QPLL_FBDIV"), 1);
+        write_int_vector("QPLL_FBDIV[9:0]", qpll_fbdiv, 10);
+
+        auto fbdiv_monitor_en = int_or_default(ci->params, ctx->id("FBDIV_MONITOR_EN"), 0);
+        if (fbdiv_monitor_en > 0)
+            log_warning("According to UG476, the QPLL_FBDIV_MONITOR_EN attribute must be 0, but it is 1. Be sure you know what you are doing.");
+        write_bit("QPLL_FBDIV_MONITOR_EN[0]", fbdiv_monitor_en >= 1);
+
+        auto qpll_fbdiv_ratio = int_or_default(ci->params, ctx->id("QPLL_FBDIV_RATIO"), 1);
+        if (qpll_fbdiv_ratio > 1)
+            log_error("QPLL_FBDIV_ratio can only be 0 or 1, but is: %d", qpll_fbdiv_ratio);
+        write_bit("QPLL_FBDIV_RATIO[0]", qpll_fbdiv_ratio == 1);
+
+        auto pll_clkout_cfg = int_or_default(ci->params, ctx->id("PLL_CLKOUT_CFG"), 0);
+        write_int_vector("PLL_CLKOUT_CFG[3:0]", pll_clkout_cfg, 4);
+
+        pop(); // GTXE2_COMMON
+        pop(); // tile name
+    }
+    void write_gtx_channel(CellInfo *ci)
+    {
+        push(uarch->tile_name(ci->bel.tile));
+        push("GTXE2_CHANNEL");
+
+        write_bit("IN_USE");
+
+        auto write_str_bool = [&](std::string attribute, std::string bit, std::string deflt = "FALSE") {
+            auto val = str_or_default(ci->params, ctx->id(attribute), deflt);
+            boost::algorithm::to_upper(val);
+            write_bit(bit, val == "TRUE");
+        };
+
+        write_str_bool("ALIGN_COMMA_DOUBLE", "ALIGN_COMMA_DOUBLE");
+
+        auto align_comma_enable = int_or_default(ci->params, ctx->id("ALIGN_COMMA_ENABLE"), 0b1111111111);
+        write_int_vector("ALIGN_COMMA_ENABLE[9:0]", align_comma_enable, 10);
+
+        auto align_comma_word = int_or_default(ci->params, ctx->id("ALIGN_COMMA_WORD"), 1);
+        if (!(align_comma_word == 1 || align_comma_word == 2 || align_comma_word == 4))
+            log_error("ALIGN_COMMA_WORD may only be 1, 2 or 4 but is: %d\n", align_comma_word);
+        write_int_vector("ALIGN_COMMA_WORD[2:0]", align_comma_word, 3);
+
+        write_str_bool("ALIGN_MCOMMA_DET", "ALIGN_MCOMMA_DET");
+        auto align_mcomma_value = int_or_default(ci->params, ctx->id("ALIGN_MCOMMA_VALUE"), 0b1010000011);
+        write_int_vector("ALIGN_MCOMMA_VALUE[9:0]", align_mcomma_value, 10);
+
+        write_str_bool("ALIGN_PCOMMA_DET", "ALIGN_PCOMMA_DET");
+        auto align_pcomma_value = int_or_default(ci->params, ctx->id("ALIGN_PCOMMA_VALUE"), 0b0101111100);
+        write_int_vector("ALIGN_PCOMMA_VALUE[9:0]", align_pcomma_value, 10);
+
+        auto cbcc_data_source_sel = str_or_default(ci->params, ctx->id("CBCC_DATA_SOURCE_SEL"), "DECODED");
+        if (cbcc_data_source_sel == "DECODED") write_bit("CBCC_DATA_SOURCE_SEL.DECODED");
+
+        write_str_bool("CHAN_BOND_KEEP_ALIGN", "CHAN_BOND_KEEP_ALIGN");
+        auto chan_bond_max_skew = int_or_default(ci->params, ctx->id("CHAN_BOND_MAX_SKEW"), 0);
+        if (chan_bond_max_skew < 1 || 14 < chan_bond_max_skew)
+            log_error("CHAN_BOND_MAX_SKEW may only range from 1 to 14, but is: %d\n", chan_bond_max_skew);
+        write_int_vector("CHAN_BOND_MAX_SKEW[3:0]", chan_bond_max_skew, 4);
+
+        auto chan_bond_seq_1_enable = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_ENABLE"), 0);
+        write_int_vector("CHAN_BOND_SEQ_1_ENABLE[3:0]", chan_bond_seq_1_enable, 4);
+        auto chan_bond_seq_1_1 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_1"), 0);
+        write_int_vector("CHAN_BOND_SEQ_1_1[9:0]", chan_bond_seq_1_1, 10);
+        auto chan_bond_seq_1_2 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_2"), 0);
+        write_int_vector("CHAN_BOND_SEQ_1_2[9:0]", chan_bond_seq_1_2, 10);
+        auto chan_bond_seq_1_3 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_3"), 0);
+        write_int_vector("CHAN_BOND_SEQ_1_3[9:0]", chan_bond_seq_1_3, 10);
+        auto chan_bond_seq_1_4 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_4"), 0);
+        write_int_vector("CHAN_BOND_SEQ_1_4[9:0]", chan_bond_seq_1_4, 10);
+
+        write_str_bool("CHAN_BOND_SEQ_2_USE", "CHAN_BOND_SEQ_2_USE");
+        auto chan_bond_seq_2_enable = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_ENABLE"), 0);
+        write_int_vector("CHAN_BOND_SEQ_2_ENABLE[3:0]", chan_bond_seq_2_enable, 4);
+        auto chan_bond_seq_2_1 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_1"), 0);
+        write_int_vector("CHAN_BOND_SEQ_2_1[9:0]", chan_bond_seq_2_1, 10);
+        auto chan_bond_seq_2_2 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_2"), 0);
+        write_int_vector("CHAN_BOND_SEQ_2_2[9:0]", chan_bond_seq_2_2, 10);
+        auto chan_bond_seq_2_3 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_3"), 0);
+        write_int_vector("CHAN_BOND_SEQ_2_3[9:0]", chan_bond_seq_2_3, 10);
+        auto chan_bond_seq_2_4 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_4"), 0);
+        write_int_vector("CHAN_BOND_SEQ_2_4[9:0]", chan_bond_seq_2_4, 10);
+
+        auto chan_bond_seq_len = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_LEN"), 0);
+        if (!(chan_bond_seq_len == 1 || chan_bond_seq_len == 2 || chan_bond_seq_len == 4))
+            log_error("CHAN_BOND_SEQ_LEN may only be 1, 2 or 4, but is: %d\n", chan_bond_seq_len);
+        write_int_vector("CHAN_BOND_SEQ_LEN[1:0]", chan_bond_seq_len - 1, 2);
+
+        write_str_bool("CLK_COR_KEEP_IDLE", "CLK_COR_KEEP_IDLE");
+        auto clk_cor_max_lat = int_or_default(ci->params, ctx->id("CLK_COR_MAX_LAT"), 0);
+        write_int_vector("CLK_COR_MAX_LAT[5:0]", clk_cor_max_lat, 6);
+        auto clk_cor_min_lat = int_or_default(ci->params, ctx->id("CLK_COR_MIN_LAT"), 0);
+        write_int_vector("CLK_COR_MIN_LAT[5:0]", clk_cor_min_lat, 6);
+        write_str_bool("CLK_COR_PRECEDENCE", "CLK_COR_PRECEDENCE");
+        auto clk_cor_repeat_wait = int_or_default(ci->params, ctx->id("CLK_COR_REPEAT_WAIT"), 0);
+        write_int_vector("CLK_COR_REPEAT_WAIT[4:0]", clk_cor_repeat_wait, 5);
+
+        auto clk_cor_seq_1_enable = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_ENABLE"), 0);
+        write_int_vector("CLK_COR_SEQ_1_ENABLE[3:0]", clk_cor_seq_1_enable, 4);
+        auto clk_cor_seq_1_1 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_1"), 0);
+        write_int_vector("CLK_COR_SEQ_1_1[9:0]", clk_cor_seq_1_1, 10);
+        auto clk_cor_seq_1_2 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_2"), 0);
+        write_int_vector("CLK_COR_SEQ_1_2[9:0]", clk_cor_seq_1_2, 10);
+        auto clk_cor_seq_1_3 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_3"), 0);
+        write_int_vector("CLK_COR_SEQ_1_3[9:0]", clk_cor_seq_1_3, 10);
+        auto clk_cor_seq_1_4 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_4"), 0);
+        write_int_vector("CLK_COR_SEQ_1_4[9:0]", clk_cor_seq_1_4, 10);
+
+        write_str_bool("CLK_COR_SEQ_2_USE", "CLK_COR_SEQ_2_USE");
+        auto clk_cor_seq_2_enable = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_ENABLE"), 0);
+        write_int_vector("CLK_COR_SEQ_2_ENABLE[3:0]", clk_cor_seq_2_enable, 4);
+        auto clk_cor_seq_2_1 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_1"), 0);
+        write_int_vector("CLK_COR_SEQ_2_1[9:0]", clk_cor_seq_2_1, 10);
+        auto clk_cor_seq_2_2 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_2"), 0);
+        write_int_vector("CLK_COR_SEQ_2_2[9:0]", clk_cor_seq_2_2, 10);
+        auto clk_cor_seq_2_3 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_3"), 0);
+        write_int_vector("CLK_COR_SEQ_2_3[9:0]", clk_cor_seq_2_3, 10);
+        auto clk_cor_seq_2_4 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_4"), 0);
+        write_int_vector("CLK_COR_SEQ_2_4[9:0]", clk_cor_seq_2_4, 10);
+
+        auto clk_cor_seq_len = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_LEN"), 0);
+        if (clk_cor_seq_len < 1 || 4 < clk_cor_seq_len)
+            log_error("CLK_COR_SEQ_LEN may only range from 1 to 4, but is: %d\n", clk_cor_seq_len);
+        write_int_vector("CLK_COR_SEQ_LEN[1:0]", clk_cor_seq_len - 1, 2);
+
+        write_str_bool("CLK_CORRECT_USE", "CLK_CORRECT_USE");
+
+        auto cpll_cfg = int_or_default(ci->params, ctx->id("CPLL_CFG"), 0b101111000000011111011100);
+        write_int_vector("CPLL_CFG[23:0]", cpll_cfg, 24);
+
+        auto cpll_fbdiv = int_or_default(ci->params, ctx->id("CPLL_FBDIV"), 1);
+        switch (cpll_fbdiv) {
+            case 1: cpll_fbdiv  = 16; break;
+            case 2: cpll_fbdiv  =  0; break;
+            case 3: cpll_fbdiv  =  1; break;
+            case 4: cpll_fbdiv  =  2; break;
+            case 5: cpll_fbdiv  =  3; break;
+            case 6: cpll_fbdiv  =  5; break;
+            case 8: cpll_fbdiv  =  6; break;
+            case 10: cpll_fbdiv =  7; break;
+            case 12: cpll_fbdiv = 13; break;
+            case 16: cpll_fbdiv = 14; break;
+            case 20: cpll_fbdiv = 15; break;
+            default:
+                log_error("CPLL_FBDIV can only be 1, 2, 3, 4, 5, 6, 8, 10, 12, 16 or 20, but is: %d", cpll_fbdiv);
+                break;
+        }
+        write_int_vector("CPLL_FBDIV[4:0]", cpll_fbdiv, 5);
+
+        auto cpll_fbdiv_45 = int_or_default(ci->params, ctx->id("CPLL_FBDIV_45"), 4);
+        if (cpll_fbdiv_45 < 4 || cpll_fbdiv_45 > 5)
+            log_error("CPLL_FBDIV_45 can only be 4 or 5, but is: %d", cpll_fbdiv);
+        write_bit("CPLL_FBDIV_45[0]", cpll_fbdiv_45 == 5);
+
+        auto cpll_init_cfg = int_or_default(ci->params, ctx->id("CPLL_INIT_CFG"), 0b11110);
+        write_int_vector("CPLL_INIT_CFG[4:0]", cpll_init_cfg, 5);
+        auto cpll_lock_cfg = int_or_default(ci->params, ctx->id("CPLL_LOCK_CFG"), 0b111101000);
+        write_int_vector("CPLL_LOCK_CFG[8:0]", cpll_lock_cfg, 9);
+
+        auto cpll_refclk_div = int_or_default(ci->params, ctx->id("CPLL_REFCLK_DIV"), 1);
+        switch (cpll_refclk_div) {
+            case 1: cpll_refclk_div  = 16; break;
+            case 2: cpll_refclk_div  =  0; break;
+            case 3: cpll_refclk_div  =  1; break;
+            case 4: cpll_refclk_div  =  2; break;
+            case 5: cpll_refclk_div  =  3; break;
+            case 6: cpll_refclk_div  =  5; break;
+            case 8: cpll_refclk_div  =  6; break;
+            case 10: cpll_refclk_div =  7; break;
+            case 12: cpll_refclk_div = 13; break;
+            case 16: cpll_refclk_div = 14; break;
+            case 20: cpll_refclk_div = 15; break;
+            default:
+                log_error("CPLL_REFCLK_DIV can only be 1, 2, 3, 4, 5, 6, 8, 10, 12, 16 or 20, but is: %d", cpll_refclk_div);
+                break;
+        }
+        write_int_vector("CPLL_REFCLK_DIV[4:0]", cpll_refclk_div, 5);
+
+        write_str_bool("DEC_MCOMMA_DETECT", "DEC_MCOMMA_DETECT");
+        write_str_bool("DEC_PCOMMA_DETECT", "DEC_PCOMMA_DETECT");
+        write_str_bool("DEC_VALID_COMMA_ONLY", "DEC_VALID_COMMA_ONLY");
+
+        auto dmonitor_cfg = int_or_default(ci->params, ctx->id("DMONITOR_CFG"), 0x008101);
+        write_int_vector("DMONITOR_CFG[23:0]", dmonitor_cfg, 24);
+
+        auto es_control = int_or_default(ci->params, ctx->id("ES_CONTROL"), 0);
+        write_int_vector("ES_CONTROL[5:0]", es_control, 6);
+        write_str_bool("ES_ERRDET_EN", "ES_ERRDET_EN");
+        write_str_bool("ES_EYE_SCAN_EN", "ES_EYE_SCAN_EN");
+        auto es_pma_cfg = int_or_default(ci->params, ctx->id("ES_PMA_CFG"), 0);
+        write_int_vector("ES_PMA_CFG[9:0]", es_pma_cfg, 10);
+        auto es_prescale = int_or_default(ci->params, ctx->id("ES_PRESCALE"), 0);
+        write_int_vector("ES_PRESCALE[4:0]", es_prescale, 5);
+        auto es_qual_mask = int_or_default(ci->params, ctx->id("ES_QUAL_MASK"), 0);
+        write_int_vector("ES_QUAL_MASK[79:0]", es_qual_mask, 80);
+        auto es_qualifier = int_or_default(ci->params, ctx->id("ES_QUALIFIER"), 0);
+        write_int_vector("ES_QUALIFIER[79:0]", es_qualifier, 80);
+        auto es_sdata_mask = int_or_default(ci->params, ctx->id("ES_SDATA_MASK"), 0);
+        write_int_vector("ES_SDATA_MASK[79:0]", es_sdata_mask, 80);
+        auto es_vert_offset = int_or_default(ci->params, ctx->id("ES_VERT_OFFSET"), 0);
+        write_int_vector("ES_VERT_OFFSET[8:0]", es_vert_offset, 9);
+        auto es_horz_offset = int_or_default(ci->params, ctx->id("ES_HORZ_OFFSET"), 0);
+        write_int_vector("ES_HORZ_OFFSET[11:0]", es_horz_offset, 12);
+
+        auto fts_deskew_seq_enable = int_or_default(ci->params, ctx->id("FTS_DESKEW_SEQ_ENABLE"), 0b1111);
+        write_int_vector("FTS_DESKEW_SEQ_ENABLE[3:0]", fts_deskew_seq_enable, 4);
+        auto fts_lane_deskew_cfg = int_or_default(ci->params, ctx->id("FTS_LANE_DESKEW_CFG"), 0);
+        write_int_vector("FTS_LANE_DESKEW_CFG[3:0]", fts_lane_deskew_cfg, 4);
+        write_str_bool("FTS_LANE_DESKEW_EN", "FTS_LANE_DESKEW_EN");
+
+        auto gearbox_mode = int_or_default(ci->params, ctx->id("GEARBOX_MODE"), 0);
+        write_int_vector("GEARBOX_MODE[2:0]", gearbox_mode, 3);
+
+        auto write_inv = [&](std::string name) {
+            write_bit("INV_" + name, bool_or_default(ci->params, ctx->id("IS_" + name + "_INVERTED"), false));
+        };
+        // only these have been fuzzed yet,
+        write_inv("DRPCLK");
+        write_inv("RXUSRCLK");
+        write_inv("RXUSRCLK2");
+        write_inv("TXPHDLYTSTCLK");
+        write_inv("TXUSRCLK");
+        write_inv("TXUSRCLK2");
+        write_inv("RXUSRCLK2");
+        write_inv("TXUSRCLK2");
+        write_inv("CPLLLOCKDETCLK");
+        write_bit("GTREFCLK0_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK0_USED"), false));
+        write_bit("GTREFCLK1_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK1_USED"), false));
+
+        auto outrefclk_sel_inv = int_or_default(ci->params, ctx->id("OUTREFCLK_SEL_INV"), 0b10);
+        write_int_vector("OUTREFCLK_SEL_INV[1:0]", outrefclk_sel_inv, 2);
+
+        write_str_bool("PCS_PCIE_EN", "PCS_PCIE_EN");
+
+        auto rsvd_attr = int_or_default(ci->params, ctx->id("PCS_RSVD_ATTR"), 0);
+        write_int_vector("PCS_RSVD_ATTR[47:0]", rsvd_attr, 48);
+
+        auto pd_trans_time_from_p2 = int_or_default(ci->params, ctx->id("PD_TRANS_TIME_FROM_P2"), 0);
+        write_int_vector("PD_TRANS_TIME_FROM_P2[11:0]", pd_trans_time_from_p2, 12);
+        auto pd_trans_time_none_p2 = int_or_default(ci->params, ctx->id("PD_TRANS_TIME_NONE_P2"), 0);
+        write_int_vector("PD_TRANS_TIME_NONE_P2[7:0]", pd_trans_time_none_p2, 8);
+        auto pd_trans_time_to_p2 = int_or_default(ci->params, ctx->id("PD_TRANS_TIME_TO_P2"), 0);
+        write_int_vector("PD_TRANS_TIME_TO_P2[7:0]", pd_trans_time_to_p2, 8);
+
+        auto pma_rsv = int_or_default(ci->params, ctx->id("PMA_RSV"), 0);
+        write_int_vector("PMA_RSV[31:0]", pma_rsv, 32);
+        auto pma_rsv2 = int_or_default(ci->params, ctx->id("PMA_RSV2"), 0);
+        write_int_vector("PMA_RSV2[15:0]", pma_rsv2, 16);
+        auto pma_rsv3 = int_or_default(ci->params, ctx->id("PMA_RSV3"), 0);
+        write_int_vector("PMA_RSV3[1:0]", pma_rsv3, 2);
+        auto pma_rsv4 = int_or_default(ci->params, ctx->id("PMA_RSV4"), 0);
+        write_int_vector("PMA_RSV4[3:0]", pma_rsv4, 4);
+
+        auto rx_bias_cfg = int_or_default(ci->params, ctx->id("RX_BIAS_CFG"), 0);
+        write_int_vector("RX_BIAS_CFG[11:0]", rx_bias_cfg, 12);
+
+        auto rx_buffer_cfg = int_or_default(ci->params, ctx->id("RX_BUFFER_CFG"), 0);
+        write_int_vector("RX_BUFFER_CFG[5:0]", rx_buffer_cfg, 6);
+        auto rx_cm_sel = int_or_default(ci->params, ctx->id("RX_CM_SEL"), 0);
+        write_int_vector("RX_CM_SEL[1:0]", rx_cm_sel, 2);
+        auto rx_cm_trim = int_or_default(ci->params, ctx->id("RX_CM_TRIM"), 0);
+        write_int_vector("RX_CM_TRIM[2:0]", rx_cm_trim, 3);
+        auto rx_data_width = int_or_default(ci->params, ctx->id("RX_DATA_WIDTH"), 0);
+        switch (rx_data_width) {
+            case 16:
+                rx_data_width = 2; break;
+            case 20:
+                rx_data_width = 3; break;
+            case 32:
+                rx_data_width = 4; break;
+            case 40:
+                rx_data_width = 5; break;
+            case 64:
+                rx_data_width = 6; break;
+            case 80:
+                rx_data_width = 7; break;
+            default:
+                log_error("Invalid RX_DATA_WIDTH parameter '%d' for GTXE2_CHANNEL instance %s\n", rx_data_width, ci->name.c_str(ctx));
+        }
+        write_int_vector("RX_DATA_WIDTH[2:0]", rx_data_width, 3);
+        auto rx_int_datawidth = bool_or_default(ci->params, ctx->id("RX_INT_DATAWIDTH"), false);
+        write_bit("RX_INT_DATAWIDTH[0]", rx_int_datawidth);
+        auto rx_ddi_sel = int_or_default(ci->params, ctx->id("RX_DDI_SEL"), 0);
+        write_int_vector("RX_DDI_SEL[5:0]", rx_ddi_sel, 6);
+        auto rx_debug_cfg = int_or_default(ci->params, ctx->id("RX_DEBUG_CFG"), 0);
+        write_int_vector("RX_DEBUG_CFG[10:0]", rx_debug_cfg, 11);
+        write_str_bool("RX_DEFER_RESET_BUF_EN", "RX_DEFER_RESET_BUF_EN");
+
+        // default values, see ug476, default values from wizards not mentioned in the handbook taken from LiteX
+        auto rx_dfe_gain_cfg = int_or_default(ci->params, ctx->id("RX_DFE_GAIN_CFG"), 0x020FEA);
+        write_int_vector("RX_DFE_GAIN_CFG[17:0]", rx_dfe_gain_cfg, 18);
+        auto rx_dfe_h2_cfg = int_or_default(ci->params, ctx->id("RX_DFE_H2_CFG"), 0x000);
+        write_int_vector("RX_DFE_H2_CFG[11:0]", rx_dfe_h2_cfg, 12);
+        auto rx_dfe_h3_cfg = int_or_default(ci->params, ctx->id("RX_DFE_H3_CFG"), 0x040);
+        write_int_vector("RX_DFE_H3_CFG[11:0]", rx_dfe_h3_cfg, 12);
+        auto rx_dfe_h4_cfg = int_or_default(ci->params, ctx->id("RX_DFE_H4_CFG"), 0x0f0);
+        write_int_vector("RX_DFE_H4_CFG[10:0]", rx_dfe_h4_cfg, 11);
+        auto rx_dfe_h5_cfg = int_or_default(ci->params, ctx->id("RX_DFE_H5_CFG"), 0x0e0);
+        write_int_vector("RX_DFE_H5_CFG[10:0]", rx_dfe_h5_cfg, 11);
+        auto rx_dfe_kl_cfg = int_or_default(ci->params, ctx->id("RX_DFE_KL_CFG"), 0b11111110);
+        write_int_vector("RX_DFE_KL_CFG[12:0]", rx_dfe_kl_cfg, 13);
+        auto rx_dfe_kl_cfg2 = int_or_default(ci->params, ctx->id("RX_DFE_KL_CFG2"), 0b110000000100010100100010101100);
+        write_int_vector("RX_DFE_KL_CFG2[31:0]", rx_dfe_kl_cfg2, 32);
+        auto rx_dfe_lpm_cfg = int_or_default(ci->params, ctx->id("RX_DFE_LPM_CFG"), 0b100101010100);
+        write_int_vector("RX_DFE_LPM_CFG[11:0]", rx_dfe_lpm_cfg, 12);
+        auto rx_dfe_lpm_hold_during_eidle = bool_or_default(ci->params, ctx->id("RX_DFE_LPM_HOLD_DURING_EIDLE"), false);
+        write_bit("RX_DFE_LPM_HOLD_DURING_EIDLE[0]", rx_dfe_lpm_hold_during_eidle);
+        auto rx_dfe_ut_cfg = int_or_default(ci->params, ctx->id("RX_DFE_UT_CFG"), 0x11E00);
+        write_int_vector("RX_DFE_UT_CFG[16:0]", rx_dfe_ut_cfg, 17);
+        auto rx_dfe_vp_cfg = int_or_default(ci->params, ctx->id("RX_DFE_VP_CFG"), 0x03F03);
+        write_int_vector("RX_DFE_VP_CFG[16:0]", rx_dfe_vp_cfg, 17);
+        auto rx_dfe_xyd_cfg = int_or_default(ci->params, ctx->id("RX_DFE_XYD_CFG"), 0);
+        write_int_vector("RX_DFE_XYD_CFG[12:0]", rx_dfe_xyd_cfg, 13);
+
+        write_str_bool("RX_DISPERR_SEQ_MATCH", "RX_DISPERR_SEQ_MATCH");
+        auto rx_os_cfg = int_or_default(ci->params, ctx->id("RX_OS_CFG"), 0);
+        write_int_vector("RX_OS_CFG[12:0]", rx_os_cfg, 13);
+        auto rx_sig_valid_dly = int_or_default(ci->params, ctx->id("RX_SIG_VALID_DLY"), 0) - 1;
+        write_int_vector("RX_SIG_VALID_DLY[4:0]", rx_sig_valid_dly, 5);
+        auto rx_xclk_sel = str_or_default(ci->params, ctx->id("RX_XCLK_SEL"), "RXUSR");
+        if (rx_xclk_sel != "RXUSR" && rx_xclk_sel != "RXREC")
+            log_error("RX_XCLK_SEL may only have values 'RXREC' or 'RXUSR' but is: '%s'\n", rx_xclk_sel.c_str());
+        write_bit("RX_XCLK_SEL.RXUSR", rx_xclk_sel == "RXUSR");
+        auto rx_clk25_div = int_or_default(ci->params, ctx->id("RX_CLK25_DIV"), 0) - 1;
+        write_int_vector("RX_CLK25_DIV[4:0]", rx_clk25_div, 5);
+
+        auto rxbuf_addr_mode = str_or_default(ci->params, ctx->id("RXBUF_ADDR_MODE"), "PMA");
+        if (rxbuf_addr_mode != "FULL" && rxbuf_addr_mode != "FAST")
+            log_error("RXBUF_ADDR_MODE may only have values 'FULL' or 'FAST' but is: '%s'\n", rxbuf_addr_mode.c_str());
+        write_bit("RXBUF_ADDR_MODE.FAST", rxbuf_addr_mode == "FAST");
+        auto rxbuf_eidle_hi_cnt = int_or_default(ci->params, ctx->id("RXBUF_EIDLE_HI_CNT"), 0);
+        write_int_vector("RXBUF_EIDLE_HI_CNT[3:0]", rxbuf_eidle_hi_cnt, 4);
+        auto rxbuf_eidle_lo_cnt = int_or_default(ci->params, ctx->id("RXBUF_EIDLE_LO_CNT"), 0);
+        write_int_vector("RXBUF_EIDLE_LO_CNT[3:0]", rxbuf_eidle_lo_cnt, 4);
+        write_str_bool("RXBUF_EN", "RXBUF_EN", "TRUE");
+        write_str_bool("RXBUF_RESET_ON_CB_CHANGE", "RXBUF_RESET_ON_CB_CHANGE", "TRUE");
+        write_str_bool("RXBUF_RESET_ON_COMMAALIGN", "RXBUF_RESET_ON_COMMAALIGN");
+        write_str_bool("RXBUF_RESET_ON_EIDLE", "RXBUF_RESET_ON_EIDLE");
+        write_str_bool("RXBUF_RESET_ON_RATE_CHANGE", "RXBUF_RESET_ON_RATE_CHANGE", "TRUE");
+        write_str_bool("RXBUF_THRESH_OVRD", "RXBUF_THRESH_OVRD");
+        auto rxbuf_thresh_ovflw = int_or_default(ci->params, ctx->id("RXBUF_THRESH_OVFLW"), 0);
+        write_int_vector("RXBUF_THRESH_OVFLW[5:0]", rxbuf_thresh_ovflw, 6);
+        auto rxbuf_thresh_undflw = int_or_default(ci->params, ctx->id("RXBUF_THRESH_UNDFLW"), 0);
+        write_int_vector("RXBUF_THRESH_UNDFLW[5:0]", rxbuf_thresh_undflw, 6);
+        auto rxbufreset_time = int_or_default(ci->params, ctx->id("RXBUFRESET_TIME"), 0);
+        write_int_vector("RXBUFRESET_TIME[4:0]", rxbufreset_time, 5);
+
+        auto rxcdr_cfg = get_or_default(ci->params, ctx->id("RXCDR_CFG"),
+            Property("00000000000000000000000000000000000000000000000000000000000000000000000000000000000"));
+        write_vector("RXCDR_CFG[71:0]", bits_from_string_default(rxcdr_cfg, 72));
+        auto rxcdr_fr_reset_on_eidle = bool_or_default(ci->params, ctx->id("RXCDR_FR_RESET_ON_EIDLE"), false);
+        write_bit("RXCDR_FR_RESET_ON_EIDLE[0]", rxcdr_fr_reset_on_eidle);
+        auto rxcdr_ph_reset_on_eidle = bool_or_default(ci->params, ctx->id("RXCDR_PH_RESET_ON_EIDLE"), false);
+        write_bit("RXCDR_PH_RESET_ON_EIDLE[0]", rxcdr_ph_reset_on_eidle);
+        auto rxcdr_hold_during_eidle = bool_or_default(ci->params, ctx->id("RXCDR_HOLD_DURING_EIDLE"), false);
+        write_bit("RXCDR_HOLD_DURING_EIDLE[0]", rxcdr_hold_during_eidle);
+        auto rx_clkmux_pd = bool_or_default(ci->params, ctx->id("RX_CLKMUX_PD"), true);
+        write_bit("RX_CLKMUX_PD[0]", rx_clkmux_pd);
+        auto rxcdr_lock_cfg = int_or_default(ci->params, ctx->id("RXCDR_LOCK_CFG"), 0);
+        write_int_vector("RXCDR_LOCK_CFG[5:0]", rxcdr_lock_cfg, 6);
+        auto rxcdrfreqreset_time = int_or_default(ci->params, ctx->id("RXCDRFREQRESET_TIME"), 0);
+        write_int_vector("RXCDRFREQRESET_TIME[4:0]", rxcdrfreqreset_time, 5);
+        auto rxcdrphreset_time = int_or_default(ci->params, ctx->id("RXCDRPHRESET_TIME"), 0);
+        write_int_vector("RXCDRPHRESET_TIME[4:0]", rxcdrphreset_time, 5);
+
+        auto rxdfelpmreset_time = int_or_default(ci->params, ctx->id("RXDFELPMRESET_TIME"), 0);
+        write_int_vector("RXDFELPMRESET_TIME[6:0]", rxdfelpmreset_time, 7);
+
+        auto rxdly_cfg = int_or_default(ci->params, ctx->id("RXDLY_CFG"), 0);
+        write_int_vector("RXDLY_CFG[15:0]", rxdly_cfg, 16);
+        auto rxdly_lcfg = int_or_default(ci->params, ctx->id("RXDLY_LCFG"), 0);
+        write_int_vector("RXDLY_LCFG[8:0]", rxdly_lcfg, 9);
+        auto rxdly_tap_cfg = int_or_default(ci->params, ctx->id("RXDLY_TAP_CFG"), 0);
+        write_int_vector("RXDLY_TAP_CFG[15:0]", rxdly_tap_cfg, 16);
+
+        write_str_bool("RXGEARBOX_EN", "RXGEARBOX_EN");
+
+        auto rxiscanreset_time = int_or_default(ci->params, ctx->id("RXISCANRESET_TIME"), 0);
+        write_int_vector("RXISCANRESET_TIME[4:0]", rxiscanreset_time, 5);
+
+        auto rxlpm_hf_cfg = int_or_default(ci->params, ctx->id("RXLPM_HF_CFG"), 0);
+        write_int_vector("RXLPM_HF_CFG[13:0]", rxlpm_hf_cfg, 14);
+        auto rxlpm_lf_cfg = int_or_default(ci->params, ctx->id("RXLPM_LF_CFG"), 0);
+        write_int_vector("RXLPM_LF_CFG[13:0]", rxlpm_lf_cfg, 14);
+
+        auto rxoob_cfg = int_or_default(ci->params, ctx->id("RXOOB_CFG"), 0);
+        write_int_vector("RXOOB_CFG[6:0]", rxoob_cfg, 7);
+
+        auto rxout_div = std::log2(int_or_default(ci->params, ctx->id("RXOUT_DIV"), 1));
+        write_int_vector("RXOUT_DIV[1:0]", rxout_div, 2);
+
+        auto rxpcsreset_time = int_or_default(ci->params, ctx->id("RXPCSRESET_TIME"), 0);
+        write_int_vector("RXPCSRESET_TIME[4:0]", rxpcsreset_time, 5);
+
+        auto rxph_cfg = int_or_default(ci->params, ctx->id("RXPH_CFG"), 0);
+        write_int_vector("RXPH_CFG[23:0]", rxph_cfg, 24);
+        auto rxph_monitor_sel = int_or_default(ci->params, ctx->id("RXPH_MONITOR_SEL"), 0);
+        write_int_vector("RXPH_MONITOR_SEL[4:0]", rxph_monitor_sel, 5);
+        auto rxphdly_cfg = int_or_default(ci->params, ctx->id("RXPHDLY_CFG"), 0);
+        write_int_vector("RXPHDLY_CFG[23:0]", rxphdly_cfg, 24);
+
+        auto rxpmareset_time = int_or_default(ci->params, ctx->id("RXPMARESET_TIME"), 0);
+        write_int_vector("RXPMARESET_TIME[4:0]", rxpmareset_time, 5);
+
+        auto rxprbs_err_loopback = bool_or_default(ci->params, ctx->id("RXPRBS_ERR_LOOPBACK"), false);
+        write_bit("RXPRBS_ERR_LOOPBACK[0]", rxprbs_err_loopback);
+
+        auto rxslide_auto_wait = int_or_default(ci->params, ctx->id("RXSLIDE_AUTO_WAIT"), 7);
+        write_int_vector("RXSLIDE_AUTO_WAIT[3:0]", rxslide_auto_wait, 4);
+        auto rxslide_mode = str_or_default(ci->params, ctx->id("RXSLIDE_MODE"), "OFF");
+        if (rxslide_mode != "OFF" && rxslide_mode != "AUTO" && rxslide_mode != "PCS" && rxslide_mode != "PMA")
+            log_error("RXSLIDE_MODE may only have values 'OFF', 'AUTO', 'PCS' or 'PMA' but is: '%s'\n", rxslide_mode.c_str());
+        write_bit("RXSLIDE_MODE.AUTO", rxslide_mode == "AUTO");
+        write_bit("RXSLIDE_MODE.PCS",  rxslide_mode == "PCS");
+        write_bit("RXSLIDE_MODE.PMA",  rxslide_mode == "PMA");
+
+        auto sas_max_com = int_or_default(ci->params, ctx->id("SAS_MAX_COM"), 0);
+        write_int_vector("SAS_MAX_COM[6:0]", sas_max_com, 7);
+        auto sas_min_com = int_or_default(ci->params, ctx->id("SAS_MIN_COM"), 0);
+        write_int_vector("SAS_MIN_COM[5:0]", sas_min_com, 6);
+
+        auto sata_burst_seq_len = int_or_default(ci->params, ctx->id("SATA_BURST_SEQ_LEN"), 0);
+        write_int_vector("SATA_BURST_SEQ_LEN[3:0]", sata_burst_seq_len, 4);
+        auto sata_burst_val = int_or_default(ci->params, ctx->id("SATA_BURST_VAL"), 0);
+        write_int_vector("SATA_BURST_VAL[2:0]", sata_burst_val, 3);
+        auto sata_eidle_val = int_or_default(ci->params, ctx->id("SATA_EIDLE_VAL"), 0);
+        write_int_vector("SATA_EIDLE_VAL[2:0]", sata_eidle_val, 3);
+        auto sata_max_burst = int_or_default(ci->params, ctx->id("SATA_MAX_BURST"), 0);
+        write_int_vector("SATA_MAX_BURST[5:0]", sata_max_burst, 6);
+        auto sata_max_init = int_or_default(ci->params, ctx->id("SATA_MAX_INIT"), 0);
+        write_int_vector("SATA_MAX_INIT[5:0]", sata_max_init, 6);
+        auto sata_max_wake = int_or_default(ci->params, ctx->id("SATA_MAX_WAKE"), 0);
+        write_int_vector("SATA_MAX_WAKE[5:0]", sata_max_wake, 6);
+        auto sata_min_burst = int_or_default(ci->params, ctx->id("SATA_MIN_BURST"), 0);
+        write_int_vector("SATA_MIN_BURST[5:0]", sata_min_burst, 6);
+        auto sata_min_init = int_or_default(ci->params, ctx->id("SATA_MIN_INIT"), 0);
+        write_int_vector("SATA_MIN_INIT[5:0]", sata_min_init, 6);
+        auto sata_min_wake = int_or_default(ci->params, ctx->id("SATA_MIN_WAKE"), 0);
+        write_int_vector("SATA_MIN_WAKE[5:0]", sata_min_wake, 6);
+        auto sata_cpll_cfg = str_or_default(ci->params, ctx->id("SATA_CPLL_CFG"), "VCO_3000MHZ");
+        if (sata_cpll_cfg != "VCO_3000MHZ" && sata_cpll_cfg != "VCO_1500MHZ" && sata_cpll_cfg != "VCO_750MHZ")
+            log_error("SATA_CPLL_CFG may only have values 'VCO_3000MHZ', 'VCO_1500MHZ' or 'VCO_750MHZ' but is: '%s'\n", sata_cpll_cfg.c_str());
+        write_bit("SATA_CPLL_CFG.VCO_1500MHZ", sata_cpll_cfg == "VCO_1500MHZ");
+        write_bit("SATA_CPLL_CFG.VCO_750MHZ",  sata_cpll_cfg == "VCO_750MHZ");
+
+        write_str_bool("SHOW_REALIGN_COMMA", "SHOW_REALIGN_COMMA");
+
+        auto term_rcal_cfg = int_or_default(ci->params, ctx->id("TERM_RCAL_CFG"), 0);
+        write_int_vector("TERM_RCAL_CFG[4:0]", term_rcal_cfg, 5);
+        auto term_rcal_ovrd = int_or_default(ci->params, ctx->id("TERM_RCAL_OVRD"), 0);
+        write_bit("TERM_RCAL_OVRD[0]", term_rcal_ovrd);
+
+        auto trans_time_rate = int_or_default(ci->params, ctx->id("TRANS_TIME_RATE"), 0);
+        write_int_vector("TRANS_TIME_RATE[7:0]", trans_time_rate, 8);
+
+        auto tst_rsv = int_or_default(ci->params, ctx->id("TST_RSV"), 0);
+        write_int_vector("TST_RSV[31:0]", tst_rsv, 32);
+
+        auto tx_data_width = int_or_default(ci->params, ctx->id("TX_DATA_WIDTH"), 0);
+        switch (tx_data_width) {
+            case 16:
+                tx_data_width = 2; break;
+            case 20:
+                tx_data_width = 3; break;
+            case 32:
+                tx_data_width = 4; break;
+            case 40:
+                tx_data_width = 5; break;
+            case 64:
+                tx_data_width = 6; break;
+            case 80:
+                tx_data_width = 7; break;
+            default:
+                log_error("Invalid TX_DATA_WIDTH parameter '%d' for GTXE2_CHANNEL instance %s\n", tx_data_width, ci->name.c_str(ctx));
+        }
+        write_int_vector("TX_DATA_WIDTH[2:0]", tx_data_width, 3);
+        auto tx_int_datawidth = bool_or_default(ci->params, ctx->id("TX_INT_DATAWIDTH"), false);
+        write_bit("TX_INT_DATAWIDTH[0]", tx_int_datawidth);
+
+        auto tx_drive_mode = str_or_default(ci->params, ctx->id("TX_DRIVE_MODE"), "DIRECT");
+        if (tx_drive_mode != "DIRECT" && tx_drive_mode != "PIPE" && tx_drive_mode != "PIPEGEN3")
+            log_error("TX_DRIVE_MODE may only have values 'PIPE',  'PIPEGEN3' or 'DIRECT' but is: '%s'\n", tx_drive_mode.c_str());
+        write_bit("TX_DRIVE_MODE.PIPE", tx_drive_mode == "PIPE");
+        write_bit("TX_DRIVE_MODE.PIPEGEN3", tx_drive_mode == "PIPEGEN3");
+
+        auto tx_eidle_assert_delay = int_or_default(ci->params, ctx->id("TX_EIDLE_ASSERT_DELAY"), 0);
+        write_int_vector("TX_EIDLE_ASSERT_DELAY[2:0]", tx_eidle_assert_delay, 3);
+        auto tx_eidle_deassert_delay = int_or_default(ci->params, ctx->id("TX_EIDLE_DEASSERT_DELAY"), 0);
+        write_int_vector("TX_EIDLE_DEASSERT_DELAY[2:0]", tx_eidle_deassert_delay, 3);
+
+        write_str_bool("LOOPBACK_DRIVE_HIZ", "LOOPBACK_DRIVE_HIZ");
+
+        auto tx_maincursor_sel = bool_or_default(ci->params, ctx->id("TX_MAINCURSOR_SEL"), false);
+        write_bit("TX_MAINCURSOR_SEL[0]", tx_maincursor_sel);
+        auto tx_margin_full_0 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_0"), 0b1001111);
+        write_int_vector("TX_MARGIN_FULL_0[6:0]", tx_margin_full_0, 7);
+        auto tx_margin_full_1 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_1"), 0b1001111);
+        write_int_vector("TX_MARGIN_FULL_1[6:0]", tx_margin_full_1, 7);
+        auto tx_margin_full_2 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_2"), 0b1001111);
+        write_int_vector("TX_MARGIN_FULL_2[6:0]", tx_margin_full_2, 7);
+        auto tx_margin_full_3 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_3"), 0b1000001);
+        write_int_vector("TX_MARGIN_FULL_3[6:0]", tx_margin_full_3, 7);
+        auto tx_margin_full_4 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_4"), 0b1000000);
+        write_int_vector("TX_MARGIN_FULL_4[6:0]", tx_margin_full_4, 7);
+        auto tx_margin_low_0 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_0"), 0b1000111);
+        write_int_vector("TX_MARGIN_LOW_0[6:0]", tx_margin_low_0, 7);
+        auto tx_margin_low_1 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_1"), 0b1000110);
+        write_int_vector("TX_MARGIN_LOW_1[6:0]", tx_margin_low_1, 7);
+        auto tx_margin_low_2 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_2"), 0b1000100);
+        write_int_vector("TX_MARGIN_LOW_2[6:0]", tx_margin_low_2, 7);
+        auto tx_margin_low_3 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_3"), 0b1000000);
+        write_int_vector("TX_MARGIN_LOW_3[6:0]", tx_margin_low_3, 7);
+        auto tx_margin_low_4 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_4"), 0b1000000);
+        write_int_vector("TX_MARGIN_LOW_4[6:0]", tx_margin_low_4, 7);
+        auto tx_predriver_mode = bool_or_default(ci->params, ctx->id("TX_PREDRIVER_MODE"), false);
+        write_bit("TX_PREDRIVER_MODE[0]", tx_predriver_mode);
+        auto tx_rxdetect_cfg = int_or_default(ci->params, ctx->id("TX_RXDETECT_CFG"), 0);
+        write_int_vector("TX_RXDETECT_CFG[13:0]", tx_rxdetect_cfg, 14);
+        auto tx_rxdetect_ref = int_or_default(ci->params, ctx->id("TX_RXDETECT_REF"), 0);
+        write_int_vector("TX_RXDETECT_REF[2:0]", tx_rxdetect_ref, 3);
+        auto tx_xclk_sel = str_or_default(ci->params, ctx->id("TX_XCLK_SEL"), "TXUSR");
+        if (tx_xclk_sel != "TXUSR" && tx_xclk_sel != "TXOUT")
+            log_error("TX_XCLK_SEL may only have values 'TXOUT' or 'TXUSR' but is: '%s'\n", tx_xclk_sel.c_str());
+        write_bit("TX_XCLK_SEL.TXUSR", tx_xclk_sel == "TXUSR");
+        auto tx_clk25_div = int_or_default(ci->params, ctx->id("TX_CLK25_DIV"), 0) - 1;
+        write_int_vector("TX_CLK25_DIV[4:0]", tx_clk25_div, 5);
+        auto tx_clkmux_pd = bool_or_default(ci->params, ctx->id("TX_CLKMUX_PD"), true);
+        write_bit("TX_CLKMUX_PD[0]", tx_clkmux_pd);
+        auto tx_deemph0 = int_or_default(ci->params, ctx->id("TX_DEEMPH0"), 0);
+        write_int_vector("TX_DEEMPH0[5:0]", tx_deemph0, 6);
+        auto tx_deemph1 = int_or_default(ci->params, ctx->id("TX_DEEMPH1"), 0);
+        write_int_vector("TX_DEEMPH1[5:0]", tx_deemph1, 6);
+        write_str_bool("TXBUF_EN", "TXBUF_EN");
+        write_str_bool("TXBUF_RESET_ON_RATE_CHANGE", "TXBUF_RESET_ON_RATE_CHANGE", "TRUE");
+        auto txdly_cfg = int_or_default(ci->params, ctx->id("TXDLY_CFG"), 0);
+        write_int_vector("TXDLY_CFG[15:0]", txdly_cfg, 16);
+        auto txdly_lcfg = int_or_default(ci->params, ctx->id("TXDLY_LCFG"), 0);
+        write_int_vector("TXDLY_LCFG[8:0]", txdly_lcfg, 9);
+        auto txdly_tap_cfg = int_or_default(ci->params, ctx->id("TXDLY_TAP_CFG"), 0);
+        write_int_vector("TXDLY_TAP_CFG[15:0]", txdly_tap_cfg, 16);
+        write_str_bool("TXGEARBOX_EN", "TXGEARBOX_EN");
+        auto txout_div = std::log2(int_or_default(ci->params, ctx->id("TXOUT_DIV"), 1));
+        write_int_vector("TXOUT_DIV[1:0]", txout_div, 2);
+        auto txpcsreset_time = int_or_default(ci->params, ctx->id("TXPCSRESET_TIME"), 0);
+        write_int_vector("TXPCSRESET_TIME[4:0]", txpcsreset_time, 5);
+
+        auto txph_cfg = int_or_default(ci->params, ctx->id("TXPH_CFG"), 0);
+        write_int_vector("TXPH_CFG[15:0]", txph_cfg, 16);
+        auto txph_monitor_sel = int_or_default(ci->params, ctx->id("TXPH_MONITOR_SEL"), 0);
+        write_int_vector("TXPH_MONITOR_SEL[4:0]", txph_monitor_sel, 5);
+        auto txphdly_cfg = int_or_default(ci->params, ctx->id("TXPHDLY_CFG"), 0);
+        write_int_vector("TXPHDLY_CFG[23:0]", txphdly_cfg, 24);
+
+        auto txpmareset_time = int_or_default(ci->params, ctx->id("TXPMARESET_TIME"), 0);
+        write_int_vector("TXPMARESET_TIME[4:0]", txpmareset_time, 5);
+
+        auto tx_qpi_status_en = bool_or_default(ci->params, ctx->id("TX_QPI_STATUS_EN"), false);
+        write_bit("TX_QPI_STATUS_EN[0]", tx_qpi_status_en);
+
+        auto ucodeer_clr = bool_or_default(ci->params, ctx->id("UCODEER_CLR"), false);
+        write_bit("UCODEER_CLR[0]", ucodeer_clr);
+
+        pop(); // GTXE2_CHANNEL
+        pop(); // tile name
+    }
+
+    std::vector<bool> bits_from_string_default(const Property &p, size_t n)
+    {
+        std::vector<bool> r;
+        if (p.is_string) {
+            for (char c : p.as_string())
+                r.push_back(c == '1');
+        } else {
+            r = p.as_bits();
+        }
+        r.resize(n, false);
+        return r;
+    }
+
     void write_ip()
     {
         for (auto &cell : ctx->cells) {
@@ -2194,6 +3507,21 @@ struct FasmBackend
                 blank();
             } else if (ci->type == id_BUFR_BUFR && ci->bel != BelId()) {
                 write_bufr(ci);
+                blank();
+            } else if (ci->type == id_GTPE2_COMMON) {
+                write_gtp_pll(ci);
+                blank();
+            } else if (ci->type == id_GTPE2_CHANNEL) {
+                write_gtp_channel(ci);
+                blank();
+            } else if (ci->type == id_GTXE2_COMMON) {
+                write_gtx_pll(ci);
+                blank();
+            } else if (ci->type == id_GTXE2_CHANNEL) {
+                write_gtx_channel(ci);
+                blank();
+            } else if (ci->type == id_IBUFDS_GTE2 && ci->bel != BelId()) {
+                write_ibufds_gte2(ci);
                 blank();
             }
         }
