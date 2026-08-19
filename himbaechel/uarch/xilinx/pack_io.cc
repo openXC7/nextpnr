@@ -505,6 +505,7 @@ void XC7Packer::pack_io()
     hrio_rules[id_INV].port_xform[id_O] = id_OUT;
 
     hrio_rules[id_PS7].new_type = id_PS7_PS7;
+    hrio_rules[id_PCIE_2_1].new_type = id_PCIE_2_1_PCIE_2_1;
 
     generic_xform(hrio_rules, true);
 
