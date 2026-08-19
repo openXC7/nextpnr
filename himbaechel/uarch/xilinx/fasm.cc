@@ -1435,7 +1435,35 @@ struct FasmBackend
 
     void write_bram_width(CellInfo *ci, const std::string &name, bool is_36, bool is_y1)
     {
-        int width = int_or_default(ci->params, ctx->id(name), 0);
+        // SDP mode spans both data sides of the memory, so the
+        // "opposite-side" width markers must also be configured wide,
+        // exactly like Vivado's golden bitstreams:
+        //   - RAMB36E1 READ_WIDTH_A=72: the 72-bit read is the A port (lower
+        //     36 bits) PLUS the B port (upper 36 bits) -> READ_WIDTH_B_18 on
+        //     BOTH RAMB18 halves.  yosys leaves READ_WIDTH_B at 0; the
+        //     width-1 default kills the B-side read path on silicon.
+        //   - RAMB18E1 READ_WIDTH_A=36: READ_WIDTH_B_18.
+        //   - RAMB18E1 WRITE_WIDTH_B=36: WRITE_WIDTH_A_18.
+        // (Port of nextpnr-xilinx f1c77134.)
+        const int read_width_a = int_or_default(ci->params, ctx->id("READ_WIDTH_A"), 0);
+        const int write_width_b = int_or_default(ci->params, ctx->id("WRITE_WIDTH_B"), 0);
+        const int this_width = int_or_default(ci->params, ctx->id(name), 0);
+        const bool this_width_param_is_unset = (this_width == 0);
+        const bool this_param_is_read_width_b = (name == "READ_WIDTH_B");
+        const bool this_param_is_write_width_a = (name == "WRITE_WIDTH_A");
+        const bool b_side_reads_half_the_word = (is_36 ? (read_width_a == 72) : (read_width_a == 36));
+        const bool a_side_writes_half_the_word = (!is_36 && (write_width_b == 36));
+
+        if (this_width_param_is_unset && this_param_is_read_width_b && b_side_reads_half_the_word) {
+            write_bit("READ_WIDTH_B_18");
+            return;
+        }
+        if (this_width_param_is_unset && this_param_is_write_width_a && a_side_writes_half_the_word) {
+            write_bit("WRITE_WIDTH_A_18");
+            return;
+        }
+
+        int width = this_width;
         if (width == 0)
             return;
         int actual_width = width;
@@ -1450,13 +1478,34 @@ struct FasmBackend
         }
         if (actual_width == 36) {
             write_bit("SDP_" + name.substr(0, name.length() - 2) + "_36");
-            if (name.find("WRITE") == 0) {
-                write_bit(name.substr(0, name.size() - 1) + "A_18");
+            // The 36-wide mode lives in the SDP bit plus the marker of the
+            // WIDE side only.  Writing the other side's 18 marker collides
+            // with that side's own width field (e.g. a RAMB18E1 with
+            // READ_WIDTH_A=36 and an unused B port: READ_WIDTH_B_18 and the
+            // B-side default READ_WIDTH_B_1 encode the SAME prjxray bit).
+            // (Port of nextpnr-xilinx 1b7d51b9.)
+            if (name == "WRITE_WIDTH_A" || name == "WRITE_WIDTH_B")
+                write_bit(name.substr(0, name.size() - 1) + ((name == "WRITE_WIDTH_B") ? "B_18" : "A_18"));
+            else if (name == "READ_WIDTH_B")
                 write_bit(name.substr(0, name.size() - 1) + "B_18");
-            } else if (name.find("READ") == 0) {
-                write_bit(name.substr(0, name.size() - 1) + "B_18");
-            }
         } else {
+            // A 36-bit (SDP) port already emits the _18 bits for BOTH the A
+            // and B halves of its direction; the paired port of the same
+            // direction is unused in SDP mode and defaults to width 1, which
+            // would emit a conflicting _1 bit for a half the SDP branch set
+            // to _18.  Skip it.  (Port of nextpnr-xilinx 11f9b694.)
+            bool dir_is_sdp36 = false;
+            {
+                std::string dir = name.substr(0, name.size() - 2);
+                for (const char *ab : {"A", "B"}) {
+                    int w = int_or_default(ci->params, ctx->id(dir + "_" + ab), 0);
+                    int aw = (is_36 && w != 1 && w != 0) ? w / 2 : w;
+                    if (aw == 36)
+                        dir_is_sdp36 = true;
+                }
+            }
+            if (dir_is_sdp36 && actual_width == 1)
+                return;
             write_bit(name + "_" + std::to_string(actual_width));
         }
     }
@@ -1514,6 +1563,19 @@ struct FasmBackend
             for (auto &invpin : invertible_pins[ctx->id(ci->attrs[id_X_ORIG_TYPE].as_string())])
                 write_bit("ZINV_" + invpin.str(ctx),
                           !bool_or_default(ci->params, ctx->id("IS_" + invpin.str(ctx) + "_INVERTED"), false));
+            // REGCLKARDRCLK and REGCLKB are SITE pins, not RAMB18E1/RAMB36E1
+            // cell ports, so they are absent from invertible_pins.  prjxray's
+            // fuzzer rule: with DO*_REG == 1 the output-register clock FOLLOWS
+            // the corresponding data clock, with DO*_REG == 0 it is always
+            // inverted -- i.e. tag 0, the bit clear, which is what emitting
+            // nothing already gives.  So only the registered case needs
+            // anything written.  (Port of nextpnr-xilinx e71acda2.)
+            if (bool_or_default(ci->params, ctx->id("DOA_REG"), false))
+                write_bit("ZINV_REGCLKARDRCLK",
+                          !bool_or_default(ci->params, ctx->id("IS_CLKARDCLK_INVERTED"), false));
+            if (bool_or_default(ci->params, ctx->id("DOB_REG"), false))
+                write_bit("ZINV_REGCLKB",
+                          !bool_or_default(ci->params, ctx->id("IS_CLKBWRCLK_INVERTED"), false));
             for (auto wrmode : {"WRITE_MODE_A", "WRITE_MODE_B"}) {
                 std::string mode = str_or_default(ci->params, ctx->id(wrmode), "WRITE_FIRST");
                 if (mode != "WRITE_FIRST")
