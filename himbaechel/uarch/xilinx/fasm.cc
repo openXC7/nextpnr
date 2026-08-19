@@ -2113,6 +2113,54 @@ struct FasmBackend
         pop();
     }
 
+    void write_cfg()
+    {
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->bel == BelId())
+                continue;
+            std::string tile_name = uarch->tile_name(ci->bel.tile);
+            if (!boost::starts_with(tile_name, "CFG_CENTER_"))
+                continue;
+
+            push(tile_name);
+            if (ci->type == id_BSCAN) {
+                push("BSCAN");
+                int chain = int_or_default(ci->params, id_JTAG_CHAIN, 1);
+                if (chain < 1 || 4 < chain)
+                    log_error("Invalid JTAG_CHAIN number of '%d'. Allowed values are: 1-4.\n", chain);
+                write_bit("JTAG_CHAIN_" + std::to_string(chain));
+                pop();
+            }
+            if (ci->type == id_DCIRESET_DCIRESET)
+                write_bit("DCIRESET.ENABLED");
+            if (ci->type == id_ICAP_ICAP) {
+                push("ICAP");
+                std::string width = str_or_default(ci->params, id_ICAP_WIDTH, "X32");
+                if (width != "X32" && width != "X16" && width != "X8")
+                    log_error("Unknown ICAP_WIDTH of '%s'. Allowed values are: X32, X16 and X8.\n", width.c_str());
+                if (width == "X16")
+                    write_bit("ICAP_WIDTH_X16");
+                if (width == "X8")
+                    write_bit("ICAP_WIDTH_X8");
+                pop();
+            }
+            if (ci->type == id_STARTUP_STARTUP) {
+                std::string prog_usr = str_or_default(ci->params, id_PROG_USR, "FALSE");
+                if (prog_usr != "TRUE" && prog_usr != "FALSE")
+                    log_error("Invalid PROG_USR attribute in STARTUPE2 of '%s'. Allowed values are: TRUE, FALSE.\n",
+                              prog_usr.c_str());
+                write_bit("STARTUP.PROG_USR", prog_usr == "TRUE");
+                NetInfo *usrclk = ci->getPort(id_USRCCLKO);
+                bool usrcclko_connected =
+                        usrclk != nullptr && usrclk->driver.cell != nullptr &&
+                        !usrclk->driver.cell->type.in(id_PSEUDO_GND, id_PSEUDO_VCC);
+                write_bit("STARTUP.USRCCLKO_CONNECTED", usrcclko_connected);
+            }
+            pop();
+        }
+    }
+
     void write_ip()
     {
         for (auto &cell : ctx->cells) {
@@ -2140,6 +2188,7 @@ struct FasmBackend
         get_invertible_pins(ctx, invertible_pins);
         populate_bufgctrl_bound_slots(); // must run before any pip emission
         write_logic();
+        write_cfg();
         write_io();
         write_routing();
         write_bram();

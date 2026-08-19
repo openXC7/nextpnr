@@ -1000,4 +1000,36 @@ void XC7Packer::pack_idelayctrl()
     generic_xform(ioctrl_rules);
 }
 
+void XC7Packer::pack_cfg()
+{
+    log_info("Packing cfg...\n");
+    dict<IdString, XFormRule> cfg_rules;
+    cfg_rules[id_BSCANE2].new_type = id_BSCAN;
+    cfg_rules[id_DCIRESET].new_type = id_DCIRESET_DCIRESET;
+    cfg_rules[id_DNA_PORT].new_type = id_DNA_PORT_DNA_PORT;
+    cfg_rules[id_EFUSE_USR].new_type = id_EFUSE_USR_EFUSE_USR;
+    cfg_rules[id_ICAPE2].new_type = id_ICAP_ICAP;
+    cfg_rules[id_FRAME_ECCE2].new_type = id_FRAME_ECC_FRAME_ECC;
+    cfg_rules[id_STARTUPE2].new_type = id_STARTUP_STARTUP;
+    cfg_rules[id_USR_ACCESSE2].new_type = id_USR_ACCESS_USR_ACCESS;
+    generic_xform(cfg_rules);
+
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (ci->type == id_BSCAN) {
+            int chain = int_or_default(ci->params, id_JTAG_CHAIN, 1);
+            if (chain < 1 || 4 < chain)
+                log_error("Instance '%s': Invalid JTAG_CHAIN number of '%d'. Allowed values are: 1-4.\n",
+                          ci->name.c_str(ctx), chain);
+        }
+        // These configuration primitives each live in a single dedicated
+        // site; the placer cannot discover that site on its own, so without
+        // preplacement it aborts with "Unable to find legal placement for
+        // cell".  (Port of nextpnr-xilinx d42d6c9b.)
+        if (ci->type.in(id_BSCAN, id_DCIRESET_DCIRESET, id_DNA_PORT_DNA_PORT, id_EFUSE_USR_EFUSE_USR, id_ICAP_ICAP,
+                        id_FRAME_ECC_FRAME_ECC, id_STARTUP_STARTUP, id_USR_ACCESS_USR_ACCESS))
+            preplace_unique(ci);
+    }
+}
+
 NEXTPNR_NAMESPACE_END

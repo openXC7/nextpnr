@@ -198,6 +198,7 @@ struct XC7Packer : public XilinxPacker
 
     void pack_iologic();
     void pack_idelayctrl();
+    void pack_cfg();
 
     // Clocking
     void prepare_clocking();
