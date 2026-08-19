@@ -1231,9 +1231,23 @@ struct FasmBackend
 #endif
             write_bit("SRTYPE.SYNC");
             write_bit("TSRTYPE.SYNC");
+            // TRISTATE_WIDTH is a two-valued parameter whose W1 state is
+            // encoded as the absence of bits, so only W4 appears in segbits.
+            // Never writing it left every OSERDESE2 programmed as
+            // TRISTATE_WIDTH=1, silently overriding the cell's own parameter
+            // (defaults to 4 in the library).
+            // (Port of nextpnr-xilinx c05f0d05.)
+            if (int_or_default(ci->params, ctx->id("TRISTATE_WIDTH"), 4) == 4)
+                write_bit("TRISTATE_WIDTH.W4");
             if (is_cascaded)
                 write_bit("SERDES_MODE.SLAVE");
             pop();
+            // An explicitly requested CLKDIV inversion on an OSERDESE2 was
+            // discarded: the bit (OLOGIC_Y*.IS_CLKDIV_INVERTED) was written
+            // nowhere.  It sits on the OLOGIC, not inside the OSERDES prefix.
+            // (Port of nextpnr-xilinx b9ed05a2.)
+            write_bit("IS_CLKDIV_INVERTED",
+                      bool_or_default(ci->params, ctx->id("IS_CLKDIV_INVERTED"), false));
         } else if (ci->type == id_ISERDESE2_ISERDESE2) {
             std::string data_rate = str_or_default(ci->params, id_DATA_RATE);
             write_bit("IDDR_OR_ISERDES.IN_USE");
@@ -1248,7 +1262,15 @@ struct FasmBackend
                           !bool_or_default(ci->params, ctx->idf("SRVAL_Q%d", i), false));
             }
             write_bit("IFF.ZINV_C", !bool_or_default(ci->params, id_IS_CLK_INVERTED, false));
-            write_bit("IFF.ZINV_OCLK", !bool_or_default(ci->params, id_IS_OCLK_INVERTED, false));
+            // INV_OCLK and ZINV_OCLK are two DISTINCT physical bits; the
+            // fuzzer sets them as exact complements, so exactly one of the
+            // two must always be set.  Writing only the Z half left
+            // IS_OCLK_INVERTED=TRUE with neither bit set, an unprogrammed
+            // state that corresponds to no value of the parameter.
+            // (Port of nextpnr-xilinx c05f0d05.)
+            bool oclk_inv = bool_or_default(ci->params, id_IS_OCLK_INVERTED, false);
+            write_bit("IFF.INV_OCLK", oclk_inv);
+            write_bit("IFF.ZINV_OCLK", !oclk_inv);
 
             std::string iobdelay = str_or_default(ci->params, id_IOBDELAY, "NONE");
             write_bit("IFFDELMUXE3.P0", (iobdelay == "IFD"));
