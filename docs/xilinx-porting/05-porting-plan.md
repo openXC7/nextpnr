@@ -132,9 +132,11 @@ Port in commit-sized units, each with a bitstream-hash check:
    CE tied active in `prepare_clocking`, + `try_preplace` in
    `preplace_clocking`; constids `X(BUFH)`, `X(BUFHCE_BUFHCE)` added
    (upstream previously packed NEITHER BUFH nor BUFHCE).
-3. **Dist-RAM**: RAM512X1S/D, RAM32M16, RAM64M8, RAM64X2S, RAM64X8SW;
-   RAM128X1S scalar A0..A6; RAM256X1S mux-tree slice-half/zoffset fixes
-   (`c0194daf`, `363c055d`, `b390e9c9`).
+3. ⏭ **Dist-RAM**: NOT a gap (WP3.3 verified) — the fork's three fixes are
+   already present upstream (scalar A0..A6 special-case, m256 mux-tree
+   zoffset 0), and RAM512X1S/D / RAM32M16 / RAM64M8 / RAM64X2S /
+   RAM64X8SW are declared-but-unpacked on BOTH sides. Dropped from the
+   plan (earlier doc-02 claim corrected).
 4. **SRL**: Q31 support + cascade placement rules (`constrain_srl_cascades`,
    `pack.cc:763`, `697e293b`) — depends on WP1 item 7.
 5. ✅ **IDDR**: `DDR_CLK_EDGE=SAME_EDGE_PIPELINED` + 4-IFF-flop init
