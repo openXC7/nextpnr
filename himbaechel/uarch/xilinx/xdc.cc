@@ -42,6 +42,7 @@ void XilinxImpl::parse_xdc(const std::string &filename)
     std::string linebuf;
     int lineno = 0;
     unsigned num_errors = 0;
+    int missing_targets = 0;
 
     auto isempty = [](const std::string &str) {
         return std::all_of(str.begin(), str.end(), [](char c) { return std::isspace(c); });
@@ -89,6 +90,17 @@ void XilinxImpl::parse_xdc(const std::string &filename)
         return split_args;
     };
 
+    // Vivado calls a one-bit vector port "a[0]", but the JSON frontend
+    // collapses a width-1, offset-0 vector to the bare name "a", because
+    // yosys' JSON carries nothing that tells `wire [0:0] a` apart from
+    // `wire a`.  An XDC written against Vivado names therefore misses such
+    // a port.  Strip a trailing "[0]" so the lookup can retry.
+    //  (Port of nextpnr-xilinx b257be4d.)
+    auto debus_zero = [](const std::string &str) {
+        if (str.size() > 3 && str.compare(str.size() - 3, 3, "[0]") == 0)
+            return str.substr(0, str.size() - 3);
+        return std::string();
+    };
     auto get_cells = [&](std::string str) {
         std::vector<CellInfo *> tgt_cells;
         if (str.empty() || str.front() != '[')
@@ -102,8 +114,23 @@ void XilinxImpl::parse_xdc(const std::string &filename)
         if (split.size() < 2)
             log_error("failed to parse target (on line %d)\n", lineno);
         IdString cellname = ctx->id(strip_quotes(split.at(1)));
+        if (!ctx->cells.count(cellname)) {
+            std::string base = debus_zero(strip_quotes(split.at(1)));
+            if (!base.empty() && ctx->cells.count(ctx->id(base)))
+                cellname = ctx->id(base);
+        }
         if (ctx->cells.count(cellname))
             tgt_cells.push_back(ctx->cells.at(cellname).get());
+        else {
+            // A board-level XDC legitimately constrains every pin of the
+            // board while a design uses a subset, so a miss is not an error:
+            // stay silent like other arches do, and itemise only in verbose
+            // mode.  (Port of nextpnr-xilinx 3da43687/555d326c.)
+            missing_targets++;
+            if (ctx->verbose)
+                log_info("%s: no cell named '%s' (on line %d) - this target is ignored\n",
+                         split.front().c_str(), cellname.c_str(ctx), lineno);
+        }
         return tgt_cells;
     };
 
@@ -126,6 +153,12 @@ void XilinxImpl::parse_xdc(const std::string &filename)
             return tgt_nets;
         IdString netname = ctx->id(str);
         NetInfo *maybe_net = ctx->getNetByAlias(netname);
+        if (maybe_net == nullptr) {
+            // Retry with a trailing "[0]" stripped (see debus_zero above).
+            std::string base = debus_zero(str);
+            if (!base.empty())
+                maybe_net = ctx->getNetByAlias(ctx->id(base));
+        }
         if (maybe_net != nullptr) {
             tgt_nets.push_back(maybe_net);
             return tgt_nets;
@@ -136,6 +169,12 @@ void XilinxImpl::parse_xdc(const std::string &filename)
         maybe_net = ctx->getNetByAlias(netname);
         if (maybe_net != nullptr)
             tgt_nets.push_back(maybe_net);
+        else {
+            missing_targets++;
+            if (ctx->verbose)
+                log_info("%s: no net or port named '%s' (on line %d) - this target is ignored\n",
+                         split.front().c_str(), netname.c_str(ctx), lineno);
+        }
         return tgt_nets;
     };
 
@@ -186,9 +225,7 @@ void XilinxImpl::parse_xdc(const std::string &filename)
             std::vector<CellInfo *> dest;
             for (int cursor = 3; cursor < int(arguments.size()); cursor++) {
                 std::vector<CellInfo *> dest_loc = get_cells(arguments.at(cursor));
-                if (dest_loc.empty())
-                    log_warning("found set_property with no cells matching '%s' (on line %d)\n",
-                                arguments.at(cursor).c_str(), lineno);
+                // misses are reported (verbose-only) inside get_cells now
                 dest.insert(dest.end(), dest_loc.begin(), dest_loc.end());
             }
             for (auto c : dest) {
@@ -230,13 +267,19 @@ void XilinxImpl::parse_xdc(const std::string &filename)
             }
             // All remaining arguments are supposed to designate ports/nets
             std::vector<NetInfo *> dest;
-            if (cursor >= int(arguments.size()))
-                log_warning("found create_clock without designated nets (on line %d)\n", lineno);
+            if (cursor >= int(arguments.size())) {
+                // virtual clock (no target ports/nets): not supported; skip it
+                // instead of silently constraining nothing
+                log_warning("ignoring virtual clock (unsupported, on line %d)\n", lineno);
+                goto nextline;
+            }
             for (; cursor < (int)arguments.size(); cursor++) {
                 std::vector<NetInfo *> dest_loc = get_nets(arguments.at(cursor));
                 if (dest_loc.empty())
-                    log_warning("found create_clock with no nets matching '%s' (on line %d)\n",
-                                arguments.at(cursor).c_str(), lineno);
+                    log_warning("create_clock: target %s matched nothing, so the %.3f ns constraint "
+                                "was NOT applied (on line %d). The clock domain keeps the default "
+                                "target and will be reported as meeting timing at that default.\n",
+                                arguments.at(cursor).c_str(), period, lineno);
                 dest.insert(dest.end(), dest_loc.begin(), dest_loc.end());
             }
             for (auto n : dest) {
@@ -262,6 +305,10 @@ void XilinxImpl::parse_xdc(const std::string &filename)
         log_nonfatal_error("unexpected end of XDC file\n");
         num_errors++;
     }
+    if (missing_targets > 0 && ctx->verbose)
+        log_info("%d XDC constraint target(s) reference ports or nets that are not in this design and were "
+                 "ignored (a board-level XDC normally constrains more pins than a design uses)\n",
+                 missing_targets);
     if (num_errors > 0) {
         log_error("Stopping the program after %u errors found in XDC file\n", num_errors);
     }

@@ -160,14 +160,15 @@ Port in commit-sized units, each with a bitstream-hash check:
 6. Keep `fixupPlacement` as belt-and-braces only if WP1 proves insufficient;
    port the STRENGTH_USER-vs-STRONG skip distinction (doc 03 §6 risk 6).
 
-### WP5 — XDC parser improvements (small, user-visible)
+### WP5 — XDC parser improvements (small, user-visible) — 🔄 code done, build pending
 From coordinator note `drafts/00c`:
-1. `name[0]` de-busing retry (`b257be4d`).
-2. Silent non-design targets unless `--verbose` + summary line
-   (`3da43687`, `555d326c`).
-3. Virtual-clock skip guard and "constraint NOT applied" warning.
-4. BEL-attr-unknown-tile non-fatal (`8399469c`).
-5. **set_multicycle_path**: check upstream SDC path (`common/kernel/sdc.cc`)
+1. ✅ `name[0]` de-busing retry in `get_cells` + `get_nets` (`b257be4d`).
+2. ✅ Silent non-design targets unless `--verbose` + summary line
+   (`3da43687`, `555d326c`) — misses now itemise only in verbose mode.
+3. ✅ Virtual-clock skip guard and "constraint NOT applied" warning.
+4. ⏭ BEL-attr-unknown-tile non-fatal (`8399469c`) — verify upstream
+   behaviour separately (placement-time, not parser).
+5. ⏳ **set_multicycle_path**: check upstream SDC path (`common/kernel/sdc.cc`)
    before porting the `NEXTPNR_MCP_SETUP` attribute hack — prefer the
    upstream mechanism.
 
