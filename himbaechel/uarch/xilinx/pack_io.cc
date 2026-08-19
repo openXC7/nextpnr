@@ -806,10 +806,18 @@ void XC7Packer::pack_iologic()
                 }
                 BelId io_bel;
                 CellInfo *ob = !q_disconnected ? find_p_outbuf(q) : find_p_outbuf(ofb);
-                if (ob != nullptr)
+                if (ob != nullptr) {
                     io_bel = ob->bel;
-                else
+                } else if (ofb && ofb->users.entries() == 1 && (*ofb->users.begin()).cell->type == id_ISERDESE2) {
+                    // OFB loopback (e.g. DDR read calibration): OSERDESE2's OFB
+                    // feeds an ISERDESE2, so there is no IOB to anchor on; the
+                    // pair is bound to a free OSERDES/ISERDES site pair after
+                    // the main loop.  (Port of nextpnr-xilinx OFB support.)
+                    unconstrained_oserdes.insert(ci);
+                    continue;
+                } else {
                     log_error("%s '%s' has illegal fanout on OQ or OFB output\n", ci->type.c_str(ctx), ctx->nameOf(ci));
+                }
 
                 SiteIndex ol_site = get_ologic_site(io_bel);
 
@@ -885,6 +893,16 @@ void XC7Packer::pack_iologic()
             fold_inverter(ci, "CLKB");
             fold_inverter(ci, "OCLKB");
 
+            // OFB loopback: D driven by an OSERDESE2's OFB output (no IOB /
+            // IDELAYE2 driver); placed together with its OSERDESE2 in the
+            // unconstrained pass below.
+            {
+                NetInfo *d_ofb = ci->getPort(id_D);
+                if (d_ofb && d_ofb->driver.cell && d_ofb->driver.cell->type == id_OSERDESE2 &&
+                    d_ofb->driver.port == id_OFB)
+                    continue;
+            }
+
             std::string iobdelay = str_or_default(ci->params, id_IOBDELAY, "NONE");
             BelId io_bel;
 
@@ -923,9 +941,48 @@ void XC7Packer::pack_iologic()
         }
     }
 
+    // OFB-loopback pairs: an OSERDESE2 whose OFB feeds an ISERDESE2 has no
+    // IOB to anchor on, so bind the pair to a free OSERDES/ISERDES site pair.
+    // (Port of nextpnr-xilinx unconstrained-OSERDESE2 support.)
+    for (auto ci : unconstrained_oserdes) {
+        BelId oserdes_bel;
+        for (auto bel : ctx->getBels()) {
+            if (ctx->getBelType(bel) == id_OSERDESE2_OSERDESE2 && ctx->checkBelAvail(bel)) {
+                oserdes_bel = bel;
+                break;
+            }
+        }
+        if (oserdes_bel == BelId())
+            log_error("IO placer ran out of available OSERDESE2 bels (%d unconstrained)\n",
+                      int(unconstrained_oserdes.size()));
+        ctx->bindBel(oserdes_bel, ci, STRENGTH_LOCKED);
+
+        NetInfo *ofb = ci->getPort(id_OFB);
+        NPNR_ASSERT(ofb != nullptr && ofb->users.entries() == 1);
+        CellInfo *iserdes = (*ofb->users.begin()).cell;
+        NPNR_ASSERT(iserdes->type == id_ISERDESE2);
+        SiteIndex il_site = get_ilogic_site_for_ologic(uarch->get_bel_site(oserdes_bel));
+        BelId iserdes_bel = uarch->get_site_bel(il_site, id_ISERDESE2);
+        NPNR_ASSERT(iserdes_bel != BelId());
+        ctx->bindBel(iserdes_bel, iserdes, STRENGTH_LOCKED);
+    }
+
     flush_cells();
     generic_xform(iologic_rules, false);
     flush_cells();
+}
+
+SiteIndex XC7Packer::get_ilogic_site_for_ologic(SiteIndex ologic_site)
+{
+    const auto &sites = uarch->tile_extra_data(ologic_site.tile)->sites;
+    const auto &odata = sites[ologic_site.site];
+    for (int32_t i = 0; i < int32_t(sites.ssize()); i++) {
+        const auto &s = sites[i];
+        if (boost::starts_with(IdString(s.name_prefix).str(ctx), "ILOGIC") && s.site_x == odata.site_x &&
+            s.site_y == odata.site_y)
+            return SiteIndex(ologic_site.tile, i);
+    }
+    NPNR_ASSERT_FALSE("failed to find sibling ILOGIC site for OSERDESE2");
 }
 
 void XC7Packer::pack_idelayctrl()
