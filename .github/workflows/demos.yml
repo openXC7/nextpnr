@@ -1,23 +1,27 @@
 # Regression gate: build a representative demo-project subset against
-# THIS PR's himbaechel/xilinx code + openXC7 prjxray-db.
+# THIS PR's himbaechel/xilinx code + openXC7 prjxray-db, and verify the
+# resulting bitstream frames against committed goldens.
 #
 # Why it exists: the openXC7 demo-projects CI builds against the
 # toolchain-nix pin of nextpnr-xilinx, so a nextpnr PR never exercises
 # the xc7 demos.  This workflow closes that gap for the PR itself:
 #
 #   1. builds nextpnr-himbaechel from the PR (ARCH=himbaechel,
-#      HIMBAECHEL_UARCH=xilinx) with Python support
+#      HIMBAECHEL_UARCH=xilinx)
 #   2. builds the chipdbs for the parts the demo subset needs, from
 #      openXC7/prjxray-db
-#   3. runs the demos with the PR binary through a CLI shim
-#      (.github/scripts/nextpnr-xilinx-shim.sh)
-#   4. publishes the built bitstreams as artifacts
+#   3. builds xc7frames2bit from openXC7/prjxray
+#   4. runs the demos with the PR binary through a CLI shim
+#      (.github/scripts/nextpnr-xilinx-shim.sh), pinned --seed
+#   5. compares the sha256 of each produced .frames file against
+#      .github/goldens/<project>.sha256
+#   6. publishes the built bitstreams as artifacts
 #
-# Note on goldens: the bitstream hash comparison used by the fork's
-# equivalent gate does not apply yet -- upstream himbaechel placements
-# differ from nextpnr-xilinx's, so fork goldens cannot match.  The gate
-# is build-only until upstream goldens are committed (porting plan
-# WP9.3); bitstreams are uploaded for inspection.
+# Golden policy (porting plan WP9.3): goldens are the expected output of
+# THIS repo's himbaechel/xilinx implementation, generated with the pinned
+# prjxray-db revision and a fixed P&R seed.  A mismatch fails the gate:
+# if the change intentionally alters FASM output, re-golden the affected
+# project (see the failure message) and review the diff.
 
 name: demos
 
@@ -33,13 +37,16 @@ permissions:
   contents: read
 
 env:
-  PRJXRAY_DB_REPO: openXC7/prjxray-db
-  PRJXRAY_REPO: openXC7/prjxray
-  DEMO_PROJECTS_REPO: openXC7/demo-projects
+  # Pinned to make the gate reproducible: the chipdb is generated from
+  # prjxray-db and the frames from prjxray's fasm2frames/xc7frames2bit,
+  # so a moving database or tool revision would break golden matching.
+  PRJXRAY_DB_REV: ab1fc60c38a0dc1bc1d3d495f3189b25ae971e04
+  PRJXRAY_REV: ef5203e9d06e9ffda79168439723579217ca8110
+  DEMO_PROJECTS_REV: 58c81f114f886990879268d31df3d7dcc098b4f1
 
 jobs:
   demos:
-    name: ${{ matrix.part }}
+    name: ${{ matrix.project }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -50,17 +57,37 @@ jobs:
             upper: SPARTAN7
             part: xc7s50csga324-1
             die: xc7s50
-            projects: litex-ddr-arty-s7 litex-minimal-arty-s7
+            project: litex-ddr-arty-s7
+            top: digilent_arty_s7
+            seed: 1
+          - family: spartan7
+            upper: SPARTAN7
+            part: xc7s50csga324-1
+            die: xc7s50
+            project: litex-minimal-arty-s7
+            top: digilent_arty_s7
+            seed: 1
           - family: artix7
             upper: ARTIX7
             part: xc7a35tcsg324-1
             die: xc7a50t
-            projects: blinky-digilent-arty
+            project: blinky-digilent-arty
+            top: blinky
+            seed: 1
           - family: kintex7
             upper: KINTEX7
             part: xc7k325tffg676-1
             die: xc7k325t
-            projects: blinky-qmtech litex-ddr-qmtech-kintex7
+            project: blinky-qmtech
+            top: blinky
+            seed: 1
+          - family: kintex7
+            upper: KINTEX7
+            part: xc7k325tffg676-1
+            die: xc7k325t
+            project: litex-ddr-qmtech-kintex7
+            top: qmtech_xc7k325t
+            seed: 2
     steps:
       - uses: actions/checkout@v4
         with:
@@ -70,19 +97,23 @@ jobs:
       - name: Checkout prjxray-db
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.PRJXRAY_DB_REPO }}
+          repository: openXC7/prjxray-db
+          ref: ${{ env.PRJXRAY_DB_REV }}
           path: prjxray-db
 
       - name: Checkout prjxray (fasm2frames / xc7frames2bit)
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.PRJXRAY_REPO }}
+          repository: openXC7/prjxray
+          ref: ${{ env.PRJXRAY_REV }}
           path: prjxray
+          submodules: recursive
 
       - name: Checkout demo-projects
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.DEMO_PROJECTS_REPO }}
+          repository: openXC7/demo-projects
+          ref: ${{ env.DEMO_PROJECTS_REV }}
           path: demo-projects
 
       - uses: actions/setup-python@v5
@@ -93,14 +124,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y git make cmake libboost-all-dev python3-dev \
-            libeigen3-dev yosys
-          pip install fasm
+            libeigen3-dev
+          pip install fasm intervaltree progressbar2 simplejson pyyaml
 
       - name: Build nextpnr-himbaechel from this PR
         run: |
           cmake -S nextpnr -B build-pr \
             -DARCH=himbaechel -DHIMBAECHEL_UARCH=xilinx \
-            -DBUILD_GUI=OFF -DBUILD_PYTHON=ON \
+            -DBUILD_GUI=OFF -DBUILD_PYTHON=OFF \
             -DCMAKE_BUILD_TYPE=Release \
             -DHIMBAECHEL_PRJXRAY_DB="$GITHUB_WORKSPACE/prjxray-db" \
             -DHIMBAECHEL_XILINX_DEVICES="${{ matrix.die }}"
@@ -112,10 +143,27 @@ jobs:
           chmod +x bin/nextpnr-xilinx
           echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
 
+      - name: Build prjxray tools
+        run: |
+          cd prjxray
+          # fixes for building the unmaintained project with modern cmake/gcc
+          # (mirrors openXC7/toolchain-nix nix/prjxray.nix)
+          sed -i 's/VERSION 3.5.0/VERSION 3.14.0/g' CMakeLists.txt
+          sed -i 's/VERSION 3.0.2/VERSION 3.14.0/g' third_party/gflags/CMakeLists.txt
+          sed -i 's/VERSION 2.8.12/VERSION 3.14.0/g' third_party/cctz/CMakeLists.txt
+          CFLAGS="-include stdint.h -Wno-free-nonheap-object" \
+          CXXFLAGS="-include stdint.h -Wno-free-nonheap-object" \
+            cmake -S . -B build-prjxray -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-prjxray --target xc7frames2bit --parallel 4
+          ln -s "$GITHUB_WORKSPACE/prjxray/utils/fasm2frames.py" "$GITHUB_WORKSPACE/bin/fasm2frames"
+          chmod +x "$GITHUB_WORKSPACE/bin/fasm2frames"
+          cp build-prjxray/tools/xc7frames2bit "$GITHUB_WORKSPACE/bin/"
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/prjxray" >> "$GITHUB_ENV"
+
       - name: Build demos
         env:
           UPPER: ${{ matrix.upper }}
-          PROJECTS: ${{ matrix.projects }}
+          SEED: ${{ matrix.seed }}
         run: |
           export ${UPPER}_CHIPDB="$GITHUB_WORKSPACE/chipdb"
           mkdir -p "$GITHUB_WORKSPACE/chipdb"
@@ -126,16 +174,31 @@ jobs:
           cp "build-pr/share/himbaechel/xilinx/chipdb-${{ matrix.die }}.bin" \
              "$GITHUB_WORKSPACE/chipdb/$(echo '${{ matrix.part }}' | sed 's/-[0-9]L\?$//').bin"
           export PATH="$GITHUB_WORKSPACE/bin:$PATH"
+          export PRJXRAY_DB_DIR="$GITHUB_WORKSPACE/prjxray-db"
           # prove which binary the demos use
           command -v nextpnr-xilinx
           case "$(command -v nextpnr-xilinx)" in
             "$GITHUB_WORKSPACE/bin/"*) ;;
             *) echo "::error::demos gate is not using this PR's nextpnr-himbaechel"; exit 1 ;;
           esac
-          for p in $PROJECTS; do
-            echo "=== building $p ==="
-            make -C "demo-projects/$p"
-          done
+          # committed JSONs are reused (no yosys in the gate); a fixed seed
+          # keeps the P&R -- and therefore the golden -- reproducible
+          make -C "demo-projects/${{ matrix.project }}" "${{ matrix.top }}.frames" \
+               PNR_ARGS="--seed $SEED"
+          make -C "demo-projects/${{ matrix.project }}" all PNR_ARGS="--seed $SEED"
+
+      - name: Verify golden frames
+        run: |
+          hash=$(sha256sum "demo-projects/${{ matrix.project }}/${{ matrix.top }}.frames" | cut -d' ' -f1)
+          golden=$(cat "nextpnr/.github/goldens/${{ matrix.project }}.sha256")
+          if [ "$hash" != "$golden" ]; then
+            echo "::error::frames hash mismatch: got $hash, golden $golden"
+            echo "If this change intentionally alters FASM output, re-golden:"
+            echo "  sha256sum demo-projects/${{ matrix.project }}/${{ matrix.top }}.frames \\"
+            echo "      | cut -d' ' -f1 > nextpnr/.github/goldens/${{ matrix.project }}.sha256"
+            exit 1
+          fi
+          echo "golden match: $hash"
 
       # Built bitstreams are the primary debugging output of this gate.
       # Kept on failure too -- a broken bitstream is usually what the
@@ -144,6 +207,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bitstreams-${{ matrix.part }}
-          path: demo-projects/*/*.bit
+          name: bitstreams-${{ matrix.project }}
+          path: demo-projects/${{ matrix.project }}/*.bit
           if-no-files-found: warn
