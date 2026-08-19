@@ -112,11 +112,13 @@ Port in commit-sized units, each with a bitstream-hash check:
    the corresponding HP-glue emissions are ported, not dropped.
 3. SDP BRAM opposite-port width + 36-wide marker + ZINV_REGCLK*
    (`f1c77134`, `11f9b694`, `1b7d51b9`, `e71acda2`).
-4. OSERDES/ILOGIC bits: `IS_CLKDIV_INVERTED`, `TRISTATE_WIDTH.W4`,
+4. ✅ OSERDES/ILOGIC bits: `IS_CLKDIV_INVERTED`, `TRISTATE_WIDTH.W4`,
    `IFF.INV_OCLK` (`b9ed05a2`, `c05f0d05`).
-5. PLL/MMCM LKTABLE/TABLE from PLL-specific tables (`e33b5f1a`,
-   `74357a79`) — diff against upstream `mmcm_tables.cc` first.
-6. BUFR_DIVIDE on placed BUFR (`0b914578`).
+5. ✅ PLL LKTABLE/TABLE from PLL-specific tables (`e33b5f1a`,
+   `74357a79`) — 63-entry tables indexed by CLKFBOUT_MULT, BANDWIDTH=LOW
+   table, harvested from Vivado goldens.
+6. ✅ BUFR_DIVIDE on placed BUFR (`0b914578`) + BUFR packing/placement +
+   HCLK_IOI pip-filter fix (see WP4.4 note).
 7. Run-identity FASM header (`7037c948`) — trivial, do first as a warm-up.
 - **Validate**: fork CI's normalised bitstream-hash comparison on
   arty-s7/arty/kintex7 demo projects (needs WP9 CI scaffolding or local
@@ -134,8 +136,9 @@ Port in commit-sized units, each with a bitstream-hash check:
    (`c0194daf`, `363c055d`, `b390e9c9`).
 4. **SRL**: Q31 support + cascade placement rules (`constrain_srl_cascades`,
    `pack.cc:763`, `697e293b`) — depends on WP1 item 7.
-5. **IDDR**: `DDR_CLK_EDGE=SAME_EDGE_PIPELINED` + 4-IFF-flop init +
-   routethru SRTYPE fixes (`9a6a7e3b`, `d455ae52`, `f77907ac`, `16accf3b`).
+5. ✅ **IDDR**: `DDR_CLK_EDGE=SAME_EDGE_PIPELINED` + 4-IFF-flop init
+   (`9a6a7e3b`, `d455ae52`); routethru SRTYPE fixes (`f77907ac`,
+   `16accf3b`) inapplicable upstream (pp_config already omits SRTYPE).
 6. **ISERDES/OSERDES**: OFB placement, master/slave pairing parity with fork
    (`pack_io_xc7.cc:903-1106`).
 7. **IDELAYCTRL** no-delay → warning (`06769c05`).
