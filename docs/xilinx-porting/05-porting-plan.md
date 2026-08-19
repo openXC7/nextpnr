@@ -137,13 +137,13 @@ Port in commit-sized units, each with a bitstream-hash check:
    zoffset 0), and RAM512X1S/D / RAM32M16 / RAM64M8 / RAM64X2S /
    RAM64X8SW are declared-but-unpacked on BOTH sides. Dropped from the
    plan (earlier doc-02 claim corrected).
-4. **SRL**: Q31 support + cascade placement rules (`constrain_srl_cascades`,
-   `pack.cc:763`, `697e293b`) — depends on WP1 item 7.
+4. ✅ **SRL**: Q31 (MC31) support + cascade placement rules
+   (`constrain_srl_cascades`) with cluster-based D-C-B-A grouping.
 5. ✅ **IDDR**: `DDR_CLK_EDGE=SAME_EDGE_PIPELINED` + 4-IFF-flop init
    (`9a6a7e3b`, `d455ae52`); routethru SRTYPE fixes (`f77907ac`,
    `16accf3b`) inapplicable upstream (pp_config already omits SRTYPE).
-6. **ISERDES/OSERDES**: OFB placement, master/slave pairing parity with fork
-   (`pack_io_xc7.cc:903-1106`).
+6. ✅ **ISERDES/OSERDES**: OFB loopback placement (OSERDESE2->ISERDESE2 pair
+   bound to a free site pair); master/slave pairing was already upstream. 7. ✅ **IDELAYCTRL** no-delay warning already upstream (pack_io.cc).
 7. **IDELAYCTRL** no-delay → warning (`06769c05`).
 8. ✅ **IBUFGDS** alias of IBUFDS (`55c3bc87`): constid `X(IBUFGDS)` +
    `cells.cc` port list + `pins.cc` toplevel + `is_diff_ibuf` test + HR/HP
@@ -168,9 +168,12 @@ Port in commit-sized units, each with a bitstream-hash check:
 3. ✅ **router2 config**: new `HimbaechelAPI::configureRouter2()` hook (set in
    `Arch::route()`); XilinxImpl sets `bb_margin_{x,y}=4`,
    `backwards_max_iter=200`, `perf_profile=true`.
-4. ⏳ **routeVcc + clock-backbone ordering**: port the fork's clock-first /
-   Vcc-post-fill ordering and pip blacklist to avoid the "Vcc floods the
-   clock backbone" failure (doc 03 §6 risk 8; fork `arch.cc:912,1752,351`).
+4. ⏭ **routeVcc + clock-backbone ordering**: assessed NOT needed upstream —
+   router2 routes constant nets itself and `route_clocks` pre-binds clock
+   nets LOCKED before router2 runs, so the fork's post-router Vcc fill /
+   "Vcc floods the clock backbone" failure mode does not apply.  Deferred
+   unless a concrete failure appears (the HCLK_IOI clock-entry pip filter
+   fix in WP2.6 was the one DB-side piece that mattered).
 5. ✅ **Final timing analysis after router2** (`7ea51730`): added generically
    in `Arch::route()` — router2 previously ran no final analysis (router1
    does); verified post-route fmax report appears.
@@ -185,9 +188,9 @@ From coordinator note `drafts/00c`:
 3. ✅ Virtual-clock skip guard and "constraint NOT applied" warning.
 4. ⏭ BEL-attr-unknown-tile non-fatal (`8399469c`) — verify upstream
    behaviour separately (placement-time, not parser).
-5. ⏳ **set_multicycle_path**: check upstream SDC path (`common/kernel/sdc.cc`)
-   before porting the `NEXTPNR_MCP_SETUP` attribute hack — prefer the
-   upstream mechanism.
+5. ✅ **set_multicycle_path -setup**: upstream SDC has no multicycle support
+   at all (create_clock/set_false_path only), so the fork's attribute
+   mechanism was ported (XDC parser + timing-walk relaxation).
 
 ### WP6 — Config/misc IP preplacement (easy after WP1)
 BSCANE2, DNA_PORT, EFUSE_USR, ICAPE2, FRAME_ECCE2, STARTUPE2,
@@ -211,7 +214,16 @@ UltraScale-related found in the fork is ignored for the purposes of
 this effort. If UltraScale support is ever desired, it must be planned
 as a separate project with its own documents.
 
-### WP9 — Validation & CI (runs alongside all packages)
+### WP9 — Validation & CI (runs alongside all packages) — 🔄 groundwork done
+- ✅ demos regression gate workflow (`.github/workflows/demos.yml`): builds
+  the PR's himbaechel/xilinx binary + chipdbs from openXC7 prjxray-db, runs
+  the demo subset via `.github/scripts/nextpnr-xilinx-shim.sh`, uploads
+  bitstreams.  Build-only for now (fork goldens cannot match himbaechel
+  placements; re-golden per WP9.3 once the port stabilises).
+- ✅ part-form / bare-die device names accepted (CI shim derives the device
+  from the chipdb filename).
+- ⏳ xilinx gtest coverage; archcheck `bel != bel2` fix (pre-existing
+  upstream chipdb issue: variant bels share names — documented, deferred).
 1. Add xilinx gtest coverage (upstream `tests/` has none for himbaechel;
    `ng-ultra` shows the pattern) — port fork slice-legality/DRAM/BRAM cases.
 2. Port the fork's per-PR demos gate (`.github/workflows/demos.yml`):

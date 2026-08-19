@@ -1,0 +1,149 @@
+# Regression gate: build a representative demo-project subset against
+# THIS PR's himbaechel/xilinx code + openXC7 prjxray-db.
+#
+# Why it exists: the openXC7 demo-projects CI builds against the
+# toolchain-nix pin of nextpnr-xilinx, so a nextpnr PR never exercises
+# the xc7 demos.  This workflow closes that gap for the PR itself:
+#
+#   1. builds nextpnr-himbaechel from the PR (ARCH=himbaechel,
+#      HIMBAECHEL_UARCH=xilinx) with Python support
+#   2. builds the chipdbs for the parts the demo subset needs, from
+#      openXC7/prjxray-db
+#   3. runs the demos with the PR binary through a CLI shim
+#      (.github/scripts/nextpnr-xilinx-shim.sh)
+#   4. publishes the built bitstreams as artifacts
+#
+# Note on goldens: the bitstream hash comparison used by the fork's
+# equivalent gate does not apply yet -- upstream himbaechel placements
+# differ from nextpnr-xilinx's, so fork goldens cannot match.  The gate
+# is build-only until upstream goldens are committed (porting plan
+# WP9.3); bitstreams are uploaded for inspection.
+
+name: demos
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: demos-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PRJXRAY_DB_REPO: openXC7/prjxray-db
+  PRJXRAY_REPO: openXC7/prjxray
+  DEMO_PROJECTS_REPO: openXC7/demo-projects
+
+jobs:
+  demos:
+    name: ${{ matrix.part }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - family: spartan7
+            upper: SPARTAN7
+            part: xc7s50csga324-1
+            die: xc7s50
+            projects: litex-ddr-arty-s7 litex-minimal-arty-s7
+          - family: artix7
+            upper: ARTIX7
+            part: xc7a35tcsg324-1
+            die: xc7a50t
+            projects: blinky-digilent-arty
+          - family: kintex7
+            upper: KINTEX7
+            part: xc7k325tffg676-1
+            die: xc7k325t
+            projects: blinky-qmtech litex-ddr-qmtech-kintex7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: nextpnr
+          submodules: recursive
+
+      - name: Checkout prjxray-db
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRJXRAY_DB_REPO }}
+          path: prjxray-db
+
+      - name: Checkout prjxray (fasm2frames / xc7frames2bit)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRJXRAY_REPO }}
+          path: prjxray
+
+      - name: Checkout demo-projects
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DEMO_PROJECTS_REPO }}
+          path: demo-projects
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git make cmake libboost-all-dev python3-dev \
+            libeigen3-dev yosys
+          pip install fasm
+
+      - name: Build nextpnr-himbaechel from this PR
+        run: |
+          cmake -S nextpnr -B build-pr \
+            -DARCH=himbaechel -DHIMBAECHEL_UARCH=xilinx \
+            -DBUILD_GUI=OFF -DBUILD_PYTHON=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DHIMBAECHEL_PRJXRAY_DB="$GITHUB_WORKSPACE/prjxray-db" \
+            -DHIMBAECHEL_XILINX_DEVICES="${{ matrix.die }}"
+          cmake --build build-pr --parallel 4
+          # make the binary + shim available to the demo Makefiles
+          mkdir -p bin
+          cp build-pr/nextpnr-himbaechel bin/
+          cp nextpnr/.github/scripts/nextpnr-xilinx-shim.sh bin/nextpnr-xilinx
+          chmod +x bin/nextpnr-xilinx
+          echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
+
+      - name: Build demos
+        env:
+          UPPER: ${{ matrix.upper }}
+          PROJECTS: ${{ matrix.projects }}
+        run: |
+          export ${UPPER}_CHIPDB="$GITHUB_WORKSPACE/chipdb"
+          mkdir -p "$GITHUB_WORKSPACE/chipdb"
+          # openXC7.mk resolves the chipdb as <part-minus-speed>.bin; our
+          # build produces chipdb-<die>.bin.  Copy under the expected name
+          # (the shim passes --chipdb plus a part-form --device, and the
+          # die/packageless device names are accepted by the uarch).
+          cp "build-pr/share/himbaechel/xilinx/chipdb-${{ matrix.die }}.bin" \
+             "$GITHUB_WORKSPACE/chipdb/$(echo '${{ matrix.part }}' | sed 's/-[0-9]L\?$//').bin"
+          export PATH="$GITHUB_WORKSPACE/bin:$PATH"
+          # prove which binary the demos use
+          command -v nextpnr-xilinx
+          case "$(command -v nextpnr-xilinx)" in
+            "$GITHUB_WORKSPACE/bin/"*) ;;
+            *) echo "::error::demos gate is not using this PR's nextpnr-himbaechel"; exit 1 ;;
+          esac
+          for p in $PROJECTS; do
+            echo "=== building $p ==="
+            make -C "demo-projects/$p"
+          done
+
+      # Built bitstreams are the primary debugging output of this gate.
+      # Kept on failure too -- a broken bitstream is usually what the
+      # failing PR is about.
+      - name: Upload bitstreams
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitstreams-${{ matrix.part }}
+          path: demo-projects/*/*.bit
+          if-no-files-found: warn

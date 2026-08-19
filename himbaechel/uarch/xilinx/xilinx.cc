@@ -79,7 +79,9 @@ void XilinxImpl::init_database(Arch *arch)
     const ArchArgs &args = arch->args;
     init_uarch_constids(arch);
     std::smatch match;
-    std::regex devicere = std::regex("(xc7[azks]\\d+t?|xc7vx\\d+t?)([a-z0-9]+)-(\\dL?)");
+    // Full part names (xc7s50csga324-1) or bare die names (xc7s50) are both
+    // accepted; a bare die selects the die's default package.
+    std::regex devicere = std::regex("(xc7[azks]\\d+t?|xc7vx\\d+t?)([a-z0-9]*)(?:-([0-9]L?))?");
     if (!std::regex_match(args.device, match, devicere)) {
         log_error("Invalid device %s\n", args.device.c_str());
     }
@@ -88,7 +90,10 @@ void XilinxImpl::init_database(Arch *arch)
         die = "xc7a50t";
     arch->load_chipdb(stringf("xilinx/chipdb-%s.bin", die.c_str()));
     std::string package = match[2].str();
-    arch->set_package(package);
+    if (!package.empty())
+        arch->set_package(package);
+    // A bare die name selects no package; designs needing PACKAGE_PIN
+    // constraints must pass a part-form name (e.g. xc7s50csga324).
     arch->set_speed_grade("DEFAULT");
 }
 
