@@ -1729,11 +1729,70 @@ struct FasmBackend
         }
         pop();
 
-        // FIXME: should these be calculated somehow?
+        // PLLE2 lock & loop-filter configuration, from CLKFBOUT_MULT.
+        //
+        // These are PLL-specific tables harvested from Vivado golden
+        // bitstreams (one minimal PLLE2_ADV design per CLKFBOUT_MULT 2..64,
+        // disassembled with prjxray bit2fasm):
+        //  - the values depend on CLKFBOUT_MULT only;
+        //  - LKTABLE matches the XAPP888 MMCM lock table only up to
+        //    MULT=10; from MULT=11 the PLL table diverges (delay fields
+        //    saturate at 31, LockCnt decreases per MULT).  The MMCM lock
+        //    table must not be reused here;
+        //  - TABLE (loop filter: CP/RES/LFHF) varies across the whole
+        //    range; the old hardcoded value is Vivado's for MULT=4 only.
+        //    A wrong loop filter yields a clock clean enough for a
+        //    free-running counter but too jittery for synchronous logic;
+        //  - BANDWIDTH=HIGH programs the same filter as OPTIMIZED; LOW has
+        //    its own filter table; LKTABLE does not depend on BANDWIDTH.
+        // (Port of nextpnr-xilinx e33b5f1a/74357a79.)
+        static const int64_t plle2_lock_table[63] = {
+                0x31BE8FA401LL, 0x423E8FA401LL, 0x5AFE8FA401LL, 0x73BE8FA401LL,
+                0x8C7E8FA401LL, 0x9CFE8FA401LL, 0xB5BE8FA401LL, 0xCE7E8FA401LL,
+                0xE73E8FA401LL, 0xFFF84FA401LL, 0xFFF39FA401LL, 0xFFEEEFA401LL,
+                0xFFEBCFA401LL, 0xFFE8AFA401LL, 0xFFE71FA401LL, 0xFFE3FFA401LL,
+                0xFFE26FA401LL, 0xFFE0DFA401LL, 0xFFDF4FA401LL, 0xFFDDBFA401LL,
+                0xFFDC2FA401LL, 0xFFDA9FA401LL, 0xFFD90FA401LL, 0xFFD90FA401LL,
+                0xFFD77FA401LL, 0xFFD5EFA401LL, 0xFFD5EFA401LL, 0xFFD45FA401LL,
+                0xFFD45FA401LL, 0xFFD2CFA401LL, 0xFFD2CFA401LL, 0xFFD2CFA401LL,
+                0xFFD13FA401LL, 0xFFD13FA401LL, 0xFFD13FA401LL, 0xFFCFAFA401LL,
+                0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL,
+                0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL,
+                0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL,
+                0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL,
+                0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL,
+                0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL,
+                0xFFCFAFA401LL, 0xFFCFAFA401LL, 0xFFCFAFA401LL};
+        static const uint16_t plle2_filter_optimized[63] = {
+                0x0DC, 0x17C, 0x1FC, 0x1EC, 0x35C, 0x3AC, 0x3B4, 0x3F4,
+                0x3DC, 0x3EC, 0x3F4, 0x3CC, 0x394, 0x3D4, 0x3D4, 0x3D4,
+                0x3D4, 0x1D8, 0x1D8, 0x1D8, 0x1D8, 0x170, 0x170, 0x170,
+                0x304, 0x304, 0x304, 0x304, 0x304, 0x304, 0x304, 0x304,
+                0x108, 0x108, 0x108, 0x0A0, 0x0A0, 0x0A0, 0x0D0, 0x0A0,
+                0x0A0, 0x0A0, 0x0A0, 0x0A0, 0x0A0, 0x0A0, 0x0A0, 0x0A0,
+                0x0A0, 0x0A0, 0x0A0, 0x0A0, 0x130, 0x130, 0x130, 0x130,
+                0x130, 0x130, 0x130, 0x090, 0x090, 0x090, 0x090};
+        static const uint16_t plle2_filter_low[63] = {
+                0x0BC, 0x09C, 0x0B4, 0x094, 0x094, 0x0A4, 0x0B8, 0x0B8,
+                0x084, 0x084, 0x098, 0x098, 0x098, 0x098, 0x0A8, 0x0A8,
+                0x0A8, 0x0A8, 0x0B0, 0x0B0, 0x0B0, 0x0B0, 0x0B0, 0x0B0,
+                0x0B0, 0x0B0, 0x0B0, 0x0B0, 0x0B0, 0x088, 0x088, 0x088,
+                0x088, 0x088, 0x088, 0x088, 0x088, 0x088, 0x088, 0x0F0,
+                0x0F0, 0x0F0, 0x0F0, 0x0F0, 0x0F0, 0x0F0, 0x090, 0x090,
+                0x090, 0x090, 0x090, 0x090, 0x090, 0x090, 0x090, 0x090,
+                0x090, 0x090, 0x090, 0x090, 0x090, 0x090, 0x090};
+        int pll_mult = (int)float_or_default(ci, "CLKFBOUT_MULT", 1);
+        if (pll_mult < 2)
+            pll_mult = 2;
+        if (pll_mult > 64)
+            pll_mult = 64;
+        std::string pll_bw = str_or_default(ci->params, ctx->id("BANDWIDTH"), "OPTIMIZED");
         write_int_vector("FILTREG1_RESERVED[11:0]", 0x8, 12);
-        write_int_vector("LKTABLE[39:0]", 0xB5BE8FA401ULL, 40);
+        write_int_vector("LKTABLE[39:0]", plle2_lock_table[pll_mult - 2], 40);
         write_bit("LOCKREG3_RESERVED[0]");
-        write_int_vector("TABLE[9:0]", 0x3B4, 10);
+        write_int_vector("TABLE[9:0]", (pll_bw == "LOW") ? plle2_filter_low[pll_mult - 2]
+                                                         : plle2_filter_optimized[pll_mult - 2],
+                         10);
         pop(2);
     }
 
