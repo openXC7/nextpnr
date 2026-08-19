@@ -76,30 +76,30 @@
 - **Validate**: chipdb gen + build for xc7a50t/xc7k325t/xc7vx485t/xc7z045
   (in progress); then `arty-a35` blinky + archcheck.
 
-### WP1 — Port the legality engine (core, must be first)
-Port into `himbaechel/uarch/xilinx/xilinx_place.cc` (+`xilinx.cc` hooks):
-1. Per-position OUTMUX (site-exit) budget — fork `arch_place.cc:424-506`.
-2. Cross-position carry→FF flat rejection + 5FF-fed-by-carry rejection —
-   fork `arch_place.cc:731-745, 766-774`.
-3. Main-FF-via-X-bypass + 5FF co-pack rejection — fork `arch_place.cc:789-804`.
-4. Strengthen 5LUT A6/O6 connected-port gate and make the SLICEM-only guard
-   unconditional (fork `arch_place.cc:368-423, 626-656`) — himbaechel's
-   versions are dirty-cache-gated (doc 03 §4 items 5–6).
-5. If upstream has no `isValidBelForCell`-equivalent per-candidate hook,
-   add one (or extend `isBelLocationValid`) so the legaliser rejects
-   candidates *before* binding (avoids the fork's post-hoc `fixupPlacement`
-   repair).
-6. Carry-chain continuation check (CO3-only COUT→CIN; CO0..2 via OUTMUX) —
-   fork `arch_place.cc:477-491`.
-- Re-express over himbaechel APIs (`ClusterId`, `BelBucketId`,
-  `LogicTileStatus` tags — doc 03 §6 risk 1); do not port `constr_*` walks.
-- Keep the fork's control-set half-tile checks as-is (upstream already has
-  an equivalent — doc 03 §4 item 8) but wire them with upstream's
-  control-set API (`configurePlacerHeap`, `xilinx.cc:335-348`).
-- **Validate**: port fork primitive-tests slice-legality cases as unit
-  tests (upstream has no xilinx tests — see WP9); diff placements vs fork
-  on the demo projects; ensure `StrictLegaliser` never spins (fail-fast
-  intent from doc 03 §5.2).
+### WP1 — Port the legality engine (core, must be first) — ✅ IMPLEMENTED (validation in progress)
+Ported into `himbaechel/uarch/xilinx/xilinx_place.cc` (re-expressed over
+`LogicTileStatus`/`XilinxCellTags`; no `constr_*` walks exist upstream):
+1. ✅ Per-position OUTMUX (site-exit) budget — fork `arch_place.cc:424-506`.
+2. ✅ Cross-position carry→FF flat rejection + 5FF-fed-by-carry rejection —
+   fork `arch_place.cc:731-745, 766-774`; also added CO as a direct-feed
+   shape for the main FF (missing upstream).
+3. ✅ Main-FF-via-X-bypass + 5FF co-pack rejection — fork `arch_place.cc:789-804`.
+4. ✅ Strengthened 5LUT A6/O6 gate (connected-input count + A6 check,
+   memory/SRL exempt) and made the SLICEM-only guard unconditional — fork
+   `arch_place.cc:368-423, 626-656`.
+5. ✅ Per-candidate gate: satisfied by making checks 1/2/4 unconditional —
+   they now run on every `isBelLocationValid` call even when the tile's
+   dirty cache is clean, so no separate `isValidBelForCell` hook is needed.
+6. ✅ Carry-chain continuation + CO/OUTMUX contention (CO3 spine exception,
+   CO0..2 always claim) — fork `arch_place.cc:477-491, 859-887`.
+7. ✅ SRL16E pair exemption in the 6LUT+5LUT coexistence/shared-input checks
+   (fork `arch_place.cc:548-583`).
+- ⏭ Not ported (hybrid Vivado-import flow only, out of scope): frozen-tile
+  fast path, imported-slot/BEL exemptions, `lut_routethru_feed` exemption,
+  `NEXTPNR_ALLOW_CO_5FF_CONTENTION` env, `dbg_validity_runtime` tracing.
+- **Validate**: litex-ddr-arty-s7 (the design that exposed the fork's carry
+  bugs) × seeds 1–4 on xc7s50 (running); blinky/arty-a35 regression passed;
+  unit tests deferred to WP9.
 
 ### WP2 — FASM correctness cluster (independent of WP1, high value)
 Port in commit-sized units, each with a bitstream-hash check:
