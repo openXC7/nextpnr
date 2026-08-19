@@ -202,6 +202,15 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
 
     # TODO: ground/vcc
     tile_wire_count = len(tt.wires)
+    # prjxray bel z is only unique within a site; the per-tile map below
+    # re-allocates colliding z values so the archcheck location roundtrip
+    # (bel <-> Loc) stays bijective within each tile type.
+    seen_bel_z = {}
+    # BRAM tiles carry semantic z slots (0..11, see extra_data.h BEL_*) that
+    # the packer/fasm writer index directly; the inversion bels (RDCLKINV &
+    # co) must keep clear of them, so they start at z 12 in these tiles.
+    is_bram_tile = tile_type in ("BRAM_L", "BRAM_R")
+    bram_nonsem_count = 0
     for site in tile.sites():
         seen_pins = set()
         seen_pips = set()
@@ -212,10 +221,13 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
             variant_key = (site.index << 8) | (variant_idx & 0xFF)
             # Import site bels
             for bel in sv.bels():
-                z = filters.get_bel_z_override(bel, len(tt.bels))
+                default_z = (12 + bram_nonsem_count) if is_bram_tile else len(tt.bels)
+                z = filters.get_bel_z_override(bel, default_z)
                 # Overriden z of -1 means we skip this bel
                 if z == -1:
                     continue
+                if is_bram_tile and z == default_z:
+                    bram_nonsem_count += 1
                 bel_name = gen_bel_name(sv, bel.name())
                 # Site variants can import overlapping bels (e.g. the
                 # ILOGICE3 site's ILOGICE3/ILOGICE2/ISERDESE2 variants all
@@ -225,6 +237,15 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
                 full_bel_name = f"{site.rel_name()}.{bel_name}"
                 if variant_idx > 0:
                     full_bel_name += f"~{variant}"
+                # Site variants can import overlapping bels sharing a z (e.g.
+                # the ILOGICE3 site's ILOGICE3/ILOGICE2/ISERDESE2 variants all
+                # carry a CE1USED bel): re-allocate a fresh tile-wide unique z
+                # for the later one.
+                if z in seen_bel_z:
+                    z = len(tt.bels)
+                    while z in seen_bel_z:
+                        z += 1
+                seen_bel_z[z] = full_bel_name
                 nb = tt.create_bel(name=full_bel_name, type=filters.get_bel_type_override(bel.bel_type()), z=z)
                 nb.site = variant_key
                 nb.extra_data = BelExtraData(name_in_site=ch.strs.id(bel_name))

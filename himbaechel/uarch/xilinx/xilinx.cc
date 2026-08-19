@@ -244,7 +244,29 @@ void XilinxImpl::update_bram_bel(BelId bel, CellInfo *cell)
     auto &tts = tile_status.at(bel.tile);
     if (!tts.bts)
         tts.bts = std::make_unique<BRAMTileStatus>();
-    int z = ctx->getBelLocation(bel).z;
+    Loc loc = ctx->getBelLocation(bel);
+    int z = loc.z;
+    if (z >= 12) {
+        // A bel imported by a non-primary site variant (given a fresh unique z
+        // by the chipdb generator) is the same physical hardware as its
+        // primary twin: fold it into the primary slot so the BRAM tile status
+        // keeps its compact z-indexed layout.
+        bool found = false;
+        for (auto other : ctx->getBelsByTile(loc.x, loc.y)) {
+            if (other == bel || ctx->getBelType(other) != type)
+                continue;
+            int oz = ctx->getBelLocation(other).z;
+            if (oz >= 12)
+                continue;
+            if (bel_name_in_site(other) != bel_name_in_site(bel))
+                continue;
+            z = oz;
+            found = true;
+            break;
+        }
+        if (!found)
+            NPNR_ASSERT(found);
+    }
     NPNR_ASSERT(z >= 0 && z < 12);
     tts.bts->cells[z] = cell;
 }
