@@ -235,30 +235,36 @@ UltraScale-related found in the fork is ignored for the purposes of
 this effort. If UltraScale support is ever desired, it must be planned
 as a separate project with its own documents.
 
-### WP9 — Validation & CI (runs alongside all packages) — 🔄 groundwork done
+### WP9 — Validation & CI (runs alongside all packages) — ✅ DONE
 - ✅ demos regression gate workflow (`.github/workflows/demos.yml`): builds
-  the PR's himbaechel/xilinx binary + chipdbs from openXC7 prjxray-db, runs
-  the demo subset via `.github/scripts/nextpnr-xilinx-shim.sh`, uploads
-  bitstreams.  Build-only for now (fork goldens cannot match himbaechel
-  placements; re-golden per WP9.3 once the port stabilises).
+  the PR's himbaechel/xilinx binary + chipdbs from openXC7 prjxray-db
+  (pinned revision), builds xc7frames2bit from openXC7/prjxray (pinned),
+  runs the five-demo subset via `.github/scripts/nextpnr-xilinx-shim.sh`
+  with a pinned `--seed`, and **fails the gate on sha256 mismatch** of the
+  produced `.frames` against `.github/goldens/<project>.sha256`.  Bitstreams
+  are uploaded as artifacts.  (WP9.3 re-golden path documented in the
+  workflow's failure message.)
 - ✅ part-form / bare-die device names accepted (CI shim derives the device
   from the chipdb filename).
-- ✅ xilinx gtest coverage added: `uarch/xilinx/tests/pack_test.cc` (5
-  packer tests: STARTUPE2/BSCANE2 cfg packing + preplacement, BUFH/BUFHCE,
-  BUFR, IBUFGDS alias), wired via TEST_SOURCES.
-- ✅ archcheck name-collision fixes: non-primary variant bels get a
-  `~<variant>` suffix and site pips are deduped per (src,dst), so the
-  bel-name and pip-name checks of `--test` now pass on all five devices.
-  The remaining location-roundtrip assert (variant bels sharing z) is a
-  pre-existing upstream architectural issue (variant bel overlap), not
-  fixed here.
-1. Add xilinx gtest coverage (upstream `tests/` has none for himbaechel;
-   `ng-ultra` shows the pattern) — port fork slice-legality/DRAM/BRAM cases.
-2. Port the fork's per-PR demos gate (`.github/workflows/demos.yml`):
-   build PR binary + chipdbs (xc7s50, xc7a35t, xc7k325t), build demo
-   projects, compare normalised bitstream hashes vs goldens, upload `.bit`.
-3. Golden set: start from the fork's committed goldens (they are the same
-   designs); re-golden after intentional FASM changes with review.
+- ✅ xilinx gtest coverage: `uarch/xilinx/tests/pack_test.cc` (8 packer
+  tests: STARTUPE2/BSCANE2 cfg packing + preplacement, BUFH/BUFHCE, BUFR,
+  IBUFGDS alias, SRL cascade pair/off-slice clustering, PCIE_2_1 retype +
+  preplacement on k325t), wired via TEST_SOURCES.
+- ✅ archcheck fully green on all seven devices (`--test` on the main
+  binary — note the gtest binary ignores `--test`).  Fixes: non-primary
+  variant bels get a `~<variant>` name suffix; site pips are deduped per
+  (src,dst); tile-wide bel z is made bijective (colliding variant bels get
+  a fresh z, and BRAM-tile inversion bels start at z 12 so the semantic
+  0..11 slots in `BRAMTileStatus` stay reserved for the BRAM cells); the
+  BRAM tile status folds a re-allocated variant twin back onto its primary
+  slot.
+1. ~~Add xilinx gtest coverage~~ — done, see above.
+2. ~~Port the fork's per-PR demos gate~~ — done: PR binary + chipdbs
+   (xc7s50, xc7a35t, xc7k325t), demo projects, `.frames` golden hashes,
+   `.bit` upload.
+3. Golden set: generated with THIS repo's himbaechel implementation at the
+   pinned prjxray-db revision (fork goldens cannot match — himbaechel
+   placements differ); re-golden after intentional FASM changes with review.
 4. `archcheck` stays as the fast gate.
 
 ## 2. Dependency graph
