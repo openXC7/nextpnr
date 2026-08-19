@@ -138,21 +138,25 @@ Port in commit-sized units, each with a bitstream-hash check:
 - **Validate**: fork `primitive-tests/` repo designs + demo projects;
   targeted synth of each primitive via `synth_xilinx`.
 
-### WP4 — Placement & routing decisions (follows WP1)
-1. **Decide on `relocate_carry_o_fabric`** (fork `pack_carry_xc7.cc:1052`):
-   netlist-level pass, placer-independent — port as a packer pass if the
-   upstream legaliser+router cannot absorb O+CO dual fanout (doc 03 §5.3).
-2. **Delay model**: replace himbaechel's coarse `estimateDelay/predictDelay`
+### WP4 — Placement & routing decisions (follows WP1) — 🔄 partially done
+1. ⏭ **`relocate_carry_o_fabric` decision: DEFERRED.** With the WP1 legality
+   checks in place, the upstream legaliser+router absorb the common O+CO
+   dual-fanout cases; litex-ddr-arty-s7 (the fork's carry regression design)
+   passes ×4 seeds. The netlist-level pass will be ported only if a concrete
+   failing case appears.
+2. ⏳ **Delay model**: replace himbaechel's coarse `estimateDelay/predictDelay`
    (`xilinx.cc:735-780`, has a TODO referencing the fork) with the fork's
    site/inter-wire/intent-aware version (`arch.cc:650-762`) — prerequisite
    for meaningful timing-driven results (doc 03 §6 risk 5).
-3. **router2 config**: port fork overrides `bb_margin_{x,y}=4`,
-   `backwards_max_iter=200`, `perf_profile=true` (doc 03 §6 risk 7).
-4. **routeVcc + clock-backbone ordering**: port the fork's clock-first /
+3. ✅ **router2 config**: new `HimbaechelAPI::configureRouter2()` hook (set in
+   `Arch::route()`); XilinxImpl sets `bb_margin_{x,y}=4`,
+   `backwards_max_iter=200`, `perf_profile=true`.
+4. ⏳ **routeVcc + clock-backbone ordering**: port the fork's clock-first /
    Vcc-post-fill ordering and pip blacklist to avoid the "Vcc floods the
    clock backbone" failure (doc 03 §6 risk 8; fork `arch.cc:912,1752,351`).
-5. **Final timing analysis after router2** (`7ea51730`) — check upstream
-   router2 hook and add if absent.
+5. ✅ **Final timing analysis after router2** (`7ea51730`): added generically
+   in `Arch::route()` — router2 previously ran no final analysis (router1
+   does); verified post-route fmax report appears.
 6. Keep `fixupPlacement` as belt-and-braces only if WP1 proves insufficient;
    port the STRENGTH_USER-vs-STRONG skip distinction (doc 03 §6 risk 6).
 

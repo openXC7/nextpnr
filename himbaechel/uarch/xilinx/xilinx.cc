@@ -28,6 +28,7 @@
 
 #include "placer_heap.h"
 #include "placer_static.h"
+#include "router2.h"
 
 #include "xilinx.h"
 
@@ -316,6 +317,15 @@ void XilinxImpl::postPlace()
 {
     fixup_placement();
     ctx->assignArchInfo();
+}
+
+void XilinxImpl::configureRouter2(Router2Cfg &cfg)
+{
+    // Routing configuration proven on xc7 by nextpnr-xilinx
+    cfg.bb_margin_x = 4;
+    cfg.bb_margin_y = 4;
+    cfg.backwards_max_iter = 200;
+    cfg.perf_profile = true;
 }
 
 void XilinxImpl::configurePlacerHeap(PlacerHeapCfg &cfg)

@@ -139,6 +139,7 @@ struct XilinxImpl : HimbaechelAPI
 
     void configurePlacerHeap(PlacerHeapCfg &cfg) override;
     void configurePlacerStatic(PlacerStaticCfg &cfg) override;
+    void configureRouter2(Router2Cfg &cfg) override;
 
     void fixup_placement();
     void fixup_routing();

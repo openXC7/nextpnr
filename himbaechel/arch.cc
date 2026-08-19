@@ -30,6 +30,7 @@
 
 #include "router1.h"
 #include "router2.h"
+#include "timing.h"
 #include "util.h"
 
 #include <filesystem>
@@ -300,7 +301,14 @@ bool Arch::route()
     if (router == "router1") {
         result = router1(getCtx(), Router1Cfg(getCtx()));
     } else if (router == "router2") {
-        router2(getCtx(), Router2Cfg(getCtx()));
+        Router2Cfg cfg(getCtx());
+        uarch->configureRouter2(cfg);
+        router2(getCtx(), cfg);
+        // router2 does not run a final timing analysis itself (unlike
+        // router1): run it here so fmax/slack are reported and the timing
+        // results are populated for --report and downstream consumers.
+        timing_analysis(getCtx(), true /* slack_histogram */, true /* print_fmax */, true /* print_path */,
+                        true /* warn_on_failure */, true /* update_results */);
         result = true;
     } else {
         log_error("Himbächel architecture does not support router '%s'\n", router.c_str());
