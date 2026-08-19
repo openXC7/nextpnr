@@ -1,0 +1,238 @@
+# 05 — Porting plan: nextpnr-xilinx → upstream himbaechel/xilinx
+
+> **Status: draft for review.** Synthesises doc 01 (upstream architecture),
+> doc 02 (fork inventory), doc 03 (algorithmic diff), doc 04 (gap list).
+>
+> **Governing philosophy: upstream first, fork fills the blanks.**
+> Upstream nextpnr (and its himbaechel/xilinx uarch) is the *successor*
+> of nextpnr-xilinx: it carries years of architecture and algorithm
+> development (StrictLegaliser, control-set API, parallel_refine,
+> timing_opt, placer_static, the router2 superset, the RelPtr chipdb
+> model). Every decision below therefore **prefers the upstream
+> solution**; nextpnr-xilinx material is imported only where upstream has
+> a *blank* (missing legality checks, missing packers, missing FASM
+> correctness fixes, missing validation) — never as a replacement for
+> upstream code that exists. Where upstream already has an equivalent
+> (e.g. `--report`, himbaechel framework, control-set checks), the fork's
+> version is explicitly *not* ported.
+
+---
+
+## 0. Strategy & principles
+
+1. **Prefer upstream solutions.** Upstream nextpnr is the successor
+   architecture of nextpnr-xilinx: years of architecture/algorithmic
+   development live there (RelPtr chipdb model, StrictLegaliser, the
+   control-set API, `parallel_refine`, `timing_opt`, `placer_static`,
+   the router2 superset). Every decision in this plan therefore keeps
+   the upstream implementation wherever one exists, and imports fork
+   material **only to fill blanks**. Concretely: keep the upstream
+   `StrictLegaliser` (same greedy random-walk family as the fork's,
+   refactored with bel buckets and control-set pre-allocation) but
+   **also port the fork's termination guarantees** (fail-fast,
+   deterministic fallback, eviction-as-last-resort) since the same walk
+   family retains their livelock risk (doc 03 corrigendum). Do not port
+   fork placer/router code wholesale — port *checks, data, and
+   robustness guarantees*, and skip anything upstream already has (e.g.
+   `--report`, the himbaechel framework, control-set checks).
+2. **Legality first.** The five high-risk missing checks (OUTMUX budget,
+   cross-position carry→FF rejection, FF1-uses-X+5FF co-pack, SRL cascade
+   placement, CFG preplacement — doc 03 §4) gate everything else: without
+   them, upstream's legaliser will re-create the exact illegal slices the
+   fork's bugfixes reject.
+3. **Port at the fork's own maturity order.** The fork's 0.9.2→0.9.3 digest
+   shows the proven fix sequence: placement legality → FASM correctness →
+   primitive modes → constraints → CI gate.
+4. **Validate with golden bitstreams** (fork CI's normalised-hash method) at
+   every work package, not at the end.
+5. **No code changes, no commits** until these documents are reviewed and
+   the user approves implementation work (per repo policy).
+6. **xc7 only — UltraScale(+) porting is explicitly EXCLUDED.** This plan
+   ports Xilinx 7-series (xc7) support only: artix7, kintex7, zynq7,
+   spartan7, virtex7. The fork's UltraScale/UltraScale+ work — the
+   `xcup` RapidWright flow, E2/E3/E4 packers (CARRY8, RAMB36E2, DSP48E2,
+   URAM288, ISERDESE3/OSERDESE3, …), xcup device databases, and the
+   DCP/RapidWright export tooling — is **out of scope by decision**.
+   UltraScale-related observations in docs 01–04 are recorded for
+   completeness only; they are not inputs to this plan and must not be
+   implemented under it.
+
+## 1. Work packages (ordered)
+
+### WP0 — Device-list & build foundation (small, no risk)
+- Add `xc7k70t/160t/325t/420t/480t`, `xc7z030/035/045/100`, `xc7vx485t`
+  to `ALL_HIMBAECHEL_XILINX_DEVICES` (`himbaechel/uarch/xilinx/CMakeLists.txt:32`)
+  — kintex7/zynq7 site types already exist in `meta/`.
+- Replace the `xc7a35t`→`xc7a50t` die alias (`xilinx.cc:86`) with a real
+  a35t die if prjxray has it (fork does: `xc7a35t` dir).
+- Keep `meta/` sync: fork's `nextpnr-xilinx-meta` fixes (RIOB18 segbits,
+  `f8e76430`, `a92eb3d1` DB bumps) must land in the upstream meta submodule.
+- **Validate**: build all devices; run `arty-a35` blinky example.
+
+### WP1 — Port the legality engine (core, must be first)
+Port into `himbaechel/uarch/xilinx/xilinx_place.cc` (+`xilinx.cc` hooks):
+1. Per-position OUTMUX (site-exit) budget — fork `arch_place.cc:424-506`.
+2. Cross-position carry→FF flat rejection + 5FF-fed-by-carry rejection —
+   fork `arch_place.cc:731-745, 766-774`.
+3. Main-FF-via-X-bypass + 5FF co-pack rejection — fork `arch_place.cc:789-804`.
+4. Strengthen 5LUT A6/O6 connected-port gate and make the SLICEM-only guard
+   unconditional (fork `arch_place.cc:368-423, 626-656`) — himbaechel's
+   versions are dirty-cache-gated (doc 03 §4 items 5–6).
+5. If upstream has no `isValidBelForCell`-equivalent per-candidate hook,
+   add one (or extend `isBelLocationValid`) so the legaliser rejects
+   candidates *before* binding (avoids the fork's post-hoc `fixupPlacement`
+   repair).
+6. Carry-chain continuation check (CO3-only COUT→CIN; CO0..2 via OUTMUX) —
+   fork `arch_place.cc:477-491`.
+- Re-express over himbaechel APIs (`ClusterId`, `BelBucketId`,
+  `LogicTileStatus` tags — doc 03 §6 risk 1); do not port `constr_*` walks.
+- Keep the fork's control-set half-tile checks as-is (upstream already has
+  an equivalent — doc 03 §4 item 8) but wire them with upstream's
+  control-set API (`configurePlacerHeap`, `xilinx.cc:335-348`).
+- **Validate**: port fork primitive-tests slice-legality cases as unit
+  tests (upstream has no xilinx tests — see WP9); diff placements vs fork
+  on the demo projects; ensure `StrictLegaliser` never spins (fail-fast
+  intent from doc 03 §5.2).
+
+### WP2 — FASM correctness cluster (independent of WP1, high value)
+Port in commit-sized units, each with a bitstream-hash check:
+1. Phantom-BUFGCTRL guard (fork `fasm.cc:122`).
+2. HP-bank IO glue: RIOB18 Y0 `IBUF_HP_BANK_GLUE` skip, `IN_ONLY` skip,
+   `SLEW.SLOW` cross-site/diff skips, SSTL15/135 skip (fork commits
+   `d6b7f64d`, `e4a261ce`, `70a5952c`, `c2e50b99`, `6f33adf0`).
+3. SDP BRAM opposite-port width + 36-wide marker + ZINV_REGCLK*
+   (`f1c77134`, `11f9b694`, `1b7d51b9`, `e71acda2`).
+4. OSERDES/ILOGIC bits: `IS_CLKDIV_INVERTED`, `TRISTATE_WIDTH.W4`,
+   `IFF.INV_OCLK` (`b9ed05a2`, `c05f0d05`).
+5. PLL/MMCM LKTABLE/TABLE from PLL-specific tables (`e33b5f1a`,
+   `74357a79`) — diff against upstream `mmcm_tables.cc` first.
+6. BUFR_DIVIDE on placed BUFR (`0b914578`).
+7. Run-identity FASM header (`7037c948`) — trivial, do first as a warm-up.
+- **Validate**: fork CI's normalised bitstream-hash comparison on
+  arty-s7/arty/kintex7 demo projects (needs WP9 CI scaffolding or local
+  equivalents).
+
+### WP3 — Primitive packer gaps (feature-level)
+1. **MUXF9 on xc7** via `SELMUX2_1` (fork `pack.cc:670` tree) — replace
+   upstream's `log_error` (`pack.cc:441`).
+2. **BUFH** (non-CE) cell + packing (fork `constids.inc`, `pack_clocking_xc7.cc`).
+3. **Dist-RAM**: RAM512X1S/D, RAM32M16, RAM64M8, RAM64X2S, RAM64X8SW;
+   RAM128X1S scalar A0..A6; RAM256X1S mux-tree slice-half/zoffset fixes
+   (`c0194daf`, `363c055d`, `b390e9c9`).
+4. **SRL**: Q31 support + cascade placement rules (`constrain_srl_cascades`,
+   `pack.cc:763`, `697e293b`) — depends on WP1 item 7.
+5. **IDDR**: `DDR_CLK_EDGE=SAME_EDGE_PIPELINED` + 4-IFF-flop init +
+   routethru SRTYPE fixes (`9a6a7e3b`, `d455ae52`, `f77907ac`, `16accf3b`).
+6. **ISERDES/OSERDES**: OFB placement, master/slave pairing parity with fork
+   (`pack_io_xc7.cc:903-1106`).
+7. **IDELAYCTRL** no-delay → warning (`06769c05`).
+8. **IBUFGDS** alias of IBUFDS (`55c3bc87`); OBUFDS swapped-pin diagnostic
+   (`0ebf6394`).
+- **Validate**: fork `primitive-tests/` repo designs + demo projects;
+  targeted synth of each primitive via `synth_xilinx`.
+
+### WP4 — Placement & routing decisions (follows WP1)
+1. **Decide on `relocate_carry_o_fabric`** (fork `pack_carry_xc7.cc:1052`):
+   netlist-level pass, placer-independent — port as a packer pass if the
+   upstream legaliser+router cannot absorb O+CO dual fanout (doc 03 §5.3).
+2. **Delay model**: replace himbaechel's coarse `estimateDelay/predictDelay`
+   (`xilinx.cc:735-780`, has a TODO referencing the fork) with the fork's
+   site/inter-wire/intent-aware version (`arch.cc:650-762`) — prerequisite
+   for meaningful timing-driven results (doc 03 §6 risk 5).
+3. **router2 config**: port fork overrides `bb_margin_{x,y}=4`,
+   `backwards_max_iter=200`, `perf_profile=true` (doc 03 §6 risk 7).
+4. **routeVcc + clock-backbone ordering**: port the fork's clock-first /
+   Vcc-post-fill ordering and pip blacklist to avoid the "Vcc floods the
+   clock backbone" failure (doc 03 §6 risk 8; fork `arch.cc:912,1752,351`).
+5. **Final timing analysis after router2** (`7ea51730`) — check upstream
+   router2 hook and add if absent.
+6. Keep `fixupPlacement` as belt-and-braces only if WP1 proves insufficient;
+   port the STRENGTH_USER-vs-STRONG skip distinction (doc 03 §6 risk 6).
+
+### WP5 — XDC parser improvements (small, user-visible)
+From coordinator note `drafts/00c`:
+1. `name[0]` de-busing retry (`b257be4d`).
+2. Silent non-design targets unless `--verbose` + summary line
+   (`3da43687`, `555d326c`).
+3. Virtual-clock skip guard and "constraint NOT applied" warning.
+4. BEL-attr-unknown-tile non-fatal (`8399469c`).
+5. **set_multicycle_path**: check upstream SDC path (`common/kernel/sdc.cc`)
+   before porting the `NEXTPNR_MCP_SETUP` attribute hack — prefer the
+   upstream mechanism.
+
+### WP6 — Config/misc IP preplacement (easy after WP1)
+BSCANE2, DNA_PORT, EFUSE_USR, ICAPE2, FRAME_ECCE2, STARTUPE2,
+USR_ACCESSE2, DCIRESET — single-site preplacement per fork
+`pack_io_xc7.cc:1232` (`d42d6c9b`) + FASM emission. Depends on the
+preplacement mechanism from WP1.
+
+### WP7 — GT transceivers (GTPE2/GTXE2) (larger)
+Port `pack_gt_xc7.cc` (380 L) + `fasm.cc` GT writers (GTP/GTX channel,
+common, IBUFDS_GTE2 refclk, PLL remap) + GT-clock template route for
+virtex7. Depends on WP0 (kintex7/virtex7 devices). Highest-value for the
+workspace's kintex7 focus.
+
+### WP8 — EXCLUDED: UltraScale / UltraScale+ porting (xc7-only decision)
+
+**Explicitly out of scope.** The fork's xcup flow (RapidWright BBA
+export, E2/E3/E4 packers, xcup device databases, DCP export,
+UltraScale+ FASM writers) will **not** be ported under this plan
+(principle 6). No UltraScale work package exists; anything
+UltraScale-related found in the fork is ignored for the purposes of
+this effort. If UltraScale support is ever desired, it must be planned
+as a separate project with its own documents.
+
+### WP9 — Validation & CI (runs alongside all packages)
+1. Add xilinx gtest coverage (upstream `tests/` has none for himbaechel;
+   `ng-ultra` shows the pattern) — port fork slice-legality/DRAM/BRAM cases.
+2. Port the fork's per-PR demos gate (`.github/workflows/demos.yml`):
+   build PR binary + chipdbs (xc7s50, xc7a35t, xc7k325t), build demo
+   projects, compare normalised bitstream hashes vs goldens, upload `.bit`.
+3. Golden set: start from the fork's committed goldens (they are the same
+   designs); re-golden after intentional FASM changes with review.
+4. `archcheck` stays as the fast gate.
+
+## 2. Dependency graph
+
+```
+WP0 ──┬── WP1 ──┬── WP3 (SRL cascades, carry modes)
+      │         ├── WP4 (carry-O decision, delay model, router2 cfg, Vcc/clk ordering)
+      │         └── WP6 (config IP preplacement)
+      ├── WP2 (FASM)        ← independent, can run in parallel with WP1
+      ├── WP5 (XDC)         ← independent
+      ├── WP7 (GT)          ← needs WP0 kintex7/virtex7 devices
+      └── WP9 (CI/tests)    ← starts immediately, gates every WP
+WP8 (UltraScale/xcup) — EXCLUDED by decision, not part of this graph.
+```
+
+## 3. Suggested execution order (fastest path to a releasable state)
+
+1. WP9 scaffolding + WP2.7 (run-identity header) — CI warm-up.
+2. WP0 (device list) → WP1 (legality) → WP4.3/4.4 (router2 cfg + Vcc/clock
+   ordering) → WP2 (FASM cluster).
+3. WP3 → WP5 → WP6 → WP7.
+
+This mirrors the fork's own 0.9.2→0.9.3 sequence (legality fixes first,
+then FASM, then primitive modes), which is the empirically proven order.
+
+## 4. Risks & mitigations (from doc 03 §6)
+
+| Risk | Mitigation |
+|---|---|
+| `constr_*`/ClusterId API mismatch silently no-ops ported heuristics | Re-express via ClusterId/BelBucketId; add asserts; review each port |
+| Upstream legaliser produces illegal slices without WP1 checks | WP1 first; golden-bitstream diff catches bit corruption |
+| Coarse upstream delay model degrades timing QoR | WP4.2 (fork delay model) before enabling timing-driven flows |
+| Fixed-routes/frozen-import features not ported | Accept the hybrid-flow features as out of scope (doc 03 §5.8) unless user needs them |
+| Fork repo advances mid-port (it gained 8 commits while analysing) | Re-diff at each milestone; tag 0.9.3 is the current reference |
+| UltraScale scope creep | Excluded by principle 6: xcup/E2/E3/E4 content is ignored; review gates reject UltraScale changes |
+
+## 5. Definition of done
+
+- All doc 04 gap rows resolved (ported or explicitly deferred with reason),
+  **excluding UltraScale/xcup rows, which are out of scope by decision**.
+- Doc 03 §4 must-port checks present + unit-tested in upstream tree.
+- Demo-projects golden-bitstream hashes match (post re-golden review) on
+  xc7s50, xc7a35t, xc7k325t.
+- Upstream CI (archcheck + demos gate) green; non-xilinx arches unaffected.
+- No UltraScale(+) code, device databases, or tooling has been added.
+- Documents 01–04 updated to reflect the final state.
