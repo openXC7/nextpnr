@@ -53,9 +53,10 @@ The analysis phase is **complete** — the deliverables live in
 - `05-porting-plan.md` — ordered work packages WP0–WP9 with validation
   steps; xc7-only, UltraScale excluded.
 
-Remaining work: review the documents with the user, then implement the
-plan (starting WP9 + WP0) only after explicit approval. During
-implementation, keep the documents up to date as features land.
+Status: the plan (WP0–WP9 + WP7b PCIE) is **implemented and validated** —
+`05-porting-plan.md` tracks the per-package results.  Deferred on purpose:
+the virtex7 GT-clock bodge (not ported) and UltraScale (excluded).  Keep
+the documents up to date as further features land.
 
 ## Constraints
 
