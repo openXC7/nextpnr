@@ -131,6 +131,13 @@ void XC7Packer::prepare_clocking()
             tie_port(ci, "S0", true, true);
             tie_port(ci, "S1", false, true);
             tie_port(ci, "IGNORE0", true, true);
+        } else if (ci->type == id_BUFH || ci->type == id_BUFHCE) {
+            // BUFH is the legacy non-CE spelling; both map to the BUFHCE bel
+            // with CE tied active (port of nextpnr-xilinx pack_clocking_xc7.cc)
+            ci->type = id_BUFHCE_BUFHCE;
+            if (ci->ports.count(id_CE) && ci->getPort(id_CE) != nullptr)
+                ci->disconnectPort(id_CE);
+            tie_port(ci, "CE", true, true);
         }
     }
 }
@@ -203,6 +210,8 @@ void XC7Packer::preplace_clocking()
             if (ci->type == id_BUFGCTRL)
                 did_something |= try_preplace(ci, id_I0);
             else if (ci->type == id_BUFG_BUFG)
+                did_something |= try_preplace(ci, id_I);
+            else if (ci->type == id_BUFHCE_BUFHCE)
                 did_something |= try_preplace(ci, id_I);
             else if (ci->type.in(id_MMCM_MMCM_TOP, id_PLL_PLL_TOP, id_PLLE2_ADV_PLLE2_ADV, id_MMCME2_ADV_MMCME2_ADV))
                 did_something |= try_preplace(ci, id_CLKIN1);

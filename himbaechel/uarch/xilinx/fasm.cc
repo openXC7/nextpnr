@@ -21,7 +21,6 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/range/adaptor/reversed.hpp>
 
-#include <array>
 #include <fstream>
 #include <regex>
 
@@ -858,42 +857,6 @@ struct FasmBackend
 
     bool warned_dci = false;
 
-    // tile -> the PAD cell at each in-tile IOB site row (index 0/1 = site-local y)
-    dict<int, std::array<CellInfo *, 2>> pads_by_tile_;
-    bool pads_map_built_ = false;
-    void build_pads_map()
-    {
-        for (auto &cell : ctx->cells) {
-            CellInfo *ci = cell.second.get();
-            if (ci->type == id_PAD && ci->bel != BelId()) {
-                Loc l = uarch->rel_site_loc(uarch->get_bel_site(ci->bel));
-                if (l.y == 0 || l.y == 1)
-                    pads_by_tile_[ci->bel.tile][l.y] = ci;
-            }
-        }
-        pads_map_built_ = true;
-    }
-    // Does the PARTNER IOB in this pad's tile (the other in-tile site) drive an
-    // output?  The HP-bank IN_ONLY bits are complement encodings of the column
-    // IOB_COL_BANK_ACTIVE field, so emitting them next to the partner site's
-    // active output makes fasm2frames refuse the clear-after-set conflict
-    // (mixed output+input column, e.g. ddram_dm[1] on IOB_Y0 with cpu_reset_n
-    // on IOB_Y1 of RIOB18_X95Y25 on litex-ddr-stlv7325).
-    bool partner_is_output(CellInfo *pad)
-    {
-        if (!pads_map_built_)
-            build_pads_map();
-        Loc l = uarch->rel_site_loc(uarch->get_bel_site(pad->bel));
-        auto it = pads_by_tile_.find(pad->bel.tile);
-        if (it == pads_by_tile_.end())
-            return false;
-        CellInfo *partner = it->second[1 - l.y];
-        if (partner == nullptr)
-            return false;
-        NetInfo *pn = partner->getPort(id_PAD);
-        return pn != nullptr && pn->driver.cell != nullptr;
-    }
-
     void write_io_config(CellInfo *pad)
     {
         NetInfo *pad_net = pad->getPort(id_PAD);
@@ -920,12 +883,6 @@ struct FasmBackend
         }
 
         bool is_riob18 = boost::starts_with(tile, "RIOB18_");
-        // is_hp_bank covers BOTH RIOB18_ (right) and LIOB18_ (left) — the
-        // physical HP18 banks.  is_riob18 stays as-is to preserve the
-        // existing emission behaviour; is_hp_bank is added only for the
-        // HP-specific gates ported from nextpnr-xilinx (partner-output
-        // IN_ONLY gate, SSTL SLEW.SLOW group skip).
-        bool is_hp_bank = is_riob18 || boost::starts_with(tile, "LIOB18_");
         bool is_sing = boost::contains(tile, "_SING_");
         bool is_top_sing = pad->bel.tile < uarch->hclk_for_iob(pad->bel);
         bool is_stepdown = false;
@@ -1014,13 +971,7 @@ struct FasmBackend
                 else
                     write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
             } else if (slew == "SLOW") {
-                // On HP banks Vivado encodes SSTL15/SSTL135 SLOW with the
-                // per-standard bits only (segbits_riob18.db); the general
-                // LVCMOS-family group is used for LVCMOS/LVTTL.  Emitting
-                // both makes fasm2frames hit FasmInconsistentBits (the SSTL
-                // bits overlap the general group with opposite polarity).
-                bool is_hp_sstl_slow = is_hp_bank && (iostandard == "SSTL15" || iostandard == "SSTL135");
-                if (iostandard != "LVDS_25" && iostandard != "TMDS_33" && !is_hp_sstl_slow)
+                if (iostandard != "LVDS_25" && iostandard != "TMDS_33")
                     write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
             } else if (is_riob18)
                 write_bit(iostandard + ".SLEW.FAST");
@@ -1075,12 +1026,8 @@ struct FasmBackend
                     write_bit("IN_TERM." + pad->attrs.at(id_IN_TERM).as_string());
             }
 
-            // IN_ONLY.  Skip on HP banks when the partner site drives an
-            // output: the HP IN_ONLY bits are the complement of the column
-            // IOB_COL_BANK_ACTIVE field (mixed output+input columns
-            // otherwise trip FasmInconsistentBits); the HR-bank (IOB33)
-            // IN_ONLY encodes independently and must stay.
-            if (!is_output && (!partner_is_output(pad) || !is_hp_bank)) {
+            // IN_ONLY
+            if (!is_output) {
                 if (is_riob18) {
                     // vivado also sets this bit for DIFF_SSTL
                     if (is_diff && (yLoc == 0))
@@ -1403,6 +1350,17 @@ struct FasmBackend
                 write_bit("ZINV_CE1", !bool_or_default(ci->params, id_IS_CE1_INVERTED));
                 write_bit("ZINV_S0", !bool_or_default(ci->params, id_IS_S0_INVERTED));
                 write_bit("ZINV_S1", !bool_or_default(ci->params, id_IS_S1_INVERTED));
+                pop(2);
+            } else if (ci->type == id_BUFHCE_BUFHCE) {
+                push(uarch->tile_name(ci->bel.tile));
+                auto xy = uarch->rel_site_loc(uarch->get_bel_site(ci->bel));
+                push(stringf("BUFHCE.BUFHCE_X%dY%d", xy.x, xy.y));
+                write_bit("IN_USE");
+                write_bit("CE_TYPE.ASYNC", str_or_default(ci->params, id_CE_TYPE, "SYNC") == "ASYNC");
+                write_bit("INIT_OUT", bool_or_default(ci->params, id_INIT_OUT));
+                // CE is tied active by prepare_clocking; the physical pin is
+                // active-low, so invert it (port of nextpnr-xilinx fasm.cc)
+                write_bit("ZINV_CE", !bool_or_default(ci->params, id_IS_CE_INVERTED));
                 pop(2);
             } else if (ci->type == id_PLLE2_ADV_PLLE2_ADV) {
                 write_pll(ci);

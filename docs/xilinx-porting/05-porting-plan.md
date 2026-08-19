@@ -101,12 +101,15 @@ Ported into `himbaechel/uarch/xilinx/xilinx_place.cc` (re-expressed over
   bugs) × seeds 1–4 on xc7s50 (running); blinky/arty-a35 regression passed;
   unit tests deferred to WP9.
 
-### WP2 — FASM correctness cluster (independent of WP1, high value)
+### WP2 — FASM correctness cluster (independent of WP1, high value) — 🔄 in progress
 Port in commit-sized units, each with a bitstream-hash check:
-1. Phantom-BUFGCTRL guard (fork `fasm.cc:122`).
-2. HP-bank IO glue: RIOB18 Y0 `IBUF_HP_BANK_GLUE` skip, `IN_ONLY` skip,
-   `SLEW.SLOW` cross-site/diff skips, SSTL15/135 skip (fork commits
-   `d6b7f64d`, `e4a261ce`, `70a5952c`, `c2e50b99`, `6f33adf0`).
+1. ✅ Phantom-BUFGCTRL guard (fork `fasm.cc:122`) — committed.
+2. 🔄 HP-bank IO glue: of the five fork commits, **two apply upstream**
+   (✅ `6f33adf0` SSTL15/135 SLEW.SLOW group skip; ✅ `e4a261ce` IN_ONLY
+   partner-output gate). The other three guard emissions upstream does not
+   yet have (`d6b7f64d` IBUF_HP_BANK_GLUE, `70a5952c` cross-site
+   SLEW.SLOW defaults, `c2e50b99` diff-input SLEW.SLOW) — deferred until
+   the corresponding HP-glue emissions are ported, not dropped.
 3. SDP BRAM opposite-port width + 36-wide marker + ZINV_REGCLK*
    (`f1c77134`, `11f9b694`, `1b7d51b9`, `e71acda2`).
 4. OSERDES/ILOGIC bits: `IS_CLKDIV_INVERTED`, `TRISTATE_WIDTH.W4`,
@@ -122,7 +125,10 @@ Port in commit-sized units, each with a bitstream-hash check:
 ### WP3 — Primitive packer gaps (feature-level)
 1. **MUXF9 on xc7** via `SELMUX2_1` (fork `pack.cc:670` tree) — replace
    upstream's `log_error` (`pack.cc:441`).
-2. **BUFH** (non-CE) cell + packing (fork `constids.inc`, `pack_clocking_xc7.cc`).
+2. ✅ **BUFH** (non-CE) cell + packing: BUFH/BUFHCE → `BUFHCE_BUFHCE` with
+   CE tied active in `prepare_clocking`, + `try_preplace` in
+   `preplace_clocking`; constids `X(BUFH)`, `X(BUFHCE_BUFHCE)` added
+   (upstream previously packed NEITHER BUFH nor BUFHCE).
 3. **Dist-RAM**: RAM512X1S/D, RAM32M16, RAM64M8, RAM64X2S, RAM64X8SW;
    RAM128X1S scalar A0..A6; RAM256X1S mux-tree slice-half/zoffset fixes
    (`c0194daf`, `363c055d`, `b390e9c9`).
@@ -133,8 +139,9 @@ Port in commit-sized units, each with a bitstream-hash check:
 6. **ISERDES/OSERDES**: OFB placement, master/slave pairing parity with fork
    (`pack_io_xc7.cc:903-1106`).
 7. **IDELAYCTRL** no-delay → warning (`06769c05`).
-8. **IBUFGDS** alias of IBUFDS (`55c3bc87`); OBUFDS swapped-pin diagnostic
-   (`0ebf6394`).
+8. ✅ **IBUFGDS** alias of IBUFDS (`55c3bc87`): constid `X(IBUFGDS)` +
+   `cells.cc` port list + `pins.cc` toplevel + `is_diff_ibuf` test + HR/HP
+   rule maps. OBUFDS swapped-pin diagnostic (`0ebf6394`) pending.
 - **Validate**: fork `primitive-tests/` repo designs + demo projects;
   targeted synth of each primitive via `synth_xilinx`.
 

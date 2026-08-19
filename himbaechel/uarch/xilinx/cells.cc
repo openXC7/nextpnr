@@ -156,7 +156,9 @@ CellInfo *XilinxPacker::create_cell(IdString type, IdString name)
         add_port("IBUFDISABLE", PORT_IN);
         add_port("INTERMDISABLE", PORT_IN);
         add_port("O", PORT_OUT);
-    } else if (type == id_IBUFDS) {
+    } else if (type == id_IBUFDS || type == id_IBUFGDS) {
+        // IBUFGDS: legacy clock-capable spelling of IBUFDS; same primitive on
+        // 7-series, handled as an alias (port of nextpnr-xilinx #74)
         add_port("I", PORT_IN);
         add_port("IB", PORT_IN);
         add_port("O", PORT_OUT);
