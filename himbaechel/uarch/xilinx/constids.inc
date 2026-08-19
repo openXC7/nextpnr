@@ -35,6 +35,7 @@ X(WA8)
 X(WA9)
 X(WE)
 X(MC31)
+X(Q31)
 X(O5)
 X(O6)
 

@@ -22,6 +22,7 @@
 #include <boost/optional.hpp>
 #include <iterator>
 #include <queue>
+#include <unordered_map>
 #include <unordered_set>
 #include "chain_utils.h"
 #include "design_utils.h"
@@ -493,8 +494,12 @@ void XilinxPacker::pack_srls()
     srl_rules[id_SRLC32E].port_xform[id_CE] = id_WE;
     srl_rules[id_SRLC32E].port_xform[id_D] = id_DI1;
     srl_rules[id_SRLC32E].port_xform[id_Q] = id_O6;
+    // Cascade shiftout: SRLC32E.Q31 is the dedicated MC31 output that feeds
+    // the next SRL's DI mux (xDI1MUX <- (x+1)MC31).  Map it to the MC31 port
+    // so the cascade routes through the dedicated in-slice path rather than
+    // being dropped.  (Port of nextpnr-xilinx pack.cc.)
+    srl_rules[id_SRLC32E].port_xform[id_Q31] = id_MC31;
     srl_rules[id_SRLC32E].set_attrs.emplace_back(id_X_LUT_AS_SRL, "1");
-    // FIXME: Q31 support
     generic_xform(srl_rules, true);
     // Fixup SRL inputs
     for (auto &cell : ctx->cells) {
@@ -522,6 +527,184 @@ void XilinxPacker::pack_srls()
             }
         }
     }
+    constrain_srl_cascades();
+}
+
+// SRLC32E cascades (shift registers deeper than 32, chained through Q31).
+// The MC31 wire Q31 maps to only exists INSIDE a SLICEM: the cascade muxes
+// run top-down D->C->B->A (xDI1MUX <- (x+1)MC31) and no route from MC31 to
+// the general fabric exists.  Two consequences the packer must handle, or
+// the placer scatters the chain and the MC31 arc is physically unroutable:
+//
+//  - a cascade group of up to four SRLs must occupy D,C,B,A of ONE slice,
+//    exactly like a carry chain (cluster, head at D);
+//  - any Q31 link that cannot stay inside a slice (fifth and later chain
+//    elements, or a Q31 consumer that is not another SRL's D) must instead
+//    leave through the ordinary Q output with the read address tied to 31
+//    -- the same value, fabric-routable.  Only possible when Q is unused,
+//    but a used Q means the design also taps that segment live.
+//
+// (Port of nextpnr-xilinx pack.cc constrain_srl_cascades(); the fork's
+// constr_parent/constr_children grouping is re-expressed with the upstream
+// cluster mechanism, exactly as pack_carry.cc does for carry chains: the
+// head cell becomes the cluster root and the members its constr_children
+// with absolute z placements D,C,B,A.)
+void XilinxPacker::constrain_srl_cascades()
+{
+    auto is_srl32 = [&](const CellInfo *ci) {
+        return ci->type == id_SLICE_LUTX && str_or_default(ci->attrs, id_X_ORIG_TYPE) == "SRLC32E";
+    };
+    NetInfo *vcc = ctx->nets.at(ctx->id("$PACKER_VCC_NET")).get();
+    auto reads_bit31 = [&](const CellInfo *ci) {
+        for (auto a : {id_A2, id_A3, id_A4, id_A5, id_A6})
+            if (ci->getPort(a) != vcc)
+                return false;
+        return true;
+    };
+
+    std::vector<CellInfo *> srls;
+    std::unordered_map<CellInfo *, CellInfo *> next_srl, prev_srl;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (!is_srl32(ci))
+            continue;
+        srls.push_back(ci);
+        NetInfo *q31 = ci->getPort(id_MC31);
+        if (q31 != nullptr && q31->users.entries() == 1 && (*q31->users.begin()).port == id_DI1 &&
+            is_srl32((*q31->users.begin()).cell)) {
+            next_srl[ci] = (*q31->users.begin()).cell;
+            prev_srl[(*q31->users.begin()).cell] = ci;
+        }
+    }
+    if (srls.empty())
+        return;
+
+    // Q31 links that must leave their slice, to be moved onto Q afterwards
+    std::vector<CellInfo *> offslice;
+    std::unordered_set<CellInfo *> visited;
+    int clusters = 0;
+    for (auto head : srls) {
+        if (prev_srl.count(head))
+            continue;
+        std::vector<CellInfo *> chain;
+        for (CellInfo *cur = head; cur != nullptr;) {
+            chain.push_back(cur);
+            visited.insert(cur);
+            auto fnd = next_srl.find(cur);
+            cur = (fnd == next_srl.end()) ? nullptr : fnd->second;
+        }
+        for (size_t g = 0; g < chain.size(); g += 4) {
+            size_t glen = std::min<size_t>(4, chain.size() - g);
+            if (glen > 1) {
+                // Imported (BEL-pinned) chains were already placed legally;
+                // adding constraints on top would fight the pin (cf. the
+                // pinned-root lesson in pack_carries).  Likewise leave cells
+                // an earlier pass (e.g. constrain_muxf_tree) already put in
+                // a cluster alone: overwriting the cluster membership would
+                // desync it from that cluster root's constr_children list.
+                bool pinned = false;
+                for (size_t i = 0; i < glen; i++)
+                    pinned |= bool(chain[g + i]->attrs.count(id_BEL)) || chain[g + i]->cluster != ClusterId() ||
+                              chain[g + i]->constr_abs_z || !chain[g + i]->constr_children.empty();
+                if (!pinned) {
+                    CellInfo *base = chain[g];
+                    base->cluster = base->name;
+                    base->constr_abs_z = true;
+                    base->constr_z = (3 << 4) | BEL_6LUT; // head at D6LUT
+                    for (size_t i = 1; i < glen; i++) {
+                        CellInfo *m = chain[g + i];
+                        m->cluster = base->name;
+                        base->constr_children.push_back(m);
+                        m->constr_x = 0;
+                        m->constr_y = 0;
+                        m->constr_abs_z = true;
+                        m->constr_z = ((3 - int(i)) << 4) | BEL_6LUT; // then C, B, A
+                    }
+                    clusters++;
+                }
+            }
+            CellInfo *tail = chain[g + glen - 1];
+            if (next_srl.count(tail))
+                offslice.push_back(tail);
+        }
+    }
+    // A chain with no head is a pure Q31 cycle: some link has to go through
+    // the fabric, and any of them may -- break the cycle at an arbitrary
+    // element and cluster the rest as one open chain.
+    for (auto ci : srls) {
+        if (visited.count(ci) || !next_srl.count(ci))
+            continue;
+        log_warning("SRL cell '%s' is part of a pure Q31 cascade cycle; breaking the cycle at its Q31 link\n",
+                    ci->name.c_str(ctx));
+        prev_srl.erase(next_srl.at(ci));
+        next_srl.erase(ci);
+        // (re-run is simplest: tail recursion depth is at most one because a
+        // broken cycle is an ordinary chain)
+        return constrain_srl_cascades();
+    }
+
+    // Cells whose Q31 net is not one of the in-slice cascade links kept
+    // above: multi-fanout Q31, a non-SRL consumer, or a group boundary.
+    for (auto ci : srls) {
+        NetInfo *q31 = ci->getPort(id_MC31);
+        if (q31 == nullptr || next_srl.count(ci))
+            continue;
+        if (std::find(offslice.begin(), offslice.end(), ci) == offslice.end())
+            offslice.push_back(ci);
+    }
+
+    int rewired = 0;
+    for (auto ci : offslice) {
+        NetInfo *q31 = ci->getPort(id_MC31);
+        if (q31 == nullptr)
+            continue;
+        if (q31->users.empty()) {
+            ci->disconnectPort(id_MC31);
+            continue;
+        }
+        NetInfo *q = ci->getPort(id_O6);
+        if (q != nullptr && !q->users.empty()) {
+            if (reads_bit31(ci)) {
+                // Q already reads bit 31, so it carries the very value Q31
+                // does: fold the off-slice Q31 consumers into the Q net.
+                std::vector<PortRef> users;
+                for (auto &user : q31->users)
+                    users.push_back(user);
+                for (auto &user : users) {
+                    user.cell->disconnectPort(user.port);
+                    user.cell->connectPort(user.port, q);
+                }
+                ci->disconnectPort(id_MC31);
+                rewired++;
+                continue;
+            }
+            log_error("SRL '%s': its Q31 cascade must go through the fabric (chain deeper than 128 bits, or a "
+                      "non-SRL consumer), which needs the Q output with the read address tied to 31 -- but Q is "
+                      "already in use with another address. Restructure the shift register (srl_style/shreg "
+                      "attributes) so this segment is not tapped.\n",
+                      ci->name.c_str(ctx));
+        }
+        ci->disconnectPort(id_MC31);
+        if (q != nullptr)
+            ci->disconnectPort(id_O6);
+        if (!ci->ports.count(id_O6)) {
+            ci->ports[id_O6].name = id_O6;
+            ci->ports[id_O6].type = PORT_OUT;
+        }
+        ci->connectPort(id_O6, q31);
+        for (auto a : {id_A2, id_A3, id_A4, id_A5, id_A6}) {
+            ci->disconnectPort(a);
+            if (!ci->ports.count(a)) {
+                ci->ports[a].name = a;
+                ci->ports[a].type = PORT_IN;
+            }
+            ci->connectPort(a, vcc);
+        }
+        rewired++;
+    }
+    if (clusters || rewired)
+        log_info("Constrained %d SRL cascade group(s) into single slices, moved %d Q31 link(s) to Q[31]\n", clusters,
+                 rewired);
 }
 
 void XilinxPacker::pack_constants()
