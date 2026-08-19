@@ -20,11 +20,11 @@
 
 | Gap | Fork | Upstream |
 |---|---|---|
-| **Kintex-7 devices not in default build** | xc7k70t/160t/325t/420t/480t in prjxray-db + CI chipdb | `meta/kintex7` site types exist, but `ALL_HIMBAECHEL_XILINX_DEVICES` has **no xc7k\***; adding a device = CMake entry + prjxray DB (likely works out of the box) |
-| **Zynq-7 parts beyond z010/z020** | xc7z030/035/045/100 | only xc7z010/xc7z020 |
+| **Kintex-7 devices not in default build** | xc7k70t/160t/325t/420t/480t in prjxray-db + CI chipdb | ✅ **fixed in WP0**: `ALL_HIMBAECHEL_XILINX_DEVICES` now includes xc7k70t/160t/325t/420t/480t (die dirs exist in prjxray-db) |
+| **Zynq-7 parts beyond z010/z020** | xc7z030/035/045/100 | ✅ **fixed in WP0**: xc7z030/045/100 added; xc7z035 deferred — no die dir in openXC7 prjxray-db (part dirs only) |
 | **Spartan-7 coverage** | xc7s50 (in CI) | xc7s50 ✓ |
-| **Artix-7** | xc7a35t/50t/100t/200t (a35t real part, not alias) | xc7a50t/100t/200t + **xc7a35t aliased to the a50t die** (`xilinx.cc:86`) — wrong die for real a35t chips (timing/size) |
-| **Virtex-7 (xc7vx485t)** | ✓ (VC707, GTX, `gtClockTemplateRoute` bodge) | ✗ no virtex7 meta/devices |
+| **Artix-7** | xc7a35t/50t/100t/200t (a35t real part, not alias) | ⚠ xc7a50t/100t/200t + **xc7a35t aliased to the a50t die** (`xilinx.cc:86`); openXC7 prjxray-db has a35t *part* dirs (package pins) but **no a35t die dir**, so the alias stays until die data exists (WP0: verified, deferred) |
+| **Virtex-7 (xc7vx485t)** | ✓ (VC707, GTX, `gtClockTemplateRoute` bodge) | ⚠ **fixed in WP0**: virtex7 meta (from openXC7 meta master, seeded from kintex7), CMake `xc7v` mapping, gen virtex7 selection + timings fallback, device regex `xc7vx\d+t?`; GTX packer still pending (WP7) |
 | **UltraScale+ (xcup via RapidWright)** | xczu2cg, xczu7ev + E2/E3/E4 packers | ✗ uarch is xc7-only (`match_device`); `ng-ultra` is a different (non-Xilinx) part; E2/E3/E4 constids are vestigial |
 
 **Gap class**: family *coverage* is mostly a device-list/database issue, not

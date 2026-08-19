@@ -379,6 +379,9 @@ def main():
     if "xc7s" in args.device:
         metadata_root = metadata_root.replace("artix7", "spartan7")
         xraydb_root = xraydb_root.replace("artix7", "spartan7")
+    if "xc7v" in args.device:
+        metadata_root = metadata_root.replace("artix7", "virtex7")
+        xraydb_root = xraydb_root.replace("artix7", "virtex7")
     # Load prjxray device data
     d = xilinx_device.import_device(args.device, xraydb_root, metadata_root)
     # Init constant ids
@@ -465,6 +468,8 @@ def main():
     timings_root = xraydb_root
     if "kintex7" in xraydb_root: # TODO: missing
         timings_root = xraydb_root.replace("kintex7", "artix7")
+    if "virtex7" in xraydb_root: # TODO: missing
+        timings_root = xraydb_root.replace("virtex7", "artix7")
     slicem_sdf = parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "slicem.sdf"))
     mux = ch.timing.add_cell_variant("DEFAULT", "SELMUX2_1")
     import_sdf_timings(mux, slicem_sdf.cells[("SELMUX2_1", "SLICEM/F7BMUX")])

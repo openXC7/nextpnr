@@ -59,15 +59,22 @@
 
 ## 1. Work packages (ordered)
 
-### WP0 — Device-list & build foundation (small, no risk)
-- Add `xc7k70t/160t/325t/420t/480t`, `xc7z030/035/045/100`, `xc7vx485t`
-  to `ALL_HIMBAECHEL_XILINX_DEVICES` (`himbaechel/uarch/xilinx/CMakeLists.txt:32`)
-  — kintex7/zynq7 site types already exist in `meta/`.
-- Replace the `xc7a35t`→`xc7a50t` die alias (`xilinx.cc:86`) with a real
-  a35t die if prjxray has it (fork does: `xc7a35t` dir).
-- Keep `meta/` sync: fork's `nextpnr-xilinx-meta` fixes (RIOB18 segbits,
-  `f8e76430`, `a92eb3d1` DB bumps) must land in the upstream meta submodule.
-- **Validate**: build all devices; run `arty-a35` blinky example.
+### WP0 — Device-list & build foundation (small, no risk) — ✅ IMPLEMENTED (pending build validation)
+- ✅ Added `xc7k70t/160t/325t/420t/480t`, `xc7z030/045/100`, `xc7vx485t`
+  to `ALL_HIMBAECHEL_XILINX_DEVICES` (`himbaechel/uarch/xilinx/CMakeLists.txt:32`);
+  `xc7z035` deferred — no die dir in openXC7 prjxray-db (part dirs only).
+- ✅ Virtex-7 plumbing: CMake `xc7v` → virtex7 mapping; gen script virtex7
+  metadata selection + artix7 timings fallback (`xilinx_gen.py`); device
+  regex extended to `xc7vx\d+t?` (`xilinx.cc:81`).
+- ✅ Meta sync: submodule switched gatecat → **openXC7/nextpnr-xilinx-meta**
+  master (`a4af910`, adds virtex7 site types + kintex7 PCIE_2_1;
+  `.gitmodules` URL updated).
+- ⚠ a35t: openXC7 prjxray-db (`ab1fc60`) has a35t *part* dirs but **no a35t
+  die dir** — the a35t→a50t die alias (`xilinx.cc:86`) therefore stays
+  (chipdbs are die-level); correcting the earlier assumption that the fork
+  had a real a35t die.
+- **Validate**: chipdb gen + build for xc7a50t/xc7k325t/xc7vx485t/xc7z045
+  (in progress); then `arty-a35` blinky + archcheck.
 
 ### WP1 — Port the legality engine (core, must be first)
 Port into `himbaechel/uarch/xilinx/xilinx_place.cc` (+`xilinx.cc` hooks):

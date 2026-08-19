@@ -29,7 +29,7 @@ if (NOT HIMBAECHEL_PRJXRAY_DB AND NOT IMPORT_BBA_FILES)
     message(FATAL_ERROR "HIMBAECHEL_PRJXRAY_DB must be set to a prjxray database checkout")
 endif()
 
-set(ALL_HIMBAECHEL_XILINX_DEVICES xc7a100t xc7a200t xc7a50t xc7s50 xc7z010 xc7z020)
+set(ALL_HIMBAECHEL_XILINX_DEVICES xc7a100t xc7a200t xc7a50t xc7k70t xc7k160t xc7k325t xc7k420t xc7k480t xc7s50 xc7vx485t xc7z010 xc7z020 xc7z030 xc7z045 xc7z100)
 set(HIMBAECHEL_XILINX_DEVICES ${ALL_HIMBAECHEL_XILINX_DEVICES} CACHE STRING
     "Include support for these Xilinx devices (available: ${ALL_HIMBAECHEL_XILINX_DEVICES})")
 if (HIMBAECHEL_XILINX_DEVICES STREQUAL "all")
@@ -48,11 +48,13 @@ foreach (device ${HIMBAECHEL_XILINX_DEVICES})
         set(XRAY_SUBDIR "kintex7")
     elseif (device MATCHES "^xc7s")
         set(XRAY_SUBDIR "spartan7")
+    elseif (device MATCHES "^xc7v")
+        set(XRAY_SUBDIR "virtex7")
     elseif (device MATCHES "^xc7z")
         set(XRAY_SUBDIR "zynq7")
     else()
         message(FATAL_ERROR "Unsupported Xilinx device family for device: ${device}. "
-                            "Expected prefix xc7a, xc7k, xc7s or xc7z.")
+                            "Expected prefix xc7a, xc7k, xc7s, xc7v or xc7z.")
     endif()
     add_bba_produce_command(
         TARGET  nextpnr-himbaechel-xilinx-bba
