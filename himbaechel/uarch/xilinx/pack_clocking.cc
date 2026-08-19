@@ -138,6 +138,9 @@ void XC7Packer::prepare_clocking()
             if (ci->ports.count(id_CE) && ci->getPort(id_CE) != nullptr)
                 ci->disconnectPort(id_CE);
             tie_port(ci, "CE", true, true);
+        } else if (ci->type == id_BUFR) {
+            // BUFR pins (I/CE/CLR/O) match the BUFR_BUFR bel one-to-one
+            ci->type = id_BUFR_BUFR;
         }
     }
 }
@@ -239,6 +242,11 @@ void XilinxImpl::route_clocks()
         bool is_global = false;
         if ((clk_net->driver.cell->type.in(id_BUFGCTRL, id_BUFCE_BUFG_PS, id_BUFCE_BUFCE, id_BUFGCE_DIV_BUFGCE_DIV)) &&
             clk_net->driver.port == id_O)
+            is_global = true;
+        else if (clk_net->driver.cell->type == id_BUFR_BUFR && clk_net->driver.port == id_O)
+            is_global = true;
+        else if (clk_net->users.entries() == 1 && (*clk_net->users.begin()).cell->type == id_BUFR_BUFR &&
+                 (*clk_net->users.begin()).port == id_I)
             is_global = true;
         else if (clk_net->driver.cell->type.in(id_PLLE2_ADV_PLLE2_ADV, id_MMCME2_ADV_MMCME2_ADV) &&
                  clk_net->users.entries() == 1 &&

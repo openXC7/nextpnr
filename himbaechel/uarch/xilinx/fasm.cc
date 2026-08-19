@@ -1981,12 +1981,50 @@ struct FasmBackend
         pop();
     }
 
+    // A placed BUFR is configured from the cell, not from the route: the
+    // pp_config entries only fire when a BUFR site is traversed as routing,
+    // and they hardcode BUFR_DIVIDE.BYPASS.  Emitting from the cell makes the
+    // configuration follow the instance, which is where the parameter lives.
+    // (Port of nextpnr-xilinx 0b914578.)
+    void write_bufr(CellInfo *ci)
+    {
+        // Site name is BUFR_X0Y<y> and the feature is BUFR_Y<y>, so the
+        // site's y within the tile is the slot index.
+        auto xy = uarch->rel_site_loc(uarch->get_bel_site(ci->bel));
+
+        // Vivado's BUFR_DIVIDE is a string: "BYPASS" or "1".."8".
+        std::string divide = str_or_default(ci->params, ctx->id("BUFR_DIVIDE"), "BYPASS");
+        std::string divide_feature;
+        if (divide == "BYPASS" || divide.empty()) {
+            divide_feature = "BYPASS";
+        } else if (divide.size() == 1 && divide[0] >= '1' && divide[0] <= '8') {
+            divide_feature = std::string("D") + divide[0];
+        } else {
+            // Emitting an undocumented feature instead would fail later in
+            // fasm2frames with a FasmLookupError naming a bit.
+            log_error("BUFR '%s' has BUFR_DIVIDE=\"%s\"; supported are BYPASS and 1..8\n",
+                      ci->name.c_str(ctx), divide.c_str());
+        }
+
+        push(uarch->tile_name(ci->bel.tile));
+        push("BUFR_Y" + std::to_string(xy.y));
+        write_bit("IN_USE");
+        push("BUFR_DIVIDE");
+        write_bit(divide_feature);
+        pop();
+        pop();
+        pop();
+    }
+
     void write_ip()
     {
         for (auto &cell : ctx->cells) {
             CellInfo *ci = cell.second.get();
             if (ci->type == id_DSP48E1_DSP48E1) {
                 write_dsp_cell(ci);
+                blank();
+            } else if (ci->type == id_BUFR_BUFR && ci->bel != BelId()) {
+                write_bufr(ci);
                 blank();
             }
         }

@@ -89,8 +89,11 @@ def include_pip(tile_type, p):
     if tile_type.startswith("HCLK_IOI"):
         if "RCLK_BEFORE_DIV" in p.dst_wire().name() and "IMUX" in p.src_wire().name():
             return False
-        if  p.dst_wire().name().endswith("_DMUX") and "I2IOCLK_TOP" in p.src_wire().name():
-            return False
+        # NOTE: the fork (nextpnr-xilinx) does NOT filter the *_DMUX <-
+        # I2IOCLK_TOP pips, and they are required to route a placed BUFR's
+        # dedicated clock input (IOB -> HCLK_IOI -> BUFR.I).  Dropping them
+        # here made every BUFR design unroutable ("Failed to route arc ...
+        # from IOB_X..INBUF_EN_OUT to BUFR_X..I").  Keep them.
     if "IOI" in tile_type:
         if "CLKB" in p.dst_wire().name() and "IMUX22" in p.src_wire().name():
             return False
