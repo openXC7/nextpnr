@@ -747,12 +747,12 @@ delay_t XilinxImpl::estimateDelay(WireId src, WireId dst) const
     int sx, sy, dx, dy;
     tile_xy(ctx->chip_info, src.tile, sx, sy);
     tile_xy(ctx->chip_info, dst.tile, dx, dy);
+    auto src_type = ctx->getWireType(src);
     auto fnd_src = source_locs.find(src);
     if (fnd_src != source_locs.end()) {
         sx = fnd_src->second.x;
         sy = fnd_src->second.y;
     } else {
-        auto src_type = ctx->getWireType(src);
         if (src_type.in(id_DOUBLE, id_BENTQUAD, id_HQUAD, id_VQUAD)) {
             for (auto pip : ctx->getPipsDownhill(src)) {
                 tile_xy(ctx->chip_info, pip.tile, sx, sy);
@@ -774,19 +774,43 @@ delay_t XilinxImpl::estimateDelay(WireId src, WireId dst) const
         }
     }
 
-    // TODO: improve sophistication here based on old nextpnr-xilinx code
+    // Tuned delay formula ported from nextpnr-xilinx arch.cc
     int dist_x = std::abs(dx - sx), dist_y = std::abs(dy - sy);
-    return 500 + 12 * (2 * std::max(dist_y - 6, 0) + 4 * std::min(dist_y, 6) + std::max(dist_x - 12, 0) +
-                       2 * std::min(dist_x, 12));
+    delay_t base = 30 * std::min(dist_x, 18) + 10 * std::max(dist_x - 18, 0) + 60 * std::min(dist_y, 6) +
+                   20 * std::max(dist_y - 6, 0) + 300;
+    base = (base * 3) / 2; // xc7
+    if (fnd_snk != sink_locs.end())
+        base += 1000;
+    if (src_type == id_NODE_PINFEED && dx == sx && dy == sy)
+        base -= 200;
+    else if (src_type.in(id_NODE_LOCAL, id_NODE_PINBOUNCE) && dx == sx && dy == sy)
+        base -= 100;
+    if (src_type == id_NODE_CLE_OUTPUT)
+        base -= 80;
+    return base;
 }
 
 delay_t XilinxImpl::predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const
 {
+    if (src_bel == BelId() || dst_bel == BelId())
+        return 0;
     int sx, sy, dx, dy;
     tile_xy(ctx->chip_info, src_bel.tile, sx, sy);
     tile_xy(ctx->chip_info, dst_bel.tile, dx, dy);
-    // TODO: improve sophistication here based on old nextpnr-xilinx code
-    return 500 + 25 * (2 * std::abs(dy - sy) + std::abs(dx - sx));
+    // Tuned predict-delay ported from nextpnr-xilinx arch.cc
+    if (src_bel.tile == dst_bel.tile) {
+        Loc dl = ctx->getBelLocation(src_bel), sl = ctx->getBelLocation(dst_bel);
+        if ((dl.z >> 4) == (sl.z >> 4))
+            return 0;
+        else if ((dl.z & 0xF) == BEL_FF2)
+            return 700; // penalize FF2 as it makes routing harder
+        else
+            return 150;
+    }
+    int dist_x = std::abs(dx - sx), dist_y = std::abs(dy - sy);
+    delay_t base = 30 * std::min(dist_x, 18) + 10 * std::max(dist_x - 18, 0) + 60 * std::min(dist_y, 6) +
+                   20 * std::max(dist_y - 6, 0) + 300;
+    return (base * 3) / 2; // xc7
 }
 
 BoundingBox XilinxImpl::getRouteBoundingBox(WireId src, WireId dst) const

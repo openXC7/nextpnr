@@ -125,8 +125,9 @@ Port in commit-sized units, each with a bitstream-hash check:
   equivalents).
 
 ### WP3 — Primitive packer gaps (feature-level)
-1. **MUXF9 on xc7** via `SELMUX2_1` (fork `pack.cc:670` tree) — replace
-   upstream's `log_error` (`pack.cc:441`).
+1. ⏭ **MUXF9 on xc7**: NOT a gap — the fork also hard-errors on xc7
+   (`pack.cc:648`); its SELMUX2_1 mapping covers F7/F8 only (F9MUX is
+   xcup-only). Dropped from the plan (earlier doc-02 claim corrected).
 2. ✅ **BUFH** (non-CE) cell + packing: BUFH/BUFHCE → `BUFHCE_BUFHCE` with
    CE tied active in `prepare_clocking`, + `try_preplace` in
    `preplace_clocking`; constids `X(BUFH)`, `X(BUFHCE_BUFHCE)` added
@@ -154,10 +155,14 @@ Port in commit-sized units, each with a bitstream-hash check:
    dual-fanout cases; litex-ddr-arty-s7 (the fork's carry regression design)
    passes ×4 seeds. The netlist-level pass will be ported only if a concrete
    failing case appears.
-2. ⏳ **Delay model**: replace himbaechel's coarse `estimateDelay/predictDelay`
-   (`xilinx.cc:735-780`, has a TODO referencing the fork) with the fork's
-   site/inter-wire/intent-aware version (`arch.cc:650-762`) — prerequisite
-   for meaningful timing-driven results (doc 03 §6 risk 5).
+2. 🔄 **Delay model**: ported the fork's tuned formulas into upstream
+   `estimateDelay`/`predictDelay` (`xilinx.cc`, replacing the coarse TODO
+   version): the fork's 30/10·18, 60/20·6 base + ×3/2 xc7 factor, sink-loc
+   +1000, PINFEED/LOCAL/PINBOUNCE/CLE_OUTPUT discounts, and predictDelay's
+   same-tile 0/150/700 (FF2 penalty) model.  Kept upstream's coordinate
+   resolution (source/sink locs + long-wire pips) instead of the fork's
+   inter_x/inter_y site lookups (himbaechel chipdb has no per-site inter
+   coords).  Build/validation pending WP3.4 subagent (build-dir owner).
 3. ✅ **router2 config**: new `HimbaechelAPI::configureRouter2()` hook (set in
    `Arch::route()`); XilinxImpl sets `bb_margin_{x,y}=4`,
    `backwards_max_iter=200`, `perf_profile=true`.
