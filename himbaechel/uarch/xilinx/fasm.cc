@@ -1122,15 +1122,27 @@ struct FasmBackend
             else
                 write_bit("IDELMUXE3.P1");
 
-            // clock edge
+            // Clock edge.  DDR_CLK_EDGE is a three-valued parameter encoded in
+            // two bits, and the third value is the state where BOTH bits are
+            // clear:
+            //
+            //     OPPOSITE_EDGE         !bit_a    bit_b
+            //     SAME_EDGE               bit_a  !bit_b
+            //     SAME_EDGE_PIPELINED   !bit_a  !bit_b
+            //
+            // So SAME_EDGE_PIPELINED is expressed by writing NEITHER of the
+            // other two -- there is no third feature to write (adding one
+            // only produces a FasmLookupError; no such key exists in any
+            // database).  (Port of nextpnr-xilinx 9a6a7e3b.)
             std::string edge = str_or_default(ci->params, id_DDR_CLK_EDGE, "OPPOSITE_EDGE");
             if (edge == "SAME_EDGE")
                 write_bit("IFF.DDR_CLK_EDGE.SAME_EDGE");
             else if (edge == "OPPOSITE_EDGE")
                 write_bit("IFF.DDR_CLK_EDGE.OPPOSITE_EDGE");
-            else
-                log_error("unsupported clock edge parameter for cell '%s' at %s: %s. Supported are: SAME_EDGE and "
-                          "OPPOSITE_EDGE",
+            else if (edge == "SAME_EDGE_PIPELINED") { /* both bits clear: write nothing */
+            } else
+                log_error("unsupported clock edge parameter for cell '%s' at %s: %s. Supported are: SAME_EDGE, "
+                          "OPPOSITE_EDGE and SAME_EDGE_PIPELINED",
                           ci->name.c_str(ctx), site.c_str(), edge.c_str());
 
             std::string srtype = str_or_default(ci->params, id_SRTYPE, "SYNC");
@@ -1142,17 +1154,21 @@ struct FasmBackend
             write_bit("IFF.ZINV_C", !bool_or_default(ci->params, id_IS_CLK_INVERTED, false));
             write_bit("ZINV_D", !bool_or_default(ci->params, id_IS_D_INVERTED, false));
 
-            auto init = int_or_default(ci->params, id_INIT_Q1, 0);
-            if (init == 0)
-                write_bit("IFF.ZINIT_Q1");
-            init = int_or_default(ci->params, id_INIT_Q2, 0);
-            if (init == 0)
-                write_bit("IFF.ZINIT_Q2");
+            // The IFF is physically a four-flop block shared with ISERDESE2;
+            // an IDDR only exposes Q1/Q2, so Q3/Q4 were left unwritten -- and
+            // on silicon that is observable (outputs read the wrong value
+            // despite programmed INIT).  IDDR has no INIT_Q3/Q4 parameters,
+            // so those default to 0.  (Port of nextpnr-xilinx d455ae52.)
+            for (int i = 1; i <= 4; i++) {
+                auto init = int_or_default(ci->params, ctx->id("INIT_Q" + std::to_string(i)), 0);
+                if (init == 0)
+                    write_bit("IFF.ZINIT_Q" + std::to_string(i));
+            }
 
             auto sr_name = str_or_default(ci->attrs, id_X_ORIG_PORT_SR, "R");
             if (sr_name == "R") {
-                write_bit("IFF.ZSRVAL_Q1");
-                write_bit("IFF.ZSRVAL_Q2");
+                for (int i = 1; i <= 4; i++)
+                    write_bit("IFF.ZSRVAL_Q" + std::to_string(i));
             }
         } else if (ci->type.in(id_OLOGICE2_OUTFF, id_OLOGICE3_OUTFF)) {
             std::string edge = str_or_default(ci->params, id_DDR_CLK_EDGE, "OPPOSITE_EDGE");
