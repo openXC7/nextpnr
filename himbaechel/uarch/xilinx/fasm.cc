@@ -56,6 +56,27 @@ struct FasmBackend
     std::vector<std::string> fasm_ctx;
     dict<int, std::vector<PipId>> pips_by_tile;
 
+    // (tile_index, slot_y) pairs where a BUFGCTRL cell is actually bound.
+    // Used by write_pip to suppress phantom BUFGCTRL.BUFGCTRL_X0Y*.IN_USE /
+    // IS_*_INVERTED / ZINV_* bits and CLK_BUFG_*_R IMUX pip bits that the
+    // router produces merely by crossing an idle BUFG tile.  Without this,
+    // a single-BUFG design programs both the active CLK_BUFG_TOP_R site AND
+    // a phantom one in the adjacent CLK_BUFG_BOT_R tile, contending for the
+    // clock distribution backbone and leaving the FF clock dead on hardware
+    // (port of nextpnr-xilinx, task #47).
+    std::set<std::pair<int, int>> bufgctrl_bound_slots;
+    void populate_bufgctrl_bound_slots()
+    {
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->type == id_BUFGCTRL && ci->bel != BelId()) {
+                SiteIndex site = uarch->get_bel_site(ci->bel);
+                const auto &site_data = uarch->tile_extra_data(site.tile)->sites[site.site];
+                bufgctrl_bound_slots.insert({site.tile, site_data.site_y});
+            }
+        }
+    }
+
     dict<std::pair<int, int>, unsigned> lut_route_throughs;
 
     dict<IdString, pool<IdString>> invertible_pins;
@@ -280,6 +301,27 @@ struct FasmBackend
         if (pp_config.count(ppk)) {
             auto &pp = pp_config.at(ppk);
             std::string tile_name = uarch->tile_name(pip.tile);
+            // Phantom-BUFGCTRL guard (pseudo-pip variant): if the router
+            // crosses a CLK_BUFG_*_R tile that has NO bound BUFGCTRL, every
+            // pseudo-pip feature for that tile is a phantom (the chipdb's
+            // clock-distribution graph allows the path, but Vivado doesn't
+            // actually use it).  Drop the whole emission -- not just the
+            // BUFGCTRL.* config bits but also the CLK_BUFG_BUFGCTRL*_I0/I1
+            // IMUX features that program a phantom clock-input mux at the
+            // empty BUFG site, contending with the real one in the active
+            // tile.  (Port of nextpnr-xilinx, task #47.)
+            bool tile_is_clk_bufg_r =
+                    (boost::starts_with(tile_name, "CLK_BUFG_TOP_R") || boost::starts_with(tile_name, "CLK_BUFG_BOT_R"));
+            if (tile_is_clk_bufg_r) {
+                bool any_bound_here = false;
+                for (int slot = 0; slot < 16; ++slot)
+                    if (bufgctrl_bound_slots.count({pip.tile, slot})) {
+                        any_bound_here = true;
+                        break;
+                    }
+                if (!any_bound_here)
+                    return;
+            }
             for (auto c : pp) {
                 if (boost::starts_with(tile_name, "RIOI3_SING") || boost::starts_with(tile_name, "LIOI3_SING") ||
                     boost::starts_with(tile_name, "RIOI_SING")) {
@@ -290,6 +332,24 @@ struct FasmBackend
                         if (y0pos != std::string::npos)
                             c.replace(y0pos, 2, "Y1");
                     }
+                }
+                // Phantom-BUFGCTRL guard (per-slot variant): suppress
+                // BUFGCTRL.BUFGCTRL_X0Y<n>.* features on (tile, slot) pairs
+                // that have no actually-bound BUFGCTRL cell.
+                if (boost::starts_with(c, "BUFGCTRL.BUFGCTRL_X0Y")) {
+                    const std::string prefix = "BUFGCTRL.BUFGCTRL_X0Y";
+                    size_t start = prefix.size();
+                    size_t end = c.find('.', start);
+                    if (end == std::string::npos)
+                        end = c.size();
+                    int slot = -1;
+                    try {
+                        slot = std::stoi(c.substr(start, end - start));
+                    } catch (...) {
+                        slot = -1;
+                    }
+                    if (slot >= 0 && !bufgctrl_bound_slots.count({pip.tile, slot}))
+                        continue;
                 }
                 out << tile_name << "." << c << std::endl;
             }
@@ -302,6 +362,25 @@ struct FasmBackend
             std::string tile_name = uarch->tile_name(pip.tile);
             std::string dst_name = dst.str(ctx);
             std::string src_name = src.str(ctx);
+
+            // Phantom-BUFGCTRL guard (regular-pip variant): the pp_config
+            // branch already filters pseudo-pip emissions at CLK_BUFG_*_R
+            // tiles that hold no bound BUFGCTRL; this handles the regular
+            // PIPs the router crossed through the same tiles
+            // (CLK_BUFG_BUFGCTRL*_I0/I1 IMUX hops, CLK_BUFG_CK_GCLK* output
+            // PIPs).  Both classes program the unused-slot BUFGCTRL site;
+            // the cell-config + routing pair together is what kills the
+            // clock distribution on hardware.  (Port of nextpnr-xilinx.)
+            if (boost::starts_with(tile_name, "CLK_BUFG_TOP_R") || boost::starts_with(tile_name, "CLK_BUFG_BOT_R")) {
+                bool any_bound_here = false;
+                for (int slot = 0; slot < 16; ++slot)
+                    if (bufgctrl_bound_slots.count({pip.tile, slot})) {
+                        any_bound_here = true;
+                        break;
+                    }
+                if (!any_bound_here)
+                    return;
+            }
 
             if (boost::starts_with(tile_name, "DSP_L") || boost::starts_with(tile_name, "DSP_R")) {
                 // FIXME: PPIPs missing for DSPs
@@ -1851,6 +1930,7 @@ struct FasmBackend
             << ctx->chip_info->generator.get() << "\n";
         out << "# placer seed " << ctx->rngstate << "\n";
         get_invertible_pins(ctx, invertible_pins);
+        populate_bufgctrl_bound_slots(); // must run before any pip emission
         write_logic();
         write_io();
         write_routing();
