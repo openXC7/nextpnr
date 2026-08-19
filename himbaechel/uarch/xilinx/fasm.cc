@@ -32,6 +32,7 @@
 #include "util.h"
 
 #include "xilinx.h"
+#include "version.h"
 
 #define HIMBAECHEL_CONSTIDS "uarch/xilinx/constids.inc"
 #include "himbaechel_constids.h"
@@ -1841,6 +1842,14 @@ struct FasmBackend
 
     void write_fasm()
     {
+        // Run-identity header: these comment lines are dropped by fasm2frames,
+        // so the resulting bitstream hash is unaffected; they record the exact
+        // toolchain/chipdb/placer provenance of this FASM file for
+        // reproducibility (port of nextpnr-xilinx 7037c948).
+        out << "# nextpnr-himbaechel " << GIT_DESCRIBE_STR << "\n";
+        out << "# chipdb " << ctx->chip_info->name.get() << " version " << ctx->chip_info->version << " generator "
+            << ctx->chip_info->generator.get() << "\n";
+        out << "# placer seed " << ctx->rngstate << "\n";
         get_invertible_pins(ctx, invertible_pins);
         write_logic();
         write_io();
