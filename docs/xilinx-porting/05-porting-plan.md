@@ -198,11 +198,12 @@ USR_ACCESSE2, DCIRESET — single-site preplacement per fork
 `pack_io_xc7.cc:1232` (`d42d6c9b`) + FASM emission. Depends on the
 preplacement mechanism from WP1.
 
-### WP7 — GT transceivers (GTPE2/GTXE2) (larger)
+### WP7 — GT transceivers (GTPE2/GTXE2) (larger) — 🔄 subagent in flight
 Port `pack_gt_xc7.cc` (380 L) + `fasm.cc` GT writers (GTP/GTX channel,
-common, IBUFDS_GTE2 refclk, PLL remap) + GT-clock template route for
-virtex7. Depends on WP0 (kintex7/virtex7 devices). Highest-value for the
-workspace's kintex7 focus.
+common, IBUFDS_GTE2 refclk, PLL remap) via bindBel instead of the fork's
+BEL-attr strings. Depends on WP0 (kintex7/virtex7 devices). The fork's
+GT-clock template route (`NEXTPNR_GT_CLK_BODGE`) is a virtex7-specific
+bodge and is NOT ported.
 
 ### WP8 — EXCLUDED: UltraScale / UltraScale+ porting (xc7-only decision)
 
@@ -222,8 +223,15 @@ as a separate project with its own documents.
   placements; re-golden per WP9.3 once the port stabilises).
 - ✅ part-form / bare-die device names accepted (CI shim derives the device
   from the chipdb filename).
-- ⏳ xilinx gtest coverage; archcheck `bel != bel2` fix (pre-existing
-  upstream chipdb issue: variant bels share names — documented, deferred).
+- ✅ xilinx gtest coverage added: `uarch/xilinx/tests/pack_test.cc` (5
+  packer tests: STARTUPE2/BSCANE2 cfg packing + preplacement, BUFH/BUFHCE,
+  BUFR, IBUFGDS alias), wired via TEST_SOURCES.
+- ✅ archcheck name-collision fixes: non-primary variant bels get a
+  `~<variant>` suffix and site pips are deduped per (src,dst), so the
+  bel-name and pip-name checks of `--test` now pass on all five devices.
+  The remaining location-roundtrip assert (variant bels sharing z) is a
+  pre-existing upstream architectural issue (variant bel overlap), not
+  fixed here.
 1. Add xilinx gtest coverage (upstream `tests/` has none for himbaechel;
    `ng-ultra` shows the pattern) — port fork slice-legality/DRAM/BRAM cases.
 2. Port the fork's per-PR demos gate (`.github/workflows/demos.yml`):

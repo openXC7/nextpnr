@@ -19,8 +19,13 @@ set(SOURCES
     xilinx_place.cc
 )
 
+set(TEST_SOURCES
+    tests/pack_test.cc
+)
+
 add_nextpnr_himbaechel_microarchitecture(${uarch}
     CORE_SOURCES ${SOURCES}
+    TEST_SOURCES ${TEST_SOURCES}
 )
 
 set(HIMBAECHEL_PRJXRAY_DB "" CACHE STRING

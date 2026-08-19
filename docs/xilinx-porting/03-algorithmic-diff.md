@@ -352,13 +352,12 @@ legalisation corruption** or **unroutable sites**, not merely QoR loss.
 | 12 | **RIOB18/IOB pairing + SLEW groups + HP-bank glue** (FASM) | `fasm.cc:1088-1235` | present `fasm.cc:776-968` (equivalent) |
 | 13 | **BRAM onehot** (RAMFIFO36/RAM36/FIFO36; 18-bit vs 36-bit) | `arch_place.cc:1047-1070` | present `xilinx_place.cc:361-385` (equivalent) |
 
-**WP1 status (implementation)**: items **1, 2, 3, 4, 5, 6** are now
-**PORTED** into `xilinx_place.cc` (see `05-porting-plan.md` WP1 for the
-per-item mapping, incl. the SRL16E pair exemption and CO-as-direct-feed
-additions). Items 7 (SRL cascades), 9 (config preplacement) remain open for
-WP3/WP6; items 8, 10–13 were already present upstream. The hybrid-flow
-exemptions (frozen-tile trust, imported-slot BEL exemptions) were
-deliberately not ported.
+**Implementation status**: items **1–6** PORTED into `xilinx_place.cc`
+(WP1); item **7** (SRL cascades) PORTED as cluster-based D-C-B-A grouping
+in `pack.cc` (WP3.4); item **9** (config preplacement) PORTED as
+`pack_cfg()` (WP6); items 8, 10–13 were already present upstream. The
+hybrid-flow exemptions (frozen-tile trust, imported-slot BEL exemptions)
+were deliberately not ported.
 
 Bottom line for porting: items **2, 3, 4, 7, 9** are the highest-risk *missing* checks;
 items **1, 5, 6** exist in weaker/cache-gated form and must be strengthened.

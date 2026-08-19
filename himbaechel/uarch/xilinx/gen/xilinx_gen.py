@@ -204,6 +204,7 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
     tile_wire_count = len(tt.wires)
     for site in tile.sites():
         seen_pins = set()
+        seen_pips = set()
         for variant_idx, variant in enumerate(site.available_variants()):
             if variant in ("FIFO36E1", ): #unsupported atm
                 continue
@@ -216,7 +217,15 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
                 if z == -1:
                     continue
                 bel_name = gen_bel_name(sv, bel.name())
-                nb = tt.create_bel(name=f"{site.rel_name()}.{bel_name}", type=filters.get_bel_type_override(bel.bel_type()), z=z)
+                # Site variants can import overlapping bels (e.g. the
+                # ILOGICE3 site's ILOGICE3/ILOGICE2/ISERDESE2 variants all
+                # carry a CE1USED bel); give non-primary variants a distinct
+                # name suffix so bel names stay unique within a tile
+                # (archcheck `bel != bel2` would otherwise fail).
+                full_bel_name = f"{site.rel_name()}.{bel_name}"
+                if variant_idx > 0:
+                    full_bel_name += f"~{variant}"
+                nb = tt.create_bel(name=full_bel_name, type=filters.get_bel_type_override(bel.bel_type()), z=z)
                 nb.site = variant_key
                 nb.extra_data = BelExtraData(name_in_site=ch.strs.id(bel_name))
                 if bel.bel_class() == "RBEL": nb.flags |= 2
@@ -245,6 +254,14 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
                     (bel_name == "IDELMUXE3"):
 
                     continue
+                # Site variants can re-import the same site pip (e.g. every
+                # ILOGICE3 variant carries IDATAININV_OUT -> IDATAIN); import
+                # each (src, dst) once so pip names stay unique within a tile
+                # (archcheck `pip != pip2` would otherwise fail).
+                pip_key = (site_pip.src_wire().name(), site_pip.dst_wire().name())
+                if pip_key in seen_pips:
+                    continue
+                seen_pips.add(pip_key)
                 add_pip(lookup_site_wire(site_pip.src_wire()),
                     lookup_site_wire(site_pip.dst_wire()),
                     pip_class=PipClass.SITE_INTERNAL,
