@@ -276,6 +276,52 @@ bool XilinxImpl::is_pip_unavail(PipId pip) const
     const auto &pip_data = chip_pip_info(ctx->chip_info, pip);
     const auto &extra_data = *reinterpret_cast<const XlnxPipExtraDataPOD *>(pip_data.extra_data.get());
     unsigned pip_type = pip_data.flags;
+
+    // The regional-clock (BUFR) datapath is a BUFFER, not routing.
+    //
+    // CK_BUFRCLK* is a BUFR's OUTPUT and RCLK_BEFORE_DIV -> RCLK_OUT ->
+    // RCLK2RCLK is the path through its divider.  Connectivity-wise they look
+    // like ordinary arcs, so the router will thread a global clock through them
+    // -- and prefers to, because from a pin in the IO column the adjacent
+    // HCLK_IOI3 tile is nearer than the CMT column carrying the dedicated
+    // pad->BUFG route.
+    //
+    // Using that path obliges the design to place and enable a BUFR on the
+    // regional clock.  With nothing enforcing it, a clock-to-BUFG net comes out
+    // as
+    //     I2IOCLK_BOT1 -> IO_PLL_CLK3_DMUX -> RCLK3 -> RCLK_BEFORE_DIV1
+    //                  -> RCLK2RCLK1 -> CK_BUFRCLK1 -> CLK_HROW -> BUFGCTRL
+    // while the utilisation report says BUFR_BUFR: 0/20 -- a route whose buffer
+    // was never configured.  On hardware (Sonata, xc7a50tcsg324-1) that is a
+    // valid config with no clock: the bitstream loads and nothing runs.
+    //
+    // So when the design instantiates no BUFR, refuse the BUFR datapath.  The
+    // router then takes the direct pad->BUFG route (HCLK_CMT_CCIO* ->
+    // CLK_HROW_CK_IN_L* -> CK_BUFG_CASCO* -> BUFGCTRL), which is what Vivado
+    // does unprompted, and the same design then runs on the board.
+    //
+    // Conservative on purpose: when a BUFR IS present the path stays available,
+    // since deciding which regional clock a given BUFR serves needs placement
+    // context this predicate does not have.
+    if (pip_type == PIP_TILE_ROUTING) {
+        if (!design_has_bufr_valid) {
+            design_has_bufr = false;
+            for (auto &cell : ctx->cells)
+                if (cell.second->type == id_BUFR) {
+                    design_has_bufr = true;
+                    break;
+                }
+            design_has_bufr_valid = true;
+        }
+        if (!design_has_bufr) {
+            IdString dst = IdString(chip_tile_info(ctx->chip_info, pip.tile).wires[pip_data.dst_wire].name);
+            const std::string &d = dst.str(ctx);
+            if (d.find("CK_BUFRCLK") != std::string::npos || d.find("RCLK_BEFORE_DIV") != std::string::npos ||
+                d.find("RCLK_OUT") != std::string::npos || d.find("RCLK2RCLK") != std::string::npos)
+                return true;
+        }
+    }
+
     if (pip_type == PIP_SITE_ENTRY) {
         WireId dst = ctx->getPipDstWire(pip);
         if (ctx->getWireType(dst) == id_INTENT_SITE_GND) {
