@@ -42,7 +42,9 @@ env:
   # so a moving database or tool revision would break golden matching.
   PRJXRAY_DB_REV: ab1fc60c38a0dc1bc1d3d495f3189b25ae971e04
   PRJXRAY_REV: ef5203e9d06e9ffda79168439723579217ca8110
-  DEMO_PROJECTS_REV: 58c81f114f886990879268d31df3d7dcc098b4f1
+  # demo-projects commit carrying the five pre-synthesized .json netlists
+  # (yosys 0.67 synthesis outputs; the gate reuses them, no yosys on runner).
+  DEMO_PROJECTS_REV: 2713a8eb5f94abcceb50431405e8733c61a0b270
 
 jobs:
   demos:
@@ -115,6 +117,13 @@ jobs:
           repository: openXC7/demo-projects
           ref: ${{ env.DEMO_PROJECTS_REV }}
           path: demo-projects
+
+      # actions/checkout writes files in index order, so a .v checked out a
+      # second after its committed .json would look "older" to make and the
+      # %.json rule would fire (needs yosys, which the runner does not have).
+      # Touch every committed .json so make always treats them as up to date.
+      - name: Keep committed JSONs newer than sources (no yosys in gate)
+        run: find demo-projects -name '*.json' -exec touch {} +
 
       - uses: actions/setup-python@v5
         with:
