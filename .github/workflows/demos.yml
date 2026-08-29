@@ -19,7 +19,12 @@
 #
 # Golden policy (porting plan WP9.3): goldens are the expected output of
 # THIS repo's himbaechel/xilinx implementation, generated with the pinned
-# prjxray-db revision and a fixed P&R seed.  A mismatch fails the gate:
+# prjxray-db revision, a fixed P&R seed, and a pinned Eigen toolchain.
+# The analytic placer (common/place/placer_heap.cc) solves a sparse linear
+# system with Eigen's iterative solver, and its floating-point numerics
+# differ between Eigen major versions (e.g. 3.4.x vs 5.0.x), so the large
+# litex goldens only reproduce on the exact Eigen the goldens were made with
+# (5.0.1 = gitlab tag 5.0.1, commit bc3b3987).  A mismatch fails the gate:
 # if the change intentionally alters FASM output, re-golden the affected
 # project (see the failure message) and review the diff.
 
@@ -132,9 +137,19 @@ jobs:
       - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y git make cmake libboost-all-dev python3-dev \
-            libeigen3-dev
+          sudo apt-get install -y git make cmake libboost-all-dev python3-dev
           pip install fasm intervaltree progressbar2 simplejson pyyaml
+
+      # Eigen is header-only; build it from the exact gitlab tag the goldens
+      # were generated with.  nextpnr uses find_package(Eigen3 NO_MODULE), so
+      # CMAKE_PREFIX_PATH below makes this install win over the system Eigen.
+      - name: Install Eigen 5.0.1 (golden toolchain pin)
+        run: |
+          git clone --depth 1 --branch 5.0.1 https://gitlab.com/libeigen/eigen.git /tmp/eigen
+          cmake -S /tmp/eigen -B /tmp/eigen-build \
+            -DCMAKE_INSTALL_PREFIX=/tmp/eigen-install \
+            -DBUILD_TESTING=OFF -DEIGEN_BUILD_BLAS=OFF -DEIGEN_BUILD_LAPACK=OFF
+          cmake --install /tmp/eigen-build
 
       - name: Build nextpnr-himbaechel from this PR
         run: |
@@ -142,6 +157,7 @@ jobs:
             -DARCH=himbaechel -DHIMBAECHEL_UARCH=xilinx \
             -DBUILD_GUI=OFF -DBUILD_PYTHON=OFF \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH=/tmp/eigen-install \
             -DHIMBAECHEL_PRJXRAY_DB="$GITHUB_WORKSPACE/prjxray-db" \
             -DHIMBAECHEL_XILINX_DEVICES="${{ matrix.die }}"
           cmake --build build-pr --parallel 4
