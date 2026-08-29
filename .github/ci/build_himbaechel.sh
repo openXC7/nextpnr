@@ -32,7 +32,7 @@ function run_tests {
     export PYTHONPATH=${PRJXRAY}:${PYTHONPATH}
     pushd himbaechel/uarch/xilinx/examples/arty-a35
     yosys -p "synth_xilinx -flatten -abc9 -nobram -arch xc7 -top top; write_json blinky.json" blinky.v
-    ../../../../build/nextpnr-himbaechel --device xc7a35tcsg324-1 -o xdc=arty.xdc --json blinky.json -o fasm=blinky.fasm --router router2
+    ${GITHUB_WORKSPACE}/build/nextpnr-himbaechel --device xc7a35tcsg324-1 -o xdc=arty.xdc --json blinky.json -o fasm=blinky.fasm --router router2
     popd
     pushd himbaechel/uarch/xilinx/examples/sonata
     make DESIGN=johnson_sonata TOP=johnson_sonata XDC=johnson_sonata.xdc uf2
