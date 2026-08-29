@@ -125,6 +125,12 @@ struct XilinxImpl : HimbaechelAPI
 
     // Pips
     bool is_pip_unavail(PipId pip) const;
+    // Does this design instantiate a BUFR?  The regional-clock datapath
+    // (RCLK_BEFORE_DIV -> RCLK_OUT -> RCLK2RCLK -> CK_BUFRCLK) runs through a
+    // BUFR, so those wires are a buffer's output rather than general routing.
+    // Cached: is_pip_unavail is on the router's hot path.
+    mutable bool design_has_bufr = false;
+    mutable bool design_has_bufr_valid = false;
     bool checkPipAvail(PipId pip) const override { return !is_pip_unavail(pip); }
     bool checkPipAvailForNet(PipId pip, const NetInfo *net) const override { return !is_pip_unavail(pip); }
 
