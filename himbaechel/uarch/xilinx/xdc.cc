@@ -240,6 +240,8 @@ void XilinxImpl::parse_xdc(const std::string &filename)
                         num_errors++;
                     }
                     c->attrs[id_prop] = std::string(pair.second);
+                    if (pair.first == "PACKAGE_PIN")
+                        c->attrs[id_LOC] = std::string(pair.second);
                 }
             }
         } else if (cmd == "create_clock") {

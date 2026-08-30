@@ -65,6 +65,11 @@ struct FasmBackend
     // clock distribution backbone and leaving the FF clock dead on hardware
     // (port of nextpnr-xilinx, task #47).
     std::set<std::pair<int, int>> bufgctrl_bound_slots;
+    bool has_bound_bufgctrl(int tile) const
+    {
+        return std::any_of(bufgctrl_bound_slots.begin(), bufgctrl_bound_slots.end(),
+                           [tile](const auto &entry) { return entry.first == tile; });
+    }
     void populate_bufgctrl_bound_slots()
     {
         for (auto &cell : ctx->cells) {
@@ -153,6 +158,7 @@ struct FasmBackend
          * Create the mapping from pseudo pip tile type, dest wire, and source wire, to
          * the config bits set when that pseudo pip is used
          */
+        bool is_virtex7 = boost::starts_with(ctx->args.device, "xc7v");
         for (std::string s : {"L", "R"})
             for (std::string s2 : {"", "_TBYTESRC", "_TBYTETERM", "_SING"})
                 for (std::string i :
@@ -190,11 +196,17 @@ struct FasmBackend
                 pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_OFB"),
                            ctx->id("IOI_OLOGIC" + i + "_D1")}] = {"OLOGIC_Y" + i + ".OMUX.D1",
                                                                   "OLOGIC_Y" + i + ".OSERDES.DATA_RATE_TQ.BUF"};
-                pp_config[{ctx->id("RIOI" + s2), ctx->id("IOI_ILOGIC" + i + "_O"), ctx->id("RIOI_ILOGIC" + i + "_D")}] =
-                        {"ILOGIC_Y" + i + ".ZINV_D"};
-                pp_config[{ctx->id("RIOI" + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
-                           ctx->id("RIOI_ILOGIC" + i + "_DDLY")}] = {"ILOGIC_Y" + i + ".IDELMUXE3.P0",
-                                                                     "ILOGIC_Y" + i + ".ZINV_D"};
+                auto rioi_direct = PseudoPipKey{ctx->id("RIOI" + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
+                                                 ctx->id("RIOI_ILOGIC" + i + "_D")};
+                auto rioi_delayed = PseudoPipKey{ctx->id("RIOI" + s2), ctx->id("IOI_ILOGIC" + i + "_O"),
+                                                  ctx->id("RIOI_ILOGIC" + i + "_DDLY")};
+                if (is_virtex7) {
+                    pp_config[rioi_direct] = {};
+                    pp_config[rioi_delayed] = {"IDELAY_Y" + i + ".IDELMUXE3.P0"};
+                } else {
+                    pp_config[rioi_direct] = {"ILOGIC_Y" + i + ".ZINV_D"};
+                    pp_config[rioi_delayed] = {"IDELAY_Y" + i + ".IDELMUXE3.P0", "ILOGIC_Y" + i + ".ZINV_D"};
+                }
                 pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_TQ"),
                            ctx->id("IOI_OLOGIC" + i + "_T1")}] = {"OLOGIC_Y" + i + ".ZINV_T1"};
                 pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_OFB"),
@@ -312,16 +324,8 @@ struct FasmBackend
             // tile.  (Port of nextpnr-xilinx, task #47.)
             bool tile_is_clk_bufg_r =
                     (boost::starts_with(tile_name, "CLK_BUFG_TOP_R") || boost::starts_with(tile_name, "CLK_BUFG_BOT_R"));
-            if (tile_is_clk_bufg_r) {
-                bool any_bound_here = false;
-                for (int slot = 0; slot < 16; ++slot)
-                    if (bufgctrl_bound_slots.count({pip.tile, slot})) {
-                        any_bound_here = true;
-                        break;
-                    }
-                if (!any_bound_here)
-                    return;
-            }
+            if (tile_is_clk_bufg_r && !has_bound_bufgctrl(pip.tile))
+                return;
             for (auto c : pp) {
                 if (boost::starts_with(tile_name, "RIOI3_SING") || boost::starts_with(tile_name, "LIOI3_SING") ||
                     boost::starts_with(tile_name, "RIOI_SING")) {
@@ -372,13 +376,7 @@ struct FasmBackend
             // the cell-config + routing pair together is what kills the
             // clock distribution on hardware.  (Port of nextpnr-xilinx.)
             if (boost::starts_with(tile_name, "CLK_BUFG_TOP_R") || boost::starts_with(tile_name, "CLK_BUFG_BOT_R")) {
-                bool any_bound_here = false;
-                for (int slot = 0; slot < 16; ++slot)
-                    if (bufgctrl_bound_slots.count({pip.tile, slot})) {
-                        any_bound_here = true;
-                        break;
-                    }
-                if (!any_bound_here)
+                if (!has_bound_bufgctrl(pip.tile))
                     return;
             }
 
@@ -906,25 +904,31 @@ struct FasmBackend
             iostandard.erase(iostandard.size() - 6, iostandard.size());
         }
 
+        bool is_virtex7 = boost::starts_with(ctx->args.device, "xc7v");
         bool is_riob18 = boost::starts_with(tile, "RIOB18_");
+        bool is_liob18 = boost::starts_with(tile, "LIOB18_");
+        bool is_hp_bank = is_riob18 || is_liob18;
         bool is_sing = boost::contains(tile, "_SING_");
         bool is_top_sing = pad->bel.tile < uarch->hclk_for_iob(pad->bel);
         bool is_stepdown = false;
         bool is_lvcmos = boost::starts_with(iostandard, "LVCMOS");
         bool is_low_volt_lvcmos = iostandard == "LVCMOS12" || iostandard == "LVCMOS15" || iostandard == "LVCMOS18";
 
-        auto yLoc = is_sing ? (is_top_sing ? 1 : 0) : (1 - ioLoc.y);
+        auto yLoc = is_sing ? (is_top_sing ? 1 : 0) : (is_virtex7 ? ioLoc.y : (1 - ioLoc.y));
         push("IOB_Y" + std::to_string(yLoc));
 
         bool has_diff_prefix = boost::starts_with(iostandard, "DIFF_");
         bool is_tmds33 = iostandard == "TMDS_33";
         bool is_lvds25 = iostandard == "LVDS_25";
         bool is_lvds = boost::starts_with(iostandard, "LVDS");
-        bool only_diff = is_tmds33 || is_lvds;
-        bool is_diff = only_diff || has_diff_prefix;
+        bool only_diff = is_tmds33 || is_lvds25;
+        bool is_diff = is_tmds33 || is_lvds || has_diff_prefix;
         if (has_diff_prefix)
             iostandard.erase(0, 5);
         bool is_sstl = iostandard == "SSTL12" || iostandard == "SSTL135" || iostandard == "SSTL15";
+
+        if (is_riob18 && is_input && is_diff && yLoc == 0)
+            write_bit("IBUFDS_BANK_GLUE");
 
         int hclk = uarch->hclk_for_iob(pad->bel);
 
@@ -937,15 +941,15 @@ struct FasmBackend
 
         if (is_output) {
             // DRIVE
-            int default_drive = (is_riob18 && iostandard == "LVCMOS12") ? 8 : 12;
+            int default_drive = (is_hp_bank && iostandard == "LVCMOS12") ? 8 : 12;
             int drive = int_or_default(pad->attrs, id_DRIVE, default_drive);
 
-            if ((iostandard == "LVCMOS33" || iostandard == "LVTTL") && is_riob18)
+            if ((iostandard == "LVCMOS33" || iostandard == "LVTTL") && is_hp_bank)
                 log_error("high performance banks (RIOB18) do not support IO standard %s\n", iostandard.c_str());
 
             if (iostandard == "SSTL135")
                 write_bit("SSTL135.DRIVE.I_FIXED");
-            else if (is_riob18) {
+            else if (is_hp_bank) {
                 if ((iostandard == "LVCMOS18" || iostandard == "LVCMOS15"))
                     write_bit("LVCMOS15_LVCMOS18.DRIVE.I12_I16_I2_I4_I6_I8");
                 else if (iostandard == "LVCMOS12")
@@ -987,17 +991,19 @@ struct FasmBackend
                 write_bit(iostandard + ".IN_USE");
 
             // SLEW
-            if (is_riob18 && slew == "SLOW") {
-                if (iostandard == "SSTL135")
-                    write_bit("SSTL135.SLEW.SLOW");
-                else if (iostandard == "SSTL15")
-                    write_bit("SSTL15.SLEW.SLOW");
-                else
-                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+            if (is_hp_bank && slew == "SLOW") {
+                if (!is_sing) {
+                    if (iostandard == "SSTL135")
+                        write_bit("SSTL135.SLEW.SLOW");
+                    else if (iostandard == "SSTL15")
+                        write_bit("SSTL15.SLEW.SLOW");
+                    else
+                        write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                }
             } else if (slew == "SLOW") {
                 if (iostandard != "LVDS_25" && iostandard != "TMDS_33")
                     write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
-            } else if (is_riob18)
+            } else if (is_hp_bank)
                 write_bit(iostandard + ".SLEW.FAST");
             else if (iostandard == "SSTL135" || iostandard == "SSTL15")
                 write_bit("SSTL135_SSTL15.SLEW.FAST");
@@ -1006,6 +1012,21 @@ struct FasmBackend
         }
 
         if (is_input) {
+            if (is_liob18 && !is_output && !is_diff && yLoc == 0) {
+                write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
+                write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                write_bit("IBUF_HP_BANK_GLUE");
+                write_bit("LVCMOS12_LVCMOS15.IN");
+                write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
+
+                std::string saved = fasm_ctx.back();
+                fasm_ctx.back() = "IOB_Y1";
+                write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
+                write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL135_SSTL15.STEPDOWN");
+                write_bit("PULLTYPE.PULLDOWN");
+                fasm_ctx.back() = saved;
+            }
             if (!is_diff) {
                 if (iostandard == "LVCMOS33" || iostandard == "LVTTL" || iostandard == "LVCMOS25") {
                     if (!is_riob18)
@@ -1033,12 +1054,17 @@ struct FasmBackend
                 }
             } else /* is_diff */ {
                 if (is_riob18) {
-                    // vivado generates these bits only for Y0 of a diff pair
+                    // The high-performance differential receiver is configured
+                    // on the P half; both halves use the high-performance slew.
                     if (yLoc == 0) {
                         write_bit("LVDS_SSTL12_SSTL135_SSTL15.IN_DIFF");
-                        if (iostandard == "LVDS")
-                            write_bit("LVDS.IN_USE");
+                        write_bit("SSTL12_SSTL135_SSTL15.IN_DIFF");
+                        std::string saved = fasm_ctx.back();
+                        fasm_ctx.back() = "DIFF";
+                        write_bit("ZIBUF_LOW_PWR");
+                        fasm_ctx.back() = saved;
                     }
+                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
                 } else {
                     if (iostandard == "TDMS_33")
                         write_bit("TDMS_33.IN_DIFF");
@@ -1053,10 +1079,10 @@ struct FasmBackend
             // IN_ONLY
             if (!is_output) {
                 if (is_riob18) {
-                    // vivado also sets this bit for DIFF_SSTL
-                    if (is_diff && (yLoc == 0))
-                        write_bit("LVDS.IN_ONLY");
-                    else
+                    if (is_diff && (yLoc == 0)) {
+                        write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY");
+                        write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
+                    } else
                         write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY");
                 } else
                     write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVDS_25_LVTTL_SSTL135_SSTL15_TMDS_33.IN_"
@@ -1064,7 +1090,7 @@ struct FasmBackend
             }
         }
 
-        if (!is_riob18 && (is_low_volt_lvcmos || is_sstl)) {
+        if ((!is_hp_bank || (is_input && !is_output && !is_diff)) && (is_low_volt_lvcmos || is_sstl)) {
             if (iostandard == "SSTL12") {
                 log_error("SSTL12 is only available on high performance banks.");
             }
