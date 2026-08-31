@@ -945,7 +945,7 @@ struct FasmBackend
             int drive = int_or_default(pad->attrs, id_DRIVE, default_drive);
 
             if ((iostandard == "LVCMOS33" || iostandard == "LVTTL") && is_hp_bank)
-                log_error("high performance banks (RIOB18) do not support IO standard %s\n", iostandard.c_str());
+                log_error("high performance banks do not support IO standard %s\n", iostandard.c_str());
 
             if (iostandard == "SSTL135")
                 write_bit("SSTL135.DRIVE.I_FIXED");
