@@ -48,6 +48,15 @@ extern const int64_t lk_table[];
 }; // namespace Xc7MMCM
 
 namespace {
+// The FASM name of a logic-tile half.
+std::string slice_site_name(int half, bool is_m)
+{
+    if (is_m)
+        return half ? "SLICEL_X1" : "SLICEM_X0";
+    else
+        return half ? "SLICEL_X1" : "SLICEL_X0";
+}
+
 struct FasmBackend
 {
     Context *ctx;
@@ -65,10 +74,55 @@ struct FasmBackend
     // clock distribution backbone and leaving the FF clock dead on hardware
     // (port of nextpnr-xilinx, task #47).
     std::set<std::pair<int, int>> bufgctrl_bound_slots;
+
+    bool device_is_virtex7() const { return boost::starts_with(ctx->args.device, "xc7v"); }
+
+    // Is any BUFGCTRL cell bound anywhere in this tile?  This is the question
+    // the tile-level phantom guard below actually means to ask.
     bool has_bound_bufgctrl(int tile) const
     {
         return std::any_of(bufgctrl_bound_slots.begin(), bufgctrl_bound_slots.end(),
                            [tile](const auto &entry) { return entry.first == tile; });
+    }
+
+    // KNOWN DEFECT, deliberately left live outside Virtex-7.
+    //
+    // The tile-level guard was originally written as a scan of slot over
+    // [0,16) against bufgctrl_bound_slots.  That set stores
+    // site_data.site_y, which is the DEVICE-GLOBAL BUFGCTRL row, not a
+    // tile-local index: in openXC7/prjxray-db, CLK_BUFG_BOT_R holds
+    // BUFGCTRL_X0Y0..X0Y15 and CLK_BUFG_TOP_R holds BUFGCTRL_X0Y16..X0Y31.
+    // So for a BUFG placed in a CLK_BUFG_TOP_R tile the scan never matches,
+    // write_pip returns early for every PIP of that tile, and the bitstream
+    // programs a BUFGCTRL that has IN_USE set but neither an input mux nor
+    // an output onto its GCLK spine -- while the whole downstream
+    // distribution (CLK_HROW mux, CLK_BUFG_REBUF GCLK*_ENABLE, BUFHCE, leaf
+    // clock) is still emitted.  Nothing about that is Virtex-7 specific; it
+    // is wrong on every 7-series family.
+    //
+    // has_bound_bufgctrl() is applied on Virtex-7 only, because repairing it
+    // everywhere changes the FASM of any design whose BUFG lands in a TOP
+    // tile -- three of the five projects in .github/workflows/demos.yml --
+    // and the committed goldens would have to move with it.  Re-goldening
+    // those here would bury a clock-distribution fix inside an HP-bank
+    // branch, where the golden diff is a side effect nobody reviews.  It
+    // belongs in its own PR against the base, with the frame delta as the
+    // subject.  Until then every other family keeps the old behaviour, so
+    // this branch stays a no-op for them and the goldens stand as written.
+    //
+    // (The per-slot variant in write_pip has the same unit mismatch: it
+    // parses the tile-local index out of a "BUFGCTRL.BUFGCTRL_X0Y<n>"
+    // feature name -- pp_config builds those with a 0..15 loop counter, and
+    // the cell-config path uses rel_site_loc() -- then looks it up against
+    // the same device-global site_y.  Left alone here for the same reason.)
+    bool bufgctrl_tile_guard(int tile) const
+    {
+        if (device_is_virtex7())
+            return has_bound_bufgctrl(tile);
+        for (int slot = 0; slot < 16; ++slot)
+            if (bufgctrl_bound_slots.count({tile, slot}))
+                return true;
+        return false;
     }
     void populate_bufgctrl_bound_slots()
     {
@@ -324,7 +378,7 @@ struct FasmBackend
             // tile.  (Port of nextpnr-xilinx, task #47.)
             bool tile_is_clk_bufg_r =
                     (boost::starts_with(tile_name, "CLK_BUFG_TOP_R") || boost::starts_with(tile_name, "CLK_BUFG_BOT_R"));
-            if (tile_is_clk_bufg_r && !has_bound_bufgctrl(pip.tile))
+            if (tile_is_clk_bufg_r && !bufgctrl_tile_guard(pip.tile))
                 return;
             for (auto c : pp) {
                 if (boost::starts_with(tile_name, "RIOI3_SING") || boost::starts_with(tile_name, "LIOI3_SING") ||
@@ -376,7 +430,7 @@ struct FasmBackend
             // the cell-config + routing pair together is what kills the
             // clock distribution on hardware.  (Port of nextpnr-xilinx.)
             if (boost::starts_with(tile_name, "CLK_BUFG_TOP_R") || boost::starts_with(tile_name, "CLK_BUFG_BOT_R")) {
-                if (!has_bound_bufgctrl(pip.tile))
+                if (!bufgctrl_tile_guard(pip.tile))
                     return;
             }
 
@@ -514,13 +568,7 @@ struct FasmBackend
     };
 
     // Return the name for a half-logic-tile
-    std::string get_half_name(int half, bool is_m)
-    {
-        if (is_m)
-            return half ? "SLICEL_X1" : "SLICEM_X0";
-        else
-            return half ? "SLICEL_X1" : "SLICEL_X0";
-    }
+    std::string get_half_name(int half, bool is_m) { return slice_site_name(half, is_m); }
 
     std::string get_bel_name(BelId bel) { return uarch->bel_name_in_site(bel).str(ctx); }
 
@@ -954,8 +1002,21 @@ struct FasmBackend
                     write_bit("LVCMOS15_LVCMOS18.DRIVE.I12_I16_I2_I4_I6_I8");
                 else if (iostandard == "LVCMOS12")
                     write_bit("LVCMOS12.DRIVE.I2_I4_I6_I8");
-                else if (iostandard == "LVDS")
-                    write_bit("LVDS.DRIVE.I_FIXED");
+                else if (iostandard == "LVDS") {
+                    // LVDS is a master-half feature group on a high-performance
+                    // bank: the database defines LVDS.DRIVE.I_FIXED and
+                    // LVDS.OUT on IOB_Y0 only -- on LIOB18 and RIOB18 alike,
+                    // and on kintex7's RIOB18 too -- and a reference bitstream
+                    // for an OBUFDS pair sets exactly those two on the master
+                    // half and nothing LVDS on the slave.  Without the guard
+                    // the slave emits a key no family defines and fasm2frames
+                    // stops with FasmLookupError.  Same shape as the IOB33
+                    // LVDS_25 / TMDS_33 cases below.
+                    if (yLoc == 0) {
+                        write_bit("LVDS.DRIVE.I_FIXED");
+                        write_bit("LVDS.OUT");
+                    }
+                }
                 else if (is_sstl) {
                     write_bit(iostandard + ".DRIVE.I_FIXED");
                 }
@@ -1024,6 +1085,24 @@ struct FasmBackend
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL135_SSTL15.STEPDOWN");
+                write_bit("PULLTYPE.PULLDOWN");
+                fasm_ctx.back() = saved;
+            }
+            // Right-hand HP bank, single-ended input-only pad.  The
+            // left-hand block above is the mirror of this one, but the two
+            // tile types do not share a feature vocabulary: RIOB18 has no
+            // IBUF_HP_BANK_GLUE, no STEPDOWN and no wide
+            // LVCMOS..._LVTTL_SSTL135_SSTL15.SLEW.SLOW alias.  The set below
+            // is what a reference bitstream sets for an LVCMOS18 input on
+            // bank 38, including the partner half's slew and pulldown.
+            if (is_riob18 && !is_output && !is_diff && yLoc == 0) {
+                write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                write_bit("LVCMOS12_LVCMOS15.IN");
+                write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
+
+                std::string saved = fasm_ctx.back();
+                fasm_ctx.back() = "IOB_Y1";
+                write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
                 write_bit("PULLTYPE.PULLDOWN");
                 fasm_ctx.back() = saved;
             }
@@ -1097,7 +1176,11 @@ struct FasmBackend
             }
         }
 
-        if ((!is_hp_bank || (is_input && !is_output && !is_diff)) && (is_low_volt_lvcmos || is_sstl)) {
+        // STEPDOWN is a left-hand HP feature: segbits_riob18.db defines no
+        // STEPDOWN key at all, on virtex7 or kintex7, and a reference
+        // bitstream for a right-hand HP input sets none.
+        if ((!is_hp_bank || (is_liob18 && is_input && !is_output && !is_diff)) &&
+            (is_low_volt_lvcmos || is_sstl)) {
             if (iostandard == "SSTL12") {
                 log_error("SSTL12 is only available on high performance banks.");
             }
@@ -1120,6 +1203,10 @@ struct FasmBackend
 
         // IN_TERM.NONE and IN_ONLY for TMDS_33 output, e.g. HDMI signals
         if (is_output && is_diff) {
+            // The slave half of a high-performance LVDS driver carries the
+            // input-only bit; the driver itself is enabled by IOB_Y0.LVDS.OUT.
+            if (is_hp_bank && iostandard == "LVDS" && yLoc == 1)
+                write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY");
             if (is_tmds33 && yLoc == 1) {
                 if (pad->attrs.count(id_IN_TERM))
                     write_bit("IN_TERM." + pad->attrs.at(id_IN_TERM).as_string());
@@ -1141,7 +1228,11 @@ struct FasmBackend
         else
             inv = uarch->get_site_bel(pad_bel_site, ctx->id("IOB33S.O_ININV"));
 
-        if (inv != BelId() && ctx->getBoundBelCell(inv) != nullptr)
+        // OUT_DIFF belongs to the pseudo-differential outputs (DIFF_SSTL*),
+        // whose S half is really driven through the inverter.  A true LVDS
+        // driver on a high-performance bank is enabled by IOB_Y0.LVDS.OUT
+        // instead, and a reference bitstream for one sets no OUT_DIFF.
+        if (inv != BelId() && ctx->getBoundBelCell(inv) != nullptr && !(is_hp_bank && iostandard == "LVDS"))
             write_bit("OUT_DIFF");
 
         if (is_stepdown && !is_sing)
@@ -4235,6 +4326,60 @@ void XilinxImpl::write_fasm(const std::string &filename)
 
     FasmBackend be(this->ctx, this, out);
     be.write_fasm();
+}
+
+// Placement dump: for every cell that ended up on a bel, the physical
+// (tile, site, bel) it landed on and its type, keyed by the cell's own name
+// from the input netlist.
+//
+// This exists for external LVS / equivalence checking.  A tool that
+// reconstructs a netlist from a bitstream can only name its cells after the
+// physical site it found them in, so relating those names back to a gold
+// netlist's names needs the placement as ground truth.  A routed JSON is not
+// enough: its NEXTPNR_BEL attribute carries himbaechel grid coordinates and a
+// site index ("X79Y221/SLICE_X1Y0.B5FF"), and nothing outside nextpnr can turn
+// those into the prjxray tile and site names that appear in the FASM
+// ("CLBLM_R_X31Y139", "SLICE_X46Y134") that an extraction working from the
+// database can derive for itself.  Those are the names written here.
+void XilinxImpl::write_placement(const std::string &filename)
+{
+    auto out = open_ofstream_and_log_error(filename, "placement file");
+
+    auto escape = [](const std::string &in) {
+        std::string r;
+        for (char c : in) {
+            if (c == '"' || c == '\\')
+                r.push_back('\\');
+            r.push_back(c);
+        }
+        return r;
+    };
+
+    out << "{\n";
+    bool first = true;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (ci->bel == BelId())
+            continue;
+        std::string tile = tile_name(ci->bel.tile);
+        SiteIndex site = get_bel_site(ci->bel);
+        // PSEUDO_VCC / PSEUDO_GND and friends sit on bels with no site at all,
+        // so the site index cannot be trusted to be in range here.
+        const auto &sites = tile_extra_data(site.tile)->sites;
+        std::string site_str =
+                (site.site < 0 || site.site >= sites.ssize()) ? std::string() : get_site_name(site).str(ctx);
+
+        if (!first)
+            out << ",\n";
+        first = false;
+        out << "  \"" << escape(ci->name.str(ctx)) << "\": {"
+             << "\"tile\": \"" << escape(tile) << "\", "
+             << "\"site\": \"" << escape(site_str) << "\", "
+             << "\"bel\": \"" << escape(bel_name_in_site(ci->bel).str(ctx)) << "\", "
+             << "\"type\": \"" << escape(ci->type.str(ctx)) << "\"}";
+    }
+    out << (first ? "" : "\n") << "}\n";
+    log_info("Wrote placement of %d cells to %s\n", int(ctx->cells.size()), filename.c_str());
 }
 
 NEXTPNR_NAMESPACE_END

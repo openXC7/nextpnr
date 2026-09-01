@@ -71,6 +71,8 @@ po::options_description XilinxImpl::getUArchOptions()
     po::options_description specific("Xilinx specific options");
     specific.add_options()("fasm", po::value<std::string>(), "fasm bitstream output file");
     specific.add_options()("xdc", po::value<std::string>(), "name of constraints file");
+    specific.add_options()("placement", po::value<std::string>(),
+                           "placement dump (JSON: cell -> tile/site/bel/type) for external LVS");
     return specific;
 }
 
@@ -549,6 +551,9 @@ void XilinxImpl::postRoute()
     const ArchArgs &args = ctx->args;
     if (args.options.count("fasm")) {
         write_fasm(args.options["fasm"].as<std::string>());
+    }
+    if (args.options.count("placement")) {
+        write_placement(args.options["placement"].as<std::string>());
     }
 }
 
