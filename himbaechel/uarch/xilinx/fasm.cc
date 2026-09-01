@@ -202,10 +202,10 @@ struct FasmBackend
                                                   ctx->id("RIOI_ILOGIC" + i + "_DDLY")};
                 if (is_virtex7) {
                     pp_config[rioi_direct] = {};
-                    pp_config[rioi_delayed] = {"IDELAY_Y" + i + ".IDELMUXE3.P0"};
+                    pp_config[rioi_delayed] = {"ILOGIC_Y" + i + ".IDELMUXE3.P0"};
                 } else {
                     pp_config[rioi_direct] = {"ILOGIC_Y" + i + ".ZINV_D"};
-                    pp_config[rioi_delayed] = {"IDELAY_Y" + i + ".IDELMUXE3.P0", "ILOGIC_Y" + i + ".ZINV_D"};
+                    pp_config[rioi_delayed] = {"ILOGIC_Y" + i + ".IDELMUXE3.P0", "ILOGIC_Y" + i + ".ZINV_D"};
                 }
                 pp_config[{ctx->id("RIOI" + s2), ctx->id("RIOI_OLOGIC" + i + "_TQ"),
                            ctx->id("IOI_OLOGIC" + i + "_T1")}] = {"OLOGIC_Y" + i + ".ZINV_T1"};
@@ -1064,7 +1064,14 @@ struct FasmBackend
                         write_bit("ZIBUF_LOW_PWR");
                         fasm_ctx.back() = saved;
                     }
-                    write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                    // ...but only on an input-ONLY pad.  HP-bank slew is one
+                    // shared bit, so on a bidirectional diff pad (DDR3 DQS,
+                    // DIFF_SSTL15) this collides with the SSTL15.SLEW.FAST the
+                    // is_output branch wrote for the same site and fasm2frames
+                    // rejects the file (FasmInconsistentBits).  The driven
+                    // direction owns the slew choice.
+                    if (!is_output)
+                        write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
                 } else {
                     if (iostandard == "TDMS_33")
                         write_bit("TDMS_33.IN_DIFF");
