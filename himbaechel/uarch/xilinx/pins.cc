@@ -450,6 +450,12 @@ void get_top_level_pins(Context *ctx, dict<IdString, pool<IdString>> &toplevel_p
     toplevel_pins[id_IBUFDS_DIFF_OUT] = {id_I, id_IB};
     toplevel_pins[id_IBUFDS_DIFF_OUT_IBUFDISABLE] = {id_I, id_IB};
     toplevel_pins[id_IBUFDS_DIFF_OUT_INTERMDISABLE] = {id_I, id_IB};
+    // 7-series gigabit-transceiver reference-clock buffer. pack_io.cc
+    // already handles it (it checks the O drives a GTPE2/GTXE2 or a
+    // clock buffer), but without an entry here its I/IB are not
+    // recognised as top-level pins, so any design taking a GT refclk
+    // from a pad fails with "missing an IO buffer" before it gets there.
+    toplevel_pins[id_IBUFDS_GTE2] = {id_I, id_IB};
     toplevel_pins[id_IBUFDS_GTE3] = {id_I, id_IB};
     toplevel_pins[id_IBUFDS_GTE4] = {id_I, id_IB};
     toplevel_pins[id_IBUFDS_INTERMDISABLE] = {id_I, id_IB};
