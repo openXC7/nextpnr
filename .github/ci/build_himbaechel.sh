@@ -26,7 +26,14 @@ function build_nextpnr {
 }
 
 function run_tests {
-    :
+    export PATH=${GITHUB_WORKSPACE}/.yosys/bin:${PATH}
+    pushd himbaechel/uarch/xilinx/examples/arty-a35
+    yosys -p "synth_xilinx -flatten -abc9 -nobram -arch xc7 -top top; write_json blinky.json" blinky.v
+    ${GITHUB_WORKSPACE}/build/nextpnr-himbaechel --device xc7a35tcsg324-1 -o xdc=arty.xdc --json blinky.json -o fasm=blinky.fasm --router router2
+    popd
+    pushd himbaechel/uarch/xilinx/examples/sonata
+    make DESIGN=johnson_sonata TOP=johnson_sonata XDC=johnson_sonata.xdc fasm
+    popd
 }
 
 function run_archcheck {

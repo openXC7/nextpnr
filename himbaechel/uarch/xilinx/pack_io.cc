@@ -193,7 +193,7 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
 
         CellInfo *inbuf = insert_ibuf(int_name(xil_iob->name, "IBUF", is_se_iobuf), ibuf_type, pad_net, top_out);
         std::string tile = ctx->get_tile_type(site.tile).str(ctx);
-        if (boost::starts_with(tile, "RIOB18"))
+        if (boost::contains(tile, "IOB18"))
             ctx->bindBel(uarch->get_site_bel(site, ctx->id("IOB18.INBUF_DCIEN")), inbuf, STRENGTH_LOCKED);
         else
             ctx->bindBel(uarch->get_site_bel(site, ctx->id("IOB33.INBUF_EN")), inbuf, STRENGTH_LOCKED);
@@ -213,7 +213,7 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
                 is_se_iobuf ? (has_dci ? id_OBUFT_DCIEN : id_OBUFT) : xil_iob->type, xil_iob->getPort(id_I), pad_net,
                 xil_iob->getPort(id_T));
         std::string tile = ctx->get_tile_type(site.tile).str(ctx);
-        if (boost::starts_with(tile, "RIOB18"))
+        if (boost::contains(tile, "IOB18"))
             ctx->bindBel(uarch->get_site_bel(site, ctx->id("IOB18.OUTBUF_DCIEN")), obuf, STRENGTH_LOCKED);
         else
             ctx->bindBel(uarch->get_site_bel(site, ctx->id("IOB33.OUTBUF")), obuf, STRENGTH_LOCKED);
@@ -233,7 +233,7 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
         NetInfo *pad_n_net = xil_iob->getPort((is_diff_iobuf || is_diff_out_iobuf) ? id_IOB : id_IB);
         NPNR_ASSERT(pad_n_net != nullptr);
         std::string tile_p = ctx->get_tile_type(site_p.tile).str(ctx);
-        bool is_riob18 = boost::starts_with(tile_p, "RIOB18");
+        bool is_iob18 = boost::contains(tile_p, "IOB18");
 
         if (!is_diff_iobuf && !is_diff_out_iobuf) {
             xil_iob->disconnectPort(id_I);
@@ -246,7 +246,7 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
         IdString ibuf_type = id_IBUFDS;
         CellInfo *inbuf = insert_diffibuf(int_name(xil_iob->name, "IBUF", is_se_iobuf), ibuf_type,
                                           {pad_p_net, pad_n_net}, top_out);
-        if (is_riob18) {
+        if (is_iob18) {
             ctx->bindBel(uarch->get_site_bel(site_p, ctx->id("IOB18M.INBUF_DCIEN")), inbuf, STRENGTH_LOCKED);
             inbuf->attrs[id_X_IOB_SITE_TYPE] = std::string("IOB18M");
         } else {
@@ -264,7 +264,7 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
         NPNR_ASSERT(pad_n_net != nullptr);
         auto site_n = pad_site(pad_n_net);
         std::string tile_p = ctx->get_tile_type(site_p.tile).str(ctx);
-        bool is_riob18 = boost::starts_with(tile_p, "RIOB18");
+        bool is_iob18 = boost::contains(tile_p, "IOB18");
 
         xil_iob->disconnectPort((is_diff_iobuf || is_diff_out_iobuf) ? id_IO : id_O);
         xil_iob->disconnectPort((is_diff_iobuf || is_diff_out_iobuf) ? id_IOB : id_OB);
@@ -272,7 +272,7 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
         NetInfo *inv_i = create_internal_net(xil_iob->name, is_diff_obuf ? "I_B" : "OBUFTDS$subnet$I_B");
         CellInfo *inv = insert_outinv(int_name(xil_iob->name, is_diff_obuf ? "INV" : "OBUFTDS$subcell$INV"),
                                       xil_iob->getPort(id_I), inv_i);
-        if (is_riob18) {
+        if (is_iob18) {
             ctx->bindBel(uarch->get_site_bel(site_n, ctx->id("IOB18S.O_ININV")), inv, STRENGTH_LOCKED);
             inv->attrs[id_X_IOB_SITE_TYPE] = std::string("IOB18S");
         } else {
@@ -288,7 +288,7 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
                                                : id_OBUF,
                                        xil_iob->getPort(id_I), pad_p_net, xil_iob->getPort(id_T));
 
-        if (is_riob18) {
+        if (is_iob18) {
             ctx->bindBel(uarch->get_site_bel(site_p, ctx->id("IOB18M.OUTBUF_DCIEN")), obuf_p, STRENGTH_LOCKED);
             obuf_p->attrs[id_X_IOB_SITE_TYPE] = std::string("IOB18M");
         } else {
@@ -303,7 +303,7 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
                                                : id_OBUF,
                                        inv_i, pad_n_net, xil_iob->getPort(id_T));
 
-        if (is_riob18) {
+        if (is_iob18) {
             ctx->bindBel(uarch->get_site_bel(site_n, ctx->id("IOB18S.OUTBUF_DCIEN")), obuf_n, STRENGTH_LOCKED);
             obuf_n->attrs[id_X_IOB_SITE_TYPE] = std::string("IOB18S");
         } else {

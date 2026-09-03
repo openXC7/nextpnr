@@ -142,6 +142,7 @@ struct XilinxImpl : HimbaechelAPI
     void postPlace() override;
     void postRoute() override;
     void write_fasm(const std::string &filename);
+    void write_placement(const std::string &filename);
 
     void configurePlacerHeap(PlacerHeapCfg &cfg) override;
     void configurePlacerStatic(PlacerStaticCfg &cfg) override;

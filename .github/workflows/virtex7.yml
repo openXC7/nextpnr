@@ -1,0 +1,248 @@
+# Regression gate for the XC7V (Virtex-7) HP-bank and clocking paths.
+#
+# Why a separate workflow from demos.yml: the openXC7 demo projects cover
+# artix7, spartan7 and kintex7 only, so nothing in that gate touches a
+# Virtex-7 part -- no LIOB18/RIOB18 HP bank on an xc7v die, no
+# CLK_BUFG_TOP_R BUFG placement, no virtex7 segbits.  Every XC7V-specific
+# branch in himbaechel/uarch/xilinx (the is_virtex7 predicates in fasm.cc)
+# is therefore untested by demos.yml.  This gate closes that.
+#
+# It differs from demos.yml in two pins, both deliberate:
+#
+#   * PRJXRAY_REV is openXC7/prjxray's virtex7 branch, not the revision
+#     demos.yml uses.  fasm2frames at demos.yml's ef5203e9 aborts on a
+#     Virtex-7 design with KeyError: 'HCLK_IOI3_X82Y130' -- it has no
+#     tileinfo for the XC7V HCLK_IOI3 tiles.  e1302fc6 is the revision the
+#     xc7-bitstream-tools flow uses to build VC707 bitstreams.
+#   * No --seed is passed.  The goldens were produced with the default RNG
+#     state, and passing --seed with the default VALUE is not equivalent:
+#     DeterministicRNG() seeds rngstate directly, while rngseed() also
+#     advances the generator five steps.  Adding a --seed here changes the
+#     placement and invalidates the goldens.
+#
+# What is goldened, and how much it is worth:
+#
+#   * <design>.frames sha256 -- a drift detector.  The FASM itself cannot be
+#     hashed: its first line carries the git description of the binary that
+#     wrote it, so it changes on every commit.  fasm2frames drops comments,
+#     so the frames hash is stable across commits that change nothing else.
+#     For vc707-johnson this hash has an external cross-check: the same
+#     design, built by xc7-bitstream-tools from its own checkout, produces a
+#     byte-identical FASM.
+#   * The IOB parity check compares the HP-bank feature set against what the
+#     LEGACY nextpnr-xilinx flow wrote for the same design and pins.  That
+#     reference is not this repo's output, so unlike the hash it can say
+#     something about correctness.  It currently records 36 features the
+#     legacy flow writes that himbaechel/xilinx does not -- see
+#     .github/references/vc707-johnson-iob-delta.txt and the example README.
+
+name: virtex7
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: virtex7-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PRJXRAY_DB_REV: ab1fc60c38a0dc1bc1d3d495f3189b25ae971e04
+  # virtex7-capable fasm2frames; see header
+  PRJXRAY_REV: e1302fc6f8662a237e42790073fa641f2d9f1371
+
+jobs:
+  vc707:
+    name: ${{ matrix.design }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # the reference case: its FASM is reproduced byte-for-byte by the
+          # xc7-bitstream-tools flow, and it is the one with a legacy-flow
+          # feature set to compare against
+          - design: vc707-johnson
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+          # HP-bank differential driver and bidirectional pad
+          - design: vc707-hp-diffio
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+          # ILOGIC delayed input (IDELMUXE3 pseudo-pip)
+          - design: vc707-idelay
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+          # several bound BUFGCTRLs across the CLK_BUFG column
+          - design: vc707-multibufg
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: nextpnr
+          submodules: recursive
+
+      - name: Checkout prjxray-db
+        uses: actions/checkout@v4
+        with:
+          repository: openXC7/prjxray-db
+          ref: ${{ env.PRJXRAY_DB_REV }}
+          path: prjxray-db
+
+      - name: Checkout prjxray (fasm2frames / xc7frames2bit)
+        uses: actions/checkout@v4
+        with:
+          repository: openXC7/prjxray
+          ref: ${{ env.PRJXRAY_REV }}
+          path: prjxray
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git make cmake libboost-all-dev python3-dev yosys
+          pip install fasm intervaltree progressbar2 simplejson pyyaml
+
+      - name: Install Eigen 5.0.1 (golden toolchain pin)
+        run: |
+          git clone --depth 1 --branch 5.0.1 https://gitlab.com/libeigen/eigen.git /tmp/eigen
+          cmake -S /tmp/eigen -B /tmp/eigen-build \
+            -DCMAKE_INSTALL_PREFIX=/tmp/eigen-install \
+            -DBUILD_TESTING=OFF -DEIGEN_BUILD_BLAS=OFF -DEIGEN_BUILD_LAPACK=OFF
+          cmake --install /tmp/eigen-build
+
+      # The xc7vx485t .bba is ~345 MB and takes the bulk of the job's wall
+      # time to generate.  It depends only on the generator, the constids and
+      # the pinned database, so key the cache on exactly those.
+      - name: Chipdb cache key
+        id: chipdb-key
+        run: |
+          h=$(cat nextpnr/himbaechel/uarch/xilinx/gen/xilinx_gen.py \
+                  nextpnr/himbaechel/uarch/xilinx/constids.inc | sha256sum | cut -c1-16)
+          echo "key=vx485t-bba-${{ env.PRJXRAY_DB_REV }}-$h" >> "$GITHUB_OUTPUT"
+
+      - name: Cache xc7vx485t chipdb .bba
+        uses: actions/cache@v4
+        with:
+          path: build/himbaechel/uarch/xilinx/chipdb-xc7vx485t.bba
+          key: ${{ steps.chipdb-key.outputs.key }}
+
+      - name: Build nextpnr-himbaechel from this PR
+        run: |
+          cmake -S nextpnr -B build \
+            -DARCH=himbaechel -DHIMBAECHEL_UARCH=xilinx \
+            -DBUILD_GUI=OFF -DBUILD_PYTHON=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH=/tmp/eigen-install \
+            -DHIMBAECHEL_PRJXRAY_DB="$GITHUB_WORKSPACE/prjxray-db" \
+            -DHIMBAECHEL_XILINX_DEVICES="${{ matrix.die }}"
+          free -h
+          cmake --build build --parallel 4
+          free -h
+
+      - name: Build prjxray tools
+        run: |
+          cd prjxray
+          sed -i 's/VERSION 3.5.0/VERSION 3.14.0/g' CMakeLists.txt
+          sed -i 's/VERSION 3.0.2/VERSION 3.14.0/g' third_party/gflags/CMakeLists.txt
+          sed -i 's/VERSION 2.8.12/VERSION 3.14.0/g' third_party/cctz/CMakeLists.txt
+          CFLAGS="-include stdint.h -Wno-free-nonheap-object" \
+          CXXFLAGS="-include stdint.h -Wno-free-nonheap-object" \
+            cmake -S . -B build-prjxray -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-prjxray --target xc7frames2bit --parallel 4
+
+      - name: Synthesize, place and route
+        env:
+          EX: nextpnr/himbaechel/uarch/xilinx/examples/${{ matrix.design }}
+        run: |
+          mapfile -t sources < <(find "$EX" -maxdepth 1 -name '*.v' -print | sort)
+          yosys -p "read_verilog -lib +/xilinx/cells_sim.v; \
+                    read_verilog ${sources[*]}; \
+                    synth_xilinx -top top; \
+                    write_json ${{ matrix.design }}.json"
+          ./build/nextpnr-himbaechel \
+            --device ${{ matrix.part }} \
+            -o xdc="$EX/top.xdc" \
+            --json "${{ matrix.design }}.json" \
+            -o fasm="${{ matrix.design }}.fasm" \
+            --router router2
+
+      # Two designs currently produce FASM the virtex7 database cannot
+      # assemble.  Those are recorded as known failures rather than hidden:
+      # the job passes while the failure is EXACTLY the recorded one, and
+      # fails if it changes -- including if it disappears, which means the
+      # defect is fixed and the design is ready for a real golden.  See each
+      # example's README for what the defect is.
+      - name: FASM to frames to bitstream
+        env:
+          PYTHONPATH: ${{ github.workspace }}/prjxray
+        run: |
+          known="nextpnr/.github/references/${{ matrix.design }}.fasm2frames-known-failure"
+          if python prjxray/utils/fasm2frames.py \
+               --part ${{ matrix.part }} \
+               --db-root prjxray-db/virtex7 \
+               "${{ matrix.design }}.fasm" "${{ matrix.design }}.frames" 2>&1 | tee f2f.log; then
+            if [ -f "$known" ]; then
+              echo "::error::fasm2frames now succeeds for ${{ matrix.design }}, but a known"
+              echo "failure is still recorded in $known.  If the defect is fixed, delete that"
+              echo "file and add .github/goldens/${{ matrix.design }}.sha256 instead."
+              exit 1
+            fi
+          else
+            if [ -f "$known" ] && grep -qFf "$known" f2f.log; then
+              echo "known defect reproduced: $(cat "$known")"
+              echo "KNOWN_FAILURE=1" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "::error::fasm2frames failed for ${{ matrix.design }}"
+            tail -20 f2f.log
+            exit 1
+          fi
+          ./prjxray/build-prjxray/tools/xc7frames2bit \
+            --part_file "prjxray-db/virtex7/${{ matrix.part }}/part.yaml" \
+            --part_name ${{ matrix.part }} \
+            --frm_file "${{ matrix.design }}.frames" \
+            --output_file "${{ matrix.design }}.bit"
+
+      - name: Verify golden frames
+        if: env.KNOWN_FAILURE != '1'
+        run: |
+          hash=$(sha256sum "${{ matrix.design }}.frames" | cut -d' ' -f1)
+          golden=$(cat "nextpnr/.github/goldens/${{ matrix.design }}.sha256")
+          if [ "$hash" != "$golden" ]; then
+            echo "::error::frames hash mismatch: got $hash, golden $golden"
+            echo "If this change intentionally alters FASM output, re-golden:"
+            echo "  sha256sum ${{ matrix.design }}.frames | cut -d' ' -f1 \\"
+            echo "      > nextpnr/.github/goldens/${{ matrix.design }}.sha256"
+            echo "and say in the commit message which features moved and why."
+            exit 1
+          fi
+          echo "golden match: $hash"
+
+      # Runs even when the hash gate failed: when the frames move, the first
+      # thing worth knowing is whether the HP-bank feature set moved with them.
+      # Only vc707-johnson has an external reference to compare against: the
+      # same design built by the legacy nextpnr-xilinx flow.  The other three
+      # designs have goldens only, which detect drift and nothing more.
+      - name: HP-bank parity against the legacy flow
+        if: always() && matrix.design == 'vc707-johnson'
+        run: nextpnr/.github/scripts/check-vc707-iob-parity.sh "${{ matrix.design }}.fasm"
+
+      - name: Upload outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vc707-${{ matrix.design }}
+          path: |
+            ${{ matrix.design }}.fasm
+            ${{ matrix.design }}.bit
+          if-no-files-found: warn
