@@ -21,8 +21,10 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/range/adaptor/reversed.hpp>
 
+#include <algorithm>
 #include <fstream>
 #include <regex>
+#include <set>
 
 #include "extra_data.h"
 #include "himbaechel_api.h"
@@ -54,6 +56,49 @@ struct FasmBackend
     std::ostream &out;
     std::vector<std::string> fasm_ctx;
     dict<int, std::vector<PipId>> pips_by_tile;
+
+    // (tile_index, tile_local_slot) pairs at which a BUFGCTRL cell is
+    // actually bound.  The router is free to hop through a CLK_BUFG_*_R
+    // tile whose BUFG sites are all empty -- the chipdb's clock
+    // distribution graph permits it -- but emitting that tile's config is
+    // not free: BUFGCTRL.BUFGCTRL_X0Y<n>.IN_USE plus the
+    // CLK_BUFG_BUFGCTRL<n>_I0/I1 input-mux features program an unoccupied
+    // BUFGCTRL onto the GCLK backbone alongside the real one.  The two
+    // contend, and the flip-flop clock is dead on hardware while the whole
+    // downstream path (CLK_HROW mux, CLK_BUFG_REBUF GCLK*_ENABLE, BUFHCE,
+    // leaf clock) still looks correct in the FASM.  Port of
+    // nextpnr-xilinx, task #47.
+    std::set<std::pair<int, int>> bufgctrl_bound_slots;
+
+    // Is any BUFGCTRL bound anywhere in this tile?  This is the question
+    // the tile-level guards in write_pip actually mean to ask.
+    bool has_bound_bufgctrl(int tile) const
+    {
+        return std::any_of(bufgctrl_bound_slots.begin(), bufgctrl_bound_slots.end(),
+                           [tile](const std::pair<int, int> &entry) { return entry.first == tile; });
+    }
+
+    void populate_bufgctrl_bound_slots()
+    {
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->type != id_BUFGCTRL || ci->bel == BelId())
+                continue;
+            SiteIndex site = uarch->get_bel_site(ci->bel);
+            // rel_site_loc(), NOT site_data.site_y.  Every BUFGCTRL feature
+            // name in this file is tile-local: pp_config builds
+            // "BUFGCTRL.BUFGCTRL_X0Y<ii>" from a 0..15 loop counter, and
+            // the cell-config writer in write_clocking() uses
+            // rel_site_loc().  site_y is the device-global BUFGCTRL row --
+            // in openXC7/prjxray-db CLK_BUFG_BOT_R holds
+            // BUFGCTRL_X0Y0..X0Y15 but CLK_BUFG_TOP_R holds
+            // BUFGCTRL_X0Y16..X0Y31.  Mixing the two units makes the
+            // lookups below miss for any BUFG in a TOP tile, which
+            // suppresses the PIPs of the tile that is really in use
+            // instead of the phantom's.
+            bufgctrl_bound_slots.insert({site.tile, uarch->rel_site_loc(site).y});
+        }
+    }
 
     dict<std::pair<int, int>, unsigned> lut_route_throughs;
 
@@ -279,6 +324,14 @@ struct FasmBackend
         if (pp_config.count(ppk)) {
             auto &pp = pp_config.at(ppk);
             std::string tile_name = uarch->tile_name(pip.tile);
+            // Phantom-BUFGCTRL guard, pseudo-pip variant: drop the entire
+            // emission for a CLK_BUFG_*_R tile holding no bound BUFGCTRL --
+            // not only the BUFGCTRL.* config bits but the
+            // CLK_BUFG_BUFGCTRL*_I0/I1 input-mux features with them.
+            if ((boost::starts_with(tile_name, "CLK_BUFG_TOP_R") ||
+                 boost::starts_with(tile_name, "CLK_BUFG_BOT_R")) &&
+                !has_bound_bufgctrl(pip.tile))
+                return;
             for (auto c : pp) {
                 if (boost::starts_with(tile_name, "RIOI3_SING") || boost::starts_with(tile_name, "LIOI3_SING") ||
                     boost::starts_with(tile_name, "RIOI_SING")) {
@@ -289,6 +342,24 @@ struct FasmBackend
                         if (y0pos != std::string::npos)
                             c.replace(y0pos, 2, "Y1");
                     }
+                }
+                // Phantom-BUFGCTRL guard, per-slot variant: within a tile
+                // that does hold a BUFGCTRL, suppress features naming a
+                // slot in that tile which does not.
+                if (boost::starts_with(c, "BUFGCTRL.BUFGCTRL_X0Y")) {
+                    const std::string prefix = "BUFGCTRL.BUFGCTRL_X0Y";
+                    size_t start = prefix.size();
+                    size_t end = c.find('.', start);
+                    if (end == std::string::npos)
+                        end = c.size();
+                    int slot = -1;
+                    try {
+                        slot = std::stoi(c.substr(start, end - start));
+                    } catch (...) {
+                        slot = -1;
+                    }
+                    if (slot >= 0 && !bufgctrl_bound_slots.count({pip.tile, slot}))
+                        continue;
                 }
                 out << tile_name << "." << c << std::endl;
             }
@@ -301,6 +372,16 @@ struct FasmBackend
             std::string tile_name = uarch->tile_name(pip.tile);
             std::string dst_name = dst.str(ctx);
             std::string src_name = src.str(ctx);
+
+            // Phantom-BUFGCTRL guard, regular-pip variant: the same empty
+            // CLK_BUFG_*_R tiles, for the ordinary PIPs the router crossed
+            // through them (CLK_BUFG_BUFGCTRL*_I0/I1 IMUX hops,
+            // CLK_BUFG_CK_GCLK* outputs).  Cell config and routing together
+            // are what kill the clock on hardware, so both have to go.
+            if ((boost::starts_with(tile_name, "CLK_BUFG_TOP_R") ||
+                 boost::starts_with(tile_name, "CLK_BUFG_BOT_R")) &&
+                !has_bound_bufgctrl(pip.tile))
+                return;
 
             if (boost::starts_with(tile_name, "DSP_L") || boost::starts_with(tile_name, "DSP_R")) {
                 // FIXME: PPIPs missing for DSPs
@@ -1844,6 +1925,7 @@ struct FasmBackend
         get_invertible_pins(ctx, invertible_pins);
         write_logic();
         write_io();
+        populate_bufgctrl_bound_slots(); // must run before any pip emission
         write_routing();
         write_bram();
         write_clocking();
