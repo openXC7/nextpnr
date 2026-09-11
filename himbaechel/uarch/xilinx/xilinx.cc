@@ -78,7 +78,18 @@ void XilinxImpl::init_database(Arch *arch)
     const ArchArgs &args = arch->args;
     init_uarch_constids(arch);
     std::smatch match;
-    std::regex devicere = std::regex("(xc7[azkv]\\d+t?)([a-z0-9]+)-(\\dL?)");
+    // Accept either a full part name (xc7s50csga324-1) or a bare die name
+    // (xc7s50), the latter selecting no package.
+    //
+    // The class gains s, for spartan7.  xc7vx is spelled out as its own
+    // alternative because a Virtex-7 XT part name puts a letter where
+    // \d+ expects a digit: xc7vx485t never matched xc7[azkv]\d+t? at all,
+    // so no Virtex-7 part was reachable through this flow, whatever the
+    // chipdb held.  The class loses v, which only ever matched plain
+    // (non-XT) Virtex-7 names such as xc7v585t; openXC7/prjxray-db carries
+    // no plain xc7v part -- virtex7/ holds xc7vx485t alone -- so nothing
+    // that could previously be built stops building.
+    std::regex devicere = std::regex("(xc7[azks]\\d+t?|xc7vx\\d+t?)([a-z0-9]*)(?:-([0-9]L?))?");
     if (!std::regex_match(args.device, match, devicere)) {
         log_error("Invalid device %s\n", args.device.c_str());
     }
@@ -87,7 +98,11 @@ void XilinxImpl::init_database(Arch *arch)
         die = "xc7a50t";
     arch->load_chipdb(stringf("xilinx/chipdb-%s.bin", die.c_str()));
     std::string package = match[2].str();
-    arch->set_package(package);
+    // A bare die name carries no package, and set_package("") is not the
+    // same as not setting one; a design that needs PACKAGE_PIN constraints
+    // has to pass a part-form name.
+    if (!package.empty())
+        arch->set_package(package);
     arch->set_speed_grade("DEFAULT");
 }
 
