@@ -834,7 +834,7 @@ struct FabulousImpl : ViaductAPI
             cell_tags.assign_for(ctx, cfg, cell.second.get());
         }
     }
-    void notifyBelChange(BelId bel, CellInfo *cell)
+    void notifyBelChange(BelId bel, CellInfo *cell) override
     {
         CellInfo *old = ctx->getBoundBelCell(bel);
         blk_trk->update_bel(bel, old, cell);

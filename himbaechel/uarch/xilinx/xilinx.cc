@@ -28,6 +28,7 @@
 
 #include "placer_heap.h"
 #include "placer_static.h"
+#include "router2.h"
 
 #include "xilinx.h"
 
@@ -70,6 +71,17 @@ po::options_description XilinxImpl::getUArchOptions()
     po::options_description specific("Xilinx specific options");
     specific.add_options()("fasm", po::value<std::string>(), "fasm bitstream output file");
     specific.add_options()("xdc", po::value<std::string>(), "name of constraints file");
+    specific.add_options()("placement", po::value<std::string>(),
+                           "placement dump (JSON: cell -> tile/site/bel/type) for external LVS");
+    specific.add_options()("delay-matrix", po::value<std::string>(),
+                           "interconnect delay model: on by default (measured per tile offset); 'off' uses the "
+                           "tuned formula; a path caches the table there; 'build' rebuilds it fresh (the default)");
+    specific.add_options()("hold-fix", po::value<std::string>()->implicit_value(""),
+                           "after routing, fix hold-time (min-delay) violations: small deficits by a routing "
+                           "detour, larger ones by a feedthrough LUT; optional value sets the max passes (default 8)");
+    specific.add_options()("hold-detour-max", po::value<double>(),
+                           "hold deficit (ns) up to which a routing detour is used instead of a feedthrough LUT "
+                           "(default 0.5)");
     return specific;
 }
 
@@ -78,7 +90,9 @@ void XilinxImpl::init_database(Arch *arch)
     const ArchArgs &args = arch->args;
     init_uarch_constids(arch);
     std::smatch match;
-    std::regex devicere = std::regex("(xc7[azkv]\\d+t?)([a-z0-9]+)-(\\dL?)");
+    // Full part names (xc7s50csga324-1) or bare die names (xc7s50) are both
+    // accepted; a bare die selects the die's default package.
+    std::regex devicere = std::regex("(xc7[azks]\\d+t?|xc7vx\\d+t?)([a-z0-9]*)(?:-([0-9]L?))?");
     if (!std::regex_match(args.device, match, devicere)) {
         log_error("Invalid device %s\n", args.device.c_str());
     }
@@ -87,7 +101,10 @@ void XilinxImpl::init_database(Arch *arch)
         die = "xc7a50t";
     arch->load_chipdb(stringf("xilinx/chipdb-%s.bin", die.c_str()));
     std::string package = match[2].str();
-    arch->set_package(package);
+    if (!package.empty())
+        arch->set_package(package);
+    // A bare die name selects no package; designs needing PACKAGE_PIN
+    // constraints must pass a part-form name (e.g. xc7s50csga324).
     arch->set_speed_grade("DEFAULT");
 }
 
@@ -238,7 +255,29 @@ void XilinxImpl::update_bram_bel(BelId bel, CellInfo *cell)
     auto &tts = tile_status.at(bel.tile);
     if (!tts.bts)
         tts.bts = std::make_unique<BRAMTileStatus>();
-    int z = ctx->getBelLocation(bel).z;
+    Loc loc = ctx->getBelLocation(bel);
+    int z = loc.z;
+    if (z >= 12) {
+        // A bel imported by a non-primary site variant (given a fresh unique z
+        // by the chipdb generator) is the same physical hardware as its
+        // primary twin: fold it into the primary slot so the BRAM tile status
+        // keeps its compact z-indexed layout.
+        bool found = false;
+        for (auto other : ctx->getBelsByTile(loc.x, loc.y)) {
+            if (other == bel || ctx->getBelType(other) != type)
+                continue;
+            int oz = ctx->getBelLocation(other).z;
+            if (oz >= 12)
+                continue;
+            if (bel_name_in_site(other) != bel_name_in_site(bel))
+                continue;
+            z = oz;
+            found = true;
+            break;
+        }
+        if (!found)
+            NPNR_ASSERT(found);
+    }
     NPNR_ASSERT(z >= 0 && z < 12);
     tts.bts->cells[z] = cell;
 }
@@ -248,6 +287,114 @@ bool XilinxImpl::is_pip_unavail(PipId pip) const
     const auto &pip_data = chip_pip_info(ctx->chip_info, pip);
     const auto &extra_data = *reinterpret_cast<const XlnxPipExtraDataPOD *>(pip_data.extra_data.get());
     unsigned pip_type = pip_data.flags;
+
+    // The regional-clock (BUFR) datapath is a BUFFER, not routing.
+    //
+    // CK_BUFRCLK* is a BUFR's OUTPUT and RCLK_BEFORE_DIV -> RCLK_OUT ->
+    // RCLK2RCLK is the path through its divider.  Connectivity-wise they look
+    // like ordinary arcs, so the router will thread a global clock through them
+    // -- and prefers to, because from a pin in the IO column the adjacent
+    // HCLK_IOI3 tile is nearer than the CMT column carrying the dedicated
+    // pad->BUFG route.
+    //
+    // Using that path obliges the design to place and enable a BUFR on the
+    // regional clock.  With nothing enforcing it, a clock-to-BUFG net comes out
+    // as
+    //     I2IOCLK_BOT1 -> IO_PLL_CLK3_DMUX -> RCLK3 -> RCLK_BEFORE_DIV1
+    //                  -> RCLK2RCLK1 -> CK_BUFRCLK1 -> CLK_HROW -> BUFGCTRL
+    // while the utilisation report says BUFR_BUFR: 0/20 -- a route whose buffer
+    // was never configured.  On hardware (Sonata, xc7a50tcsg324-1) that is a
+    // valid config with no clock: the bitstream loads and nothing runs.
+    //
+    // So when the design instantiates no BUFR, refuse the BUFR datapath.  The
+    // router then takes the direct pad->BUFG route (HCLK_CMT_CCIO* ->
+    // CLK_HROW_CK_IN_L* -> CK_BUFG_CASCO* -> BUFGCTRL), which is what Vivado
+    // does unprompted, and the same design then runs on the board.
+    //
+    // Conservative on purpose: when a BUFR IS present the path stays available,
+    // since deciding which regional clock a given BUFR serves needs placement
+    // context this predicate does not have.
+    if (pip_type == PIP_TILE_ROUTING) {
+        if (!design_has_bufr_valid) {
+            design_has_bufr = false;
+            for (auto &cell : ctx->cells)
+if (cell.second->type.in(id_BUFR, id_BUFR_BUFR)) {
+                    design_has_bufr = true;
+                    break;
+                }
+            design_has_bufr_valid = true;
+        }
+        if (!design_has_bufr) {
+            IdString dst = IdString(chip_tile_info(ctx->chip_info, pip.tile).wires[pip_data.dst_wire].name);
+            const std::string &d = dst.str(ctx);
+            if (d.find("CK_BUFRCLK") != std::string::npos || d.find("RCLK_BEFORE_DIV") != std::string::npos ||
+                d.find("RCLK_OUT") != std::string::npos || d.find("RCLK2RCLK") != std::string::npos)
+                return true;
+        }
+        IdString tt = IdString(chip_tile_info(ctx->chip_info, pip.tile).type_name);
+        std::string tts = tt.str(ctx);
+        bool tile_is_clk_bufg_r =
+                (boost::starts_with(tts, "CLK_BUFG_TOP_R") || boost::starts_with(tts, "CLK_BUFG_BOT_R"));
+        if (tile_is_clk_bufg_r) {
+            bool has_bound_bufgctrl = false;
+            const auto &tile_data = chip_tile_info(ctx->chip_info, pip.tile);
+            for (int32_t i = 0; i < tile_data.bels.ssize(); ++i) {
+                CellInfo *bound = ctx->getBoundBelCell(BelId(pip.tile, i));
+                if (bound != nullptr && bound->type == id_BUFGCTRL) {
+                    has_bound_bufgctrl = true;
+                    break;
+                }
+            }
+            if (!has_bound_bufgctrl)
+                return true;
+        }
+    }
+
+    // A pip prjxray has no bits for cannot be programmed, so routing through it
+    // produces a bitstream that SILENTLY lacks the connection --
+    // XRAY_ALLOW_MISSING_FEATURES drops the fasm line and bitgen carries on.
+    // The chipdb generator flags these by checking every tile-routing pip
+    // against segbits_<tile>.db and ppips_<tile>.db; see PIP_CFG_NO_BITS.
+    //
+    // The IO-column clock inputs are such a case: nothing in the artix7
+    // database defines HCLK_IOI_I2IOCLK_*.  The router used it to carry a pad's
+    // clock to a BUFG -- I2IOCLK -> IO_PLL_CLK3_DMUX -> RCLK3 -> CK_BUFRCLK1 --
+    // where Vivado takes the dedicated clock-capable input path and never
+    // touches these wires.  The result was a board that configures and does
+    // nothing at all, because the ROOT clock never reached its buffer.
+    //
+    // The pseudo-pip table is the exception: those pips carry hand-written fasm
+    // in fasm.cc and are emittable despite having no database entry, so the
+    // router must still be allowed to use them.
+    if (pip_type == PIP_TILE_ROUTING && (uint32_t(extra_data.pip_config) & PIP_CFG_NO_BITS)) {
+        if (!pseudo_pip_keys_valid) {
+            xlnx_build_pseudo_pip_config(ctx, pseudo_pip_config);
+            pseudo_pip_keys_valid = true;
+        }
+        IdString tt = IdString(chip_tile_info(ctx->chip_info, pip.tile).type_name);
+        IdString src = IdString(chip_tile_info(ctx->chip_info, pip.tile).wires[pip_data.src_wire].name);
+        IdString dst = IdString(chip_tile_info(ctx->chip_info, pip.tile).wires[pip_data.dst_wire].name);
+        // The rule is: reject a pip iff FasmBackend::write_pip would emit a
+        // feature that prjxray cannot resolve.  Anywhere write_pip
+        // deliberately emits NOTHING, the pip costs no bits and is fine to
+        // use, so the two exemption paths there must be mirrored here or we
+        // reject pips that were never a problem.  (Banning the DSP class broke
+        // VCC -> DSP48.OPMODE*INV_OUT routing outright.)
+        std::string tts = tt.str(ctx);
+        bool writer_emits_nothing = false;
+        if (tts == "DSP_L" || tts == "DSP_R") {
+            // fasm.cc: "FIXME: PPIPs missing for DSPs" -- whole tile skipped
+            writer_emits_nothing = true;
+        } else if (tts == "RIOI3_SING" || tts == "LIOI3_SING" || tts == "RIOI_SING") {
+            // fasm.cc: "FIXME: PPIPs missing for SING IOI3s"
+            std::string sn = src.str(ctx), dn = dst.str(ctx);
+            if ((sn.find("IMUX") != std::string::npos || sn.find("CTRL0") != std::string::npos) &&
+                dn.find("CLK") == std::string::npos)
+                writer_emits_nothing = true;
+        }
+        if (!writer_emits_nothing && !pseudo_pip_config.count(PseudoPipKey{tt, dst, src}))
+            return true;
+    }
     if (pip_type == PIP_SITE_ENTRY) {
         WireId dst = ctx->getPipDstWire(pip);
         if (ctx->getWireType(dst) == id_INTENT_SITE_GND) {
@@ -305,17 +452,146 @@ bool XilinxImpl::is_pip_unavail(PipId pip) const
     return false;
 }
 
+// set_property LOC <site> [get_cells <name>], for cells that are not pads.
+//
+// The XDC reader already stores LOC on any cell, but until now only pack_io
+// acted on it, so a constraint on an MMCM, a BUFG or a transceiver parsed
+// cleanly and did nothing.  That is worse than rejecting it: the design places
+// somewhere else and nothing says so.
+//
+// It matters for the clocking around a gigabit transceiver, where which CMT
+// column an MMCM sits in decides whether the GT's clocks can reach it at all.
+// The sites Vivado chooses are the ones known to work; this is how a design
+// says "put it there".
+void XilinxImpl::apply_loc_constraints()
+{
+    dict<std::pair<IdString, IdString>, BelId> by_site_and_type;
+    dict<IdString, int> site_seen;
+    for (BelId bel : ctx->getBels()) {
+        // Not every bel sits in a site the tile enumerates -- routing bels and
+        // the pseudo-bels carry an index that is not one of them -- and asking
+        // for the name of one of those walks off the end of the array.
+        SiteIndex si = get_bel_site(bel);
+        const auto &sites = tile_extra_data(si.tile)->sites;
+        if (si.site < 0 || si.site >= int32_t(sites.ssize()))
+            continue;
+        IdString site = get_site_name(si);
+        site_seen[site]++;
+        by_site_and_type.emplace(std::make_pair(site, ctx->getBelType(bel)), bel);
+    }
+
+    // Which cell wants which bel, worked out before anything moves.  Packing
+    // has already bound some of these -- clock buffers especially -- so the
+    // wanted site can be occupied by another constrained cell that has not been
+    // moved yet, and binding them one at a time collides on an ordering that
+    // means nothing.  Resolve first, then unbind everything that is in the
+    // wrong place, then bind.
+    std::vector<std::pair<CellInfo *, BelId>> wanted;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        auto loc = ci->attrs.find(id_LOC);
+        if (loc == ci->attrs.end())
+            continue;
+        // A pad's LOC is a PACKAGE_PIN, not a site, and pack_io resolves it
+        // against the package rather than the tile grid.  That one belongs to
+        // pack_io; this pass is for everything else.
+        if (ci->attrs.count(id_PACKAGE_PIN))
+            continue;
+        const std::string &loc_str = loc->second.as_string();
+        // A LOC can name either a SITE (SLICE_X0Y0, MMCME2_ADV_X1Y5) or a
+        // PACKAGE PIN (C10, AH8) -- XDCs in the wild use it for both, and
+        // pack_io is what resolves the pin case against the package.  Only the
+        // site form belongs to this pass, and a site name always carries its
+        // coordinates.
+        auto xpos = loc_str.rfind("_X");
+        if (xpos == std::string::npos || loc_str.find('Y', xpos) == std::string::npos)
+            continue;
+        IdString site = ctx->id(loc_str);
+        if (!site_seen.count(site))
+            log_error("cell '%s' is constrained to site '%s', which this device does not have\n",
+                      ctx->nameOf(ci), site.c_str(ctx));
+        auto found = by_site_and_type.find(std::make_pair(site, ci->type));
+        if (found == by_site_and_type.end())
+            log_error("cell '%s' of type '%s' is constrained to site '%s', which has no bel of that type\n",
+                      ctx->nameOf(ci), ci->type.c_str(ctx), site.c_str(ctx));
+        wanted.emplace_back(ci, found->second);
+    }
+
+    for (auto &w : wanted)
+        if (w.first->bel != BelId() && w.first->bel != w.second)
+            ctx->unbindBel(w.first->bel);
+    // A wanted bel can still be occupied by a cell nobody constrained, because
+    // packing put it there before any of this ran.  A LOC is a requirement,
+    // not a preference, so the squatter yields and the placer finds it
+    // somewhere else; only another CONSTRAINED cell is a genuine conflict.
+    for (auto &w : wanted) {
+        if (ctx->checkBelAvail(w.second))
+            continue;
+        CellInfo *sitting = ctx->getBoundBelCell(w.second);
+        if (sitting == nullptr || sitting == w.first)
+            continue;
+        if (sitting->attrs.count(id_LOC))
+            continue;   // both constrained here: reported as a conflict below
+        ctx->unbindBel(w.second);
+    }
+    int placed = 0;
+    for (auto &w : wanted) {
+        if (w.first->bel == w.second)
+            continue;   // packing already put it exactly there
+        if (!ctx->checkBelAvail(w.second))
+            log_error("cell '%s' is constrained to site '%s', already taken by '%s'\n", ctx->nameOf(w.first),
+                      get_site_name(get_bel_site(w.second)).c_str(ctx),
+                      ctx->nameOf(ctx->getBoundBelCell(w.second)));
+        ctx->bindBel(w.second, w.first, STRENGTH_LOCKED);
+        placed++;
+    }
+    if (placed)
+        log_info("Placed %d cell(s) from LOC constraints.\n", placed);
+}
+
 void XilinxImpl::prePlace()
 {
+    // Before placement, so the measured table reaches the placer (through
+    // predictDelay and criticality) as well as the router's A* guidance.  On by
+    // default: the measured matrix converges the router (rocket goes from 672
+    // grinding iterations to ~23) and calibrates the placer (a 60%-pessimistic
+    // pre-route estimate becomes ~3%), so it is the right behaviour to get
+    // without a flag.  "-o delay-matrix=off" falls back to the tuned formula;
+    // "-o delay-matrix=<file>" caches the table there; "-o delay-matrix=build"
+    // (or absent) builds it fresh.  If the build cannot find enough to measure
+    // on a given device it leaves dm_valid false and the formula stands, so an
+    // untested device degrades rather than breaks.
+    const ArchArgs &dm_args = ctx->args;
+    std::string dm = dm_args.options.count("delay-matrix") ? dm_args.options["delay-matrix"].as<std::string>() : "build";
+    if (dm != "off") {
+        if (dm != "build")
+            ctx->settings[ctx->id("xilinx/delayMatrixFile")] = dm;
+        build_delay_matrix();
+    }
+    apply_loc_constraints();
     assign_cell_tags();
     index_control_sets();
     cell_tags_set = true;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (ci->bel != BelId())
+            notifyBelChange(ci->bel, ci);
+    }
 }
 
 void XilinxImpl::postPlace()
 {
     fixup_placement();
     ctx->assignArchInfo();
+}
+
+void XilinxImpl::configureRouter2(Router2Cfg &cfg)
+{
+    // Routing configuration proven on xc7 by nextpnr-xilinx
+    cfg.bb_margin_x = 4;
+    cfg.bb_margin_y = 4;
+    cfg.backwards_max_iter = 200;
+    cfg.perf_profile = true;
 }
 
 void XilinxImpl::configurePlacerHeap(PlacerHeapCfg &cfg)
@@ -471,11 +747,17 @@ void XilinxImpl::preRoute()
 
 void XilinxImpl::postRoute()
 {
+    // Insert feedthrough buffers on hold-violating arcs and reroute, before
+    // routing is finalised and FASM is written.  No-op unless --xilinx-hold-fix.
+    fixup_hold();
     fixup_routing();
     ctx->assignArchInfo();
     const ArchArgs &args = ctx->args;
     if (args.options.count("fasm")) {
         write_fasm(args.options["fasm"].as<std::string>());
+    }
+    if (args.options.count("placement")) {
+        write_placement(args.options["placement"].as<std::string>());
     }
 }
 
@@ -747,12 +1029,12 @@ delay_t XilinxImpl::estimateDelay(WireId src, WireId dst) const
     int sx, sy, dx, dy;
     tile_xy(ctx->chip_info, src.tile, sx, sy);
     tile_xy(ctx->chip_info, dst.tile, dx, dy);
+    auto src_type = ctx->getWireType(src);
     auto fnd_src = source_locs.find(src);
     if (fnd_src != source_locs.end()) {
         sx = fnd_src->second.x;
         sy = fnd_src->second.y;
     } else {
-        auto src_type = ctx->getWireType(src);
         if (src_type.in(id_DOUBLE, id_BENTQUAD, id_HQUAD, id_VQUAD)) {
             for (auto pip : ctx->getPipsDownhill(src)) {
                 tile_xy(ctx->chip_info, pip.tile, sx, sy);
@@ -774,23 +1056,61 @@ delay_t XilinxImpl::estimateDelay(WireId src, WireId dst) const
         }
     }
 
-    // TODO: improve sophistication here based on old nextpnr-xilinx code
-    int dist_x = std::abs(dx - sx), dist_y = std::abs(dy - sy);
-    return 500 + 12 * (2 * std::max(dist_y - 6, 0) + 4 * std::min(dist_y, 6) + std::max(dist_x - 12, 0) +
-                       2 * std::min(dist_x, 12));
+    // A measured offset, when we have one, in place of the tuned formula: it
+    // knows that a diagonal is one hop and that one tile and two tiles cost
+    // the same hop, neither of which a separable linear formula can express.
+    delay_t base;
+    delay_t measured = delay_matrix_lookup(dx - sx, dy - sy);
+    if (measured >= 0) {
+        base = measured; // in or out of window -- extrapolated when out
+    } else {
+        // No measured matrix at all: the tuned formula from nextpnr-xilinx.
+        int dist_x = std::abs(dx - sx), dist_y = std::abs(dy - sy);
+        base = 30 * std::min(dist_x, 18) + 10 * std::max(dist_x - 18, 0) + 60 * std::min(dist_y, 6) +
+               20 * std::max(dist_y - 6, 0) + 300;
+        base = (base * 3) / 2; // xc7
+    }
+    if (fnd_snk != sink_locs.end())
+        base += 1000;
+    if (src_type == id_NODE_PINFEED && dx == sx && dy == sy)
+        base -= 200;
+    else if (src_type.in(id_NODE_LOCAL, id_NODE_PINBOUNCE) && dx == sx && dy == sy)
+        base -= 100;
+    if (src_type == id_NODE_CLE_OUTPUT)
+        base -= 80;
+    return base;
 }
 
 delay_t XilinxImpl::predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const
 {
+    if (src_bel == BelId() || dst_bel == BelId())
+        return 0;
     int sx, sy, dx, dy;
     tile_xy(ctx->chip_info, src_bel.tile, sx, sy);
     tile_xy(ctx->chip_info, dst_bel.tile, dx, dy);
+    // A carry chain costs nothing between adjacent slices: CIN takes the
+    // dedicated path from the slice below, not general routing.  From
+    // upstream; orthogonal to the tuned model below, which never sees these
+    // pins because a chain is placed by its own rules.
     if (dst_pin == id_CIN && src_pin == id_CO3)
         return 0;
-    // TODO: improve sophistication here based on old nextpnr-xilinx code
+    // Tuned predict-delay ported from nextpnr-xilinx arch.cc
+    if (src_bel.tile == dst_bel.tile) {
+        Loc dl = ctx->getBelLocation(src_bel), sl = ctx->getBelLocation(dst_bel);
+        if ((dl.z >> 4) == (sl.z >> 4))
+            return 0;
+        else if ((dl.z & 0xF) == BEL_FF2)
+            return 700; // penalize FF2 as it makes routing harder
+        else
+            return 150;
+    }
+    delay_t measured = delay_matrix_lookup(dx - sx, dy - sy);
+    if (measured >= 0)
+        return measured; // in or out of window -- extrapolated when out
     int dist_x = std::abs(dx - sx), dist_y = std::abs(dy - sy);
-    return 500 + 12 * (2 * std::max(dist_y - 6, 0) + 4 * std::min(dist_y, 6) + std::max(dist_x - 12, 0) +
-                       2 * std::min(dist_x, 12));
+    delay_t base = 30 * std::min(dist_x, 18) + 10 * std::max(dist_x - 18, 0) + 60 * std::min(dist_y, 6) +
+                   20 * std::max(dist_y - 6, 0) + 300;
+    return (base * 3) / 2; // xc7 (no measured matrix)
 }
 
 BoundingBox XilinxImpl::getRouteBoundingBox(WireId src, WireId dst) const

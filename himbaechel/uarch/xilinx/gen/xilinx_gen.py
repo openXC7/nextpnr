@@ -103,6 +103,86 @@ def timing_pip_classs(pip: xilinx_device.PIP):
 seen_pip_timings = set()
 seen_node_timings = set()
 
+# --- prjxray bitstream-representation lookup -------------------------------
+# A tile-routing pip is only usable if the bitstream can express it, i.e. its
+# fasm feature "<TILETYPE>.<dst_wire>.<src_wire>" appears in either
+# segbits_<tiletype>.db (has config bits) or ppips_<tiletype>.db (a pseudo-pip
+# needing no bits).  A pip in neither is a trap: nextpnr will happily route
+# through it, the fasm line is then dropped by fasm2frames, and the resulting
+# bitstream silently lacks the connection.  Mark those so the router can avoid
+# them.  See PIP_CFG_NO_BITS in extra_data.h.
+PIP_CFG_ROUTETHRU = 0x1
+PIP_CFG_NO_BITS = 0x80000000
+
+xraydb_root_for_bits = None
+_bits_cache = {}
+bits_stats = {"known": 0, "nobits": 0, "notiledb": 0}
+nobits_by_tiletype = {}
+
+def dealias_tile_type(tile_type):
+    """The tile type whose bit database actually expresses this tile.
+
+    A top/bottom-of-column ``*_SING`` I/O tile carries no ``segbits_*_sing.db``
+    of its own in any family: prjxray expresses it through the *base* tile type
+    (``RIOI3_SING`` -> ``RIOI3``, ``LIOB33_SING`` -> ``LIOB33``, ...), resolving
+    the tilegrid ``alias`` at assembly time (grid.py, TileSegbitsAlias).  The
+    db revisions we build chipdbs against do not all carry that alias metadata
+    in tilegrid.json, and the ``_SING`` suffix is the stable convention, so we
+    strip it here.  Only a ``ppips_*_sing.db`` (the "0"-half pseudo-pips) ever
+    exists for a SING tile, and it is merged in on top of the base type."""
+    if tile_type.endswith("_SING"):
+        return tile_type[:-len("_SING")]
+    return tile_type
+
+def tile_type_features(tile_type):
+    """Set of fasm feature keys prjxray can express for this tile type.
+    Returns None if the tile type has no bit database at all."""
+    if tile_type in _bits_cache:
+        return _bits_cache[tile_type]
+    feats = set()
+    found_any = False
+    # Read this tile's own db files, and -- for an aliased SING tile -- the
+    # base type's as well.  Feature rows are prefixed with the file's own tile
+    # type (``RIOI3.`` vs ``RIOI3_SING.``); pip_has_bits keys on the actual
+    # tile type, so base-type keys are re-prefixed to match.  Without this,
+    # every bitful pip of a SING tile (all in the base segbits db) is falsely
+    # marked NO_BITS and the router cannot bring a clock into an upper-SING
+    # OLOGIC -- the "Failed to route ... OLOGIC ... CLKINV_OUT" abort.
+    base = dealias_tile_type(tile_type)
+    lookup_types = [tile_type] if base == tile_type else [tile_type, base]
+    for lt in lookup_types:
+        for kind in ("segbits", "ppips"):
+            fn = path.join(xraydb_root_for_bits, f"{kind}_{lt.lower()}.db")
+            if not path.exists(fn):
+                continue
+            found_any = True
+            with open(fn) as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    key = ln.split()[0]
+                    if lt != tile_type and key.startswith(lt + "."):
+                        key = tile_type + key[len(lt):]
+                    feats.add(key)
+    result = feats if found_any else None
+    _bits_cache[tile_type] = result
+    return result
+
+def pip_has_bits(tile_type, dst_wire, src_wire):
+    feats = tile_type_features(tile_type)
+    if feats is None:
+        # No database for this tile type at all -- we cannot tell, so do not
+        # accuse the pip.  Counted separately and reported.
+        bits_stats["notiledb"] += 1
+        return True
+    if f"{tile_type}.{dst_wire}.{src_wire}" in feats:
+        bits_stats["known"] += 1
+        return True
+    bits_stats["nobits"] += 1
+    nobits_by_tiletype[tile_type] = nobits_by_tiletype.get(tile_type, 0) + 1
+    return False
+
 def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
     tile_type = tile.tile_type()
     if tile.x == 0 and tile.y == 0:
@@ -202,8 +282,18 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
 
     # TODO: ground/vcc
     tile_wire_count = len(tt.wires)
+    # prjxray bel z is only unique within a site; the per-tile map below
+    # re-allocates colliding z values so the archcheck location roundtrip
+    # (bel <-> Loc) stays bijective within each tile type.
+    seen_bel_z = {}
+    # BRAM tiles carry semantic z slots (0..11, see extra_data.h BEL_*) that
+    # the packer/fasm writer index directly; the inversion bels (RDCLKINV &
+    # co) must keep clear of them, so they start at z 12 in these tiles.
+    is_bram_tile = tile_type in ("BRAM_L", "BRAM_R")
+    bram_nonsem_count = 0
     for site in tile.sites():
         seen_pins = set()
+        seen_pips = set()
         for variant_idx, variant in enumerate(site.available_variants()):
             if variant in ("FIFO36E1", ): #unsupported atm
                 continue
@@ -211,12 +301,32 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
             variant_key = (site.index << 8) | (variant_idx & 0xFF)
             # Import site bels
             for bel in sv.bels():
-                z = filters.get_bel_z_override(bel, len(tt.bels))
+                default_z = (12 + bram_nonsem_count) if is_bram_tile else len(tt.bels)
+                z = filters.get_bel_z_override(bel, default_z)
                 # Overriden z of -1 means we skip this bel
                 if z == -1:
                     continue
+                if is_bram_tile and z == default_z:
+                    bram_nonsem_count += 1
                 bel_name = gen_bel_name(sv, bel.name())
-                nb = tt.create_bel(name=f"{site.rel_name()}.{bel_name}", type=filters.get_bel_type_override(bel.bel_type()), z=z)
+                # Site variants can import overlapping bels (e.g. the
+                # ILOGICE3 site's ILOGICE3/ILOGICE2/ISERDESE2 variants all
+                # carry a CE1USED bel); give non-primary variants a distinct
+                # name suffix so bel names stay unique within a tile
+                # (archcheck `bel != bel2` would otherwise fail).
+                full_bel_name = f"{site.rel_name()}.{bel_name}"
+                if variant_idx > 0:
+                    full_bel_name += f"~{variant}"
+                # Site variants can import overlapping bels sharing a z (e.g.
+                # the ILOGICE3 site's ILOGICE3/ILOGICE2/ISERDESE2 variants all
+                # carry a CE1USED bel): re-allocate a fresh tile-wide unique z
+                # for the later one.
+                if z in seen_bel_z:
+                    z = len(tt.bels)
+                    while z in seen_bel_z:
+                        z += 1
+                seen_bel_z[z] = full_bel_name
+                nb = tt.create_bel(name=full_bel_name, type=filters.get_bel_type_override(bel.bel_type()), z=z)
                 nb.site = variant_key
                 nb.extra_data = BelExtraData(name_in_site=ch.strs.id(bel_name))
                 if bel.bel_class() == "RBEL": nb.flags |= 2
@@ -245,6 +355,14 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
                     (bel_name == "IDELMUXE3"):
 
                     continue
+                # Site variants can re-import the same site pip (e.g. every
+                # ILOGICE3 variant carries IDATAININV_OUT -> IDATAIN); import
+                # each (src, dst) once so pip names stay unique within a tile
+                # (archcheck `pip != pip2` would otherwise fail).
+                pip_key = (site_pip.src_wire().name(), site_pip.dst_wire().name())
+                if pip_key in seen_pips:
+                    continue
+                seen_pips.add(pip_key)
                 add_pip(lookup_site_wire(site_pip.src_wire()),
                     lookup_site_wire(site_pip.dst_wire()),
                     pip_class=PipClass.SITE_INTERNAL,
@@ -265,12 +383,18 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
                 out_res=TimingValue(int(pip.resistance())), # mohm
                 is_buffered=pip.is_buffered())
             seen_pip_timings.add(tcls)
+        rt = PIP_CFG_ROUTETHRU if pip.is_route_thru() else 0
+        # Route-thru pips are not tile config bits at all (they borrow a site
+        # bel), so the segbits/ppips test does not apply to them.
+        fwd_nb = 0 if rt else (
+            0 if pip_has_bits(tile_type, pip.dst_wire().name(), pip.src_wire().name()) else PIP_CFG_NO_BITS)
         add_pip(pip.src_wire().name(), pip.dst_wire().name(), pip_class=PipClass.TILE_ROUTING, timing=tcls,
-            pip_config=1 if pip.is_route_thru() else 0)
-        # TODO: extra data, route-through flag
+            pip_config=rt | fwd_nb)
         if pip.is_bidi():
+            rev_nb = 0 if rt else (
+                0 if pip_has_bits(tile_type, pip.src_wire().name(), pip.dst_wire().name()) else PIP_CFG_NO_BITS)
             add_pip(pip.dst_wire().name(), pip.src_wire().name(), pip_class=PipClass.TILE_ROUTING, timing=tcls,
-                pip_config=1 if pip.is_route_thru() else 0)
+                pip_config=rt | rev_nb)
 
 def import_sdf_timings(variant, sdfcell):
     # TODO: anything other than comb
@@ -379,6 +503,12 @@ def main():
     if "xc7s" in args.device:
         metadata_root = metadata_root.replace("artix7", "spartan7")
         xraydb_root = xraydb_root.replace("artix7", "spartan7")
+    if "xc7v" in args.device:
+        metadata_root = metadata_root.replace("artix7", "virtex7")
+        xraydb_root = xraydb_root.replace("artix7", "virtex7")
+    # segbits_*.db / ppips_*.db live alongside the tile_type_*.json we import
+    global xraydb_root_for_bits
+    xraydb_root_for_bits = xraydb_root
     # Load prjxray device data
     d = xilinx_device.import_device(args.device, xraydb_root, metadata_root)
     # Init constant ids
@@ -465,6 +595,8 @@ def main():
     timings_root = xraydb_root
     if "kintex7" in xraydb_root: # TODO: missing
         timings_root = xraydb_root.replace("kintex7", "artix7")
+    if "virtex7" in xraydb_root: # TODO: missing
+        timings_root = xraydb_root.replace("virtex7", "artix7")
     slicem_sdf = parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "slicem.sdf"))
     mux = ch.timing.add_cell_variant("DEFAULT", "SELMUX2_1")
     import_sdf_timings(mux, slicem_sdf.cells[("SELMUX2_1", "SLICEM/F7BMUX")])
@@ -483,6 +615,18 @@ def main():
             pkg.create_pad(pin, f"X{site_data.tile.x}Y{site_data.tile.y}",
             f"{site_data.rel_name()}.{bel_name}",
             "", 0) # TODO: bank
+    # Report the bitstream-representation census.  A non-zero "no bits" count
+    # is not an error -- it is the number of pips the router must now avoid
+    # because prjxray cannot express them.  A large "no tile db" count means
+    # whole tile types went unchecked and their pips are still traps.
+    tot = bits_stats["known"] + bits_stats["nobits"]
+    print("prjxray bitstream check: %d tile-routing pips, %d expressible, "
+          "%d NOT expressible (%.2f%%), %d unchecked (tile type has no bit db)"
+          % (tot, bits_stats["known"], bits_stats["nobits"],
+             100.0 * bits_stats["nobits"] / max(tot, 1), bits_stats["notiledb"]),
+          file=sys.stderr)
+    for t, c in sorted(nobits_by_tiletype.items(), key=lambda kv: -kv[1])[:10]:
+        print("    no bits: %-28s %6d pips" % (t, c), file=sys.stderr)
     ch.write_bba(args.bba)
 
 if __name__ == '__main__':

@@ -54,6 +54,34 @@ struct Router2Cfg
     // of choosing a less congestion/delay-optimal route
     float estimate_weight;
 
+    // Congestion smoothing: a post-legality rip-up and re-route that makes
+    // tile DENSITY a cost.  router2's own congestion cost is driven by
+    // overuse -- nets illegally sharing a wire -- so once routing is legal
+    // its gradient is flat, and a tile carrying four times its neighbours'
+    // traffic is invisible to it.  Off by default; see
+    // docs/routing-smoothing-pass.md.
+    int smooth_iters = 0;
+    float smooth_weight;
+    float smooth_percentile;
+    float smooth_max_crit;
+    int smooth_max_fanout;
+    float smooth_cap_frac;
+    int smooth_min_wires;
+    int smooth_stagnant;
+
+    // Order the route queue by worst absolute slack rather than by criticality.
+    bool slack_order;
+
+    // Bound on bounding-box growth for congested nets; 0 = unbounded (the
+    // historical behaviour).
+    int bb_expand_max;
+
+    // Size each net's box from timing criticality (tight for critical, loose
+    // for slack) instead of growing it on congestion; bb_budget_max is the
+    // loosest margin, given to a fully-slack net.
+    bool bb_budget;
+    int bb_budget_max;
+
     // Print additional performance profiling information
     bool perf_profile = false;
 

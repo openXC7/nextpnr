@@ -132,6 +132,7 @@ struct XilinxPacker
                           const std::vector<NetInfo *> &select, NetInfo *out, int zoffset);
 
     void pack_srls();
+    void constrain_srl_cascades();
 
     void split_carry4s();
 
@@ -190,16 +191,27 @@ struct XC7Packer : public XilinxPacker
     void fold_inverter(CellInfo *cell, std::string port);
     SiteIndex get_ologic_site(BelId io_bel);
     SiteIndex get_ilogic_site(BelId io_bel);
+    SiteIndex get_ilogic_site_for_ologic(SiteIndex ologic_site);
     SiteIndex get_ioctrl_site(BelId io_bel);
     SiteIndex get_odelay_site(BelId io_bel);
     SiteIndex get_idelay_site(BelId io_bel);
+    // OSERDESE2 masters whose OFB feeds an ISERDESE2 (loopback, no IOB anchor)
+    std::unordered_set<CellInfo *> unconstrained_oserdes;
     // Call before packing constants
     void prepare_iologic();
 
     void pack_iologic();
     void pack_idelayctrl();
+    void pack_cfg();
+
+    // GT transceivers
+    SiteIndex get_gt_site(BelId pad_bel, IdString want);
+    void constrain_ibufds_gt_site(CellInfo *buf_cell, BelId pad_bel);
+    void constrain_gt(CellInfo *pad_cell, CellInfo *gt_cell);
+    void pack_gt();
 
     // Clocking
+    void bypass_pll_input_buffers();
     void prepare_clocking();
     void pack_plls();
     void pack_gbs();

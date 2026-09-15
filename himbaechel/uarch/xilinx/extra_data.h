@@ -37,6 +37,17 @@ NPNR_PACKED_STRUCT(struct XlnxPipExtraDataPOD {
     int32_t pip_config;
 });
 
+// Flags OR-ed into XlnxPipExtraDataPOD::pip_config for PIP_TILE_ROUTING pips.
+// (For PIP_SITE_INTERNAL pip_config carries an IdString index instead, and the
+// generator never sets these bits on that class.)
+//
+// PIP_CFG_ROUTETHRU is the original meaning of pip_config == 1.
+// PIP_CFG_NO_BITS marks a pip that prjxray has no bitstream representation
+// for: it is in neither segbits_<tile>.db nor ppips_<tile>.db.  Routing
+// through such a pip yields a bitstream that SILENTLY lacks the connection.
+static const uint32_t PIP_CFG_ROUTETHRU = 0x1;
+static const uint32_t PIP_CFG_NO_BITS = 0x80000000;
+
 enum class PipClass
 {
     PIP_TILE_ROUTING = 0,

@@ -22,6 +22,7 @@
 #include <boost/optional.hpp>
 #include <iterator>
 #include <queue>
+#include <unordered_map>
 #include <unordered_set>
 #include "chain_utils.h"
 #include "design_utils.h"
@@ -493,8 +494,12 @@ void XilinxPacker::pack_srls()
     srl_rules[id_SRLC32E].port_xform[id_CE] = id_WE;
     srl_rules[id_SRLC32E].port_xform[id_D] = id_DI1;
     srl_rules[id_SRLC32E].port_xform[id_Q] = id_O6;
+    // Cascade shiftout: SRLC32E.Q31 is the dedicated MC31 output that feeds
+    // the next SRL's DI mux (xDI1MUX <- (x+1)MC31).  Map it to the MC31 port
+    // so the cascade routes through the dedicated in-slice path rather than
+    // being dropped.  (Port of nextpnr-xilinx pack.cc.)
+    srl_rules[id_SRLC32E].port_xform[id_Q31] = id_MC31;
     srl_rules[id_SRLC32E].set_attrs.emplace_back(id_X_LUT_AS_SRL, "1");
-    // FIXME: Q31 support
     generic_xform(srl_rules, true);
     // Fixup SRL inputs
     for (auto &cell : ctx->cells) {
@@ -522,6 +527,185 @@ void XilinxPacker::pack_srls()
             }
         }
     }
+    constrain_srl_cascades();
+}
+
+// SRLC32E cascades (shift registers deeper than 32, chained through Q31).
+// The MC31 wire Q31 maps to only exists INSIDE a SLICEM: the cascade muxes
+// run top-down D->C->B->A (xDI1MUX <- (x+1)MC31) and no route from MC31 to
+// the general fabric exists.  Two consequences the packer must handle, or
+// the placer scatters the chain and the MC31 arc is physically unroutable:
+//
+//  - a cascade group of up to four SRLs must occupy D,C,B,A of ONE slice,
+//    exactly like a carry chain (cluster, head at D);
+//  - any Q31 link that cannot stay inside a slice (fifth and later chain
+//    elements, or a Q31 consumer that is not another SRL's D) must instead
+//    leave through the ordinary Q output with the read address tied to 31
+//    -- the same value, fabric-routable.  Only possible when Q is unused,
+//    but a used Q means the design also taps that segment live.
+//
+// (Port of nextpnr-xilinx pack.cc constrain_srl_cascades(); the fork's
+// constr_parent/constr_children grouping is re-expressed with the upstream
+// cluster mechanism, exactly as pack_carry.cc does for carry chains: the
+// head cell becomes the cluster root and the members its constr_children
+// with absolute z placements D,C,B,A.)
+void XilinxPacker::constrain_srl_cascades()
+{
+    auto is_srl32 = [&](const CellInfo *ci) {
+        return ci->type == id_SLICE_LUTX && str_or_default(ci->attrs, id_X_ORIG_TYPE) == "SRLC32E";
+    };
+    NetInfo *vcc = ctx->nets.at(ctx->id("$PACKER_VCC_NET")).get();
+    auto reads_bit31 = [&](const CellInfo *ci) {
+        for (auto a : {id_A2, id_A3, id_A4, id_A5, id_A6})
+            if (ci->getPort(a) != vcc)
+                return false;
+        return true;
+    };
+
+    std::vector<CellInfo *> srls;
+    std::unordered_map<CellInfo *, CellInfo *> next_srl, prev_srl;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (!is_srl32(ci))
+            continue;
+        srls.push_back(ci);
+        NetInfo *q31 = ci->getPort(id_MC31);
+        if (q31 != nullptr && q31->users.entries() == 1 && (*q31->users.begin()).port == id_DI1 &&
+            is_srl32((*q31->users.begin()).cell)) {
+            next_srl[ci] = (*q31->users.begin()).cell;
+            prev_srl[(*q31->users.begin()).cell] = ci;
+        }
+    }
+    if (srls.empty())
+        return;
+
+    // Q31 links that must leave their slice, to be moved onto Q afterwards
+    std::vector<CellInfo *> offslice;
+    std::unordered_set<CellInfo *> visited;
+    int clusters = 0;
+    auto process_chain = [&](CellInfo *head) {
+        if (prev_srl.count(head))
+            return;
+        std::vector<CellInfo *> chain;
+        for (CellInfo *cur = head; cur != nullptr;) {
+            chain.push_back(cur);
+            visited.insert(cur);
+            auto fnd = next_srl.find(cur);
+            cur = (fnd == next_srl.end()) ? nullptr : fnd->second;
+        }
+        for (size_t g = 0; g < chain.size(); g += 4) {
+            size_t glen = std::min<size_t>(4, chain.size() - g);
+            if (glen > 1) {
+                // Imported (BEL-pinned) chains were already placed legally;
+                // adding constraints on top would fight the pin (cf. the
+                // pinned-root lesson in pack_carries).  Likewise leave cells
+                // an earlier pass (e.g. constrain_muxf_tree) already put in
+                // a cluster alone: overwriting the cluster membership would
+                // desync it from that cluster root's constr_children list.
+                bool pinned = false;
+                for (size_t i = 0; i < glen; i++)
+                    pinned |= bool(chain[g + i]->attrs.count(id_BEL)) || chain[g + i]->cluster != ClusterId() ||
+                              chain[g + i]->constr_abs_z || !chain[g + i]->constr_children.empty();
+                if (!pinned) {
+                    CellInfo *base = chain[g];
+                    base->cluster = base->name;
+                    base->constr_abs_z = true;
+                    base->constr_z = (3 << 4) | BEL_6LUT; // head at D6LUT
+                    for (size_t i = 1; i < glen; i++) {
+                        CellInfo *m = chain[g + i];
+                        m->cluster = base->name;
+                        base->constr_children.push_back(m);
+                        m->constr_x = 0;
+                        m->constr_y = 0;
+                        m->constr_abs_z = true;
+                        m->constr_z = ((3 - int(i)) << 4) | BEL_6LUT; // then C, B, A
+                    }
+                    clusters++;
+                }
+            }
+            CellInfo *tail = chain[g + glen - 1];
+            if (next_srl.count(tail))
+                offslice.push_back(tail);
+        }
+    };
+    for (auto head : srls)
+        process_chain(head);
+    // A chain with no head is a pure Q31 cycle: some link has to go through
+    // the fabric, and any of them may -- break the cycle at an arbitrary
+    // element and cluster the rest as one open chain.
+    for (auto ci : srls) {
+        if (visited.count(ci) || !next_srl.count(ci))
+            continue;
+        log_warning("SRL cell '%s' is part of a pure Q31 cascade cycle; breaking the cycle at its Q31 link\n",
+                    ci->name.c_str(ctx));
+        CellInfo *cycle_next = next_srl.at(ci);
+        prev_srl.erase(cycle_next);
+        next_srl.erase(ci);
+        process_chain(cycle_next);
+    }
+
+    // Cells whose Q31 net is not one of the in-slice cascade links kept
+    // above: multi-fanout Q31, a non-SRL consumer, or a group boundary.
+    for (auto ci : srls) {
+        NetInfo *q31 = ci->getPort(id_MC31);
+        if (q31 == nullptr || next_srl.count(ci))
+            continue;
+        if (std::find(offslice.begin(), offslice.end(), ci) == offslice.end())
+            offslice.push_back(ci);
+    }
+
+    int rewired = 0;
+    for (auto ci : offslice) {
+        NetInfo *q31 = ci->getPort(id_MC31);
+        if (q31 == nullptr)
+            continue;
+        if (q31->users.empty()) {
+            ci->disconnectPort(id_MC31);
+            continue;
+        }
+        NetInfo *q = ci->getPort(id_O6);
+        if (q != nullptr && !q->users.empty()) {
+            if (reads_bit31(ci)) {
+                // Q already reads bit 31, so it carries the very value Q31
+                // does: fold the off-slice Q31 consumers into the Q net.
+                std::vector<PortRef> users;
+                for (auto &user : q31->users)
+                    users.push_back(user);
+                for (auto &user : users) {
+                    user.cell->disconnectPort(user.port);
+                    user.cell->connectPort(user.port, q);
+                }
+                ci->disconnectPort(id_MC31);
+                rewired++;
+                continue;
+            }
+            log_error("SRL '%s': its Q31 cascade must go through the fabric (chain deeper than 128 bits, or a "
+                      "non-SRL consumer), which needs the Q output with the read address tied to 31 -- but Q is "
+                      "already in use with another address. Restructure the shift register (srl_style/shreg "
+                      "attributes) so this segment is not tapped.\n",
+                      ci->name.c_str(ctx));
+        }
+        ci->disconnectPort(id_MC31);
+        if (q != nullptr)
+            ci->disconnectPort(id_O6);
+        if (!ci->ports.count(id_O6)) {
+            ci->ports[id_O6].name = id_O6;
+            ci->ports[id_O6].type = PORT_OUT;
+        }
+        ci->connectPort(id_O6, q31);
+        for (auto a : {id_A2, id_A3, id_A4, id_A5, id_A6}) {
+            ci->disconnectPort(a);
+            if (!ci->ports.count(a)) {
+                ci->ports[a].name = a;
+                ci->ports[a].type = PORT_IN;
+            }
+            ci->connectPort(a, vcc);
+        }
+        rewired++;
+    }
+    if (clusters || rewired)
+        log_info("Constrained %d SRL cascade group(s) into single slices, moved %d Q31 link(s) to Q[31]\n", clusters,
+                 rewired);
 }
 
 void XilinxPacker::pack_constants()
@@ -599,6 +783,14 @@ void XilinxPacker::pack_constants()
             ci->disconnectPort(pname);
         }
 
+        // Do NOT exempt the CMT blocks from this.  I tried that, reasoning that
+        // Vivado ties PLLE2_ADV.PWRDWN to GND uninverted while we produce
+        // VCC+inversion, and that the two are only equivalent if the silicon
+        // implements the pin inversion as prjxray models it.  It regressed
+        // johnson+PLL, the one PLL design HW-verified through this flow: its
+        // .RST(1'b0)/.PWRDWN(1'b0) rely on exactly this conversion, and its
+        // working bitstream carries ZINV_RST and ZINV_PWRDWN as a result.
+        // Skipping the conversion drops both bits and the PLL stops running.
         if (!cval && invertible_pins.count(ci->type) && invertible_pins.at(ci->type).count(pname)) {
             // Invertible pins connected to zero are optimised to a connection to Vcc (which is easier to route)
             // and an inversion
@@ -680,6 +872,48 @@ void XC7Packer::pack_bram()
     // 72-bit BRAMs: drop upper bits of WEB in TDP mode
     for (int i = 4; i < 8; i++)
         bram_rules[id_RAMB36E1].port_multixform[ctx->idf("WEBWE[%d]", i)] = {};
+
+    // Drop constant ties on the dedicated CASCADE inputs of a BRAM that is not
+    // cascading.  Whether the cascade is used is decided by the A_INPUT/B_INPUT
+    // PARAMETERS (see fasm.cc, which emits A_INPUT[0] only for "CASCADE"), so a
+    // constant on the pin carries no information.  It is not harmless though:
+    // CASCADEINA has no path from general routing -- it reaches only another
+    // BRAM's CASCADEOUT -- so leaving the tie makes the router try to deliver
+    // $PACKER_VCC_NET to it and fail:
+    //   Failed to route arc of net '$PACKER_VCC_NET', from X0Y0/VCC to
+    //   RAMB36_X0Y0.CASCADEINA
+    // yosys leaves these pins unconnected, so this only bites netlists that
+    // spell the ties out -- Vivado's do, which is why importing a Vivado
+    // netlist hit it and the yosys-synthesised equivalent never did.
+    int casc_seen = 0, casc_dropped = 0, casc_bram = 0;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (ci->type != id_RAMB18E1 && ci->type != id_RAMB36E1)
+            continue;
+        ++casc_bram;
+        for (auto &pin : {std::make_pair("CASCADEINA", "A_INPUT"),
+                          std::make_pair("CASCADEINB", "B_INPUT")}) {
+            if (str_or_default(ci->params, ctx->id(pin.second), "DIRECT") == "CASCADE")
+                continue;
+            NetInfo *n = ci->getPort(ctx->id(pin.first));
+            if (n == nullptr)
+                continue;
+            ++casc_seen;
+            log_info("  cascade tie: %s.%s net '%s' driver '%s'\n", ctx->nameOf(ci), pin.first,
+                     ctx->nameOf(n),
+                     n->driver.cell == nullptr ? "<none>" : n->driver.cell->type.c_str(ctx));
+            // only a constant tie: a real cascade net is left alone
+            // The constant network's drivers are PSEUDO_VCC/PSEUDO_GND at this
+            // point, not VCC/GND -- checking the latter matched nothing.
+            if (n->driver.cell != nullptr && n->driver.cell->type != id_PSEUDO_VCC &&
+                n->driver.cell->type != id_PSEUDO_GND)
+                continue;
+            ci->disconnectPort(ctx->id(pin.first));
+            ++casc_dropped;
+        }
+    }
+    log_info("BRAM cascade scan: %d BRAM(s), %d tie(s) seen, %d dropped\n", casc_bram, casc_seen,
+             casc_dropped);
 
     // Process SDP BRAM first
     for (auto &cell : ctx->cells) {
@@ -807,7 +1041,61 @@ void XC7Packer::pack_bram()
 
 void XilinxPacker::pack_inverters()
 {
-    // FIXME: fold where possible
+    // Fold an inverter driving a PLL/MMCM control pin into that pin's
+    // IS_<pin>_INVERTED parameter, which is what Vivado does.
+    //
+    // Without this, RTL such as .RST(~nrst) leaves the inverter as fabric logic
+    // and IS_RST_INVERTED clear, so the PLL's reset arrives over general
+    // interconnect; Vivado instead puts RST straight on the nrst net and sets
+    // the parameter (which is why its bitstreams carry ZINV_RST).  HW on the
+    // Sonata: the unfolded form never locked.  Note the FASM writer's
+    // convention -- ZINV_<pin> SET means the pin IS inverted -- so folding is
+    // what legitimately produces that bit; do not try to produce it by
+    // negating the write instead (tried; it inverts RST and the PLL then runs
+    // only while the reset button is held).
+    //
+    // Deliberately limited to the CMT blocks and to whole-signal pins: the
+    // generic invertible_pins list includes bussed pins like OPMODE[0], whose
+    // parameter is a vector rather than IS_<pin>_INVERTED, and folding those
+    // needs bit-level handling this does not attempt.
+    std::vector<IdString> dead_invs;
+    int folded = 0;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (!ci->type.in(id_PLLE2_ADV, id_PLLE2_BASE, id_MMCME2_ADV, id_MMCME2_BASE))
+            continue;
+        for (IdString pin : {id_RST, id_PWRDWN, id_CLKINSEL}) {
+            NetInfo *n = ci->getPort(pin);
+            if (n == nullptr || n->driver.cell == nullptr)
+                continue;
+            CellInfo *drv = n->driver.cell;
+            if (drv->type != id_INV)
+                continue;
+            NetInfo *src = drv->getPort(id_I);
+            if (src == nullptr)
+                continue;
+            IdString param = ctx->idf("IS_%s_INVERTED", pin.c_str(ctx));
+            bool cur = bool_or_default(ci->params, param, false);
+            ci->disconnectPort(pin);
+            ci->connectPort(pin, src);
+            ci->params[param] = Property(cur ? 0 : 1, 1);
+            ++folded;
+            log_info("    folded inverter '%s' into %s.%s (%s=%d)\n", drv->name.c_str(ctx), ci->name.c_str(ctx),
+                     pin.c_str(ctx), param.c_str(ctx), cur ? 0 : 1);
+            if (n->users.empty())
+                dead_invs.push_back(drv->name);
+        }
+    }
+    for (IdString dn : dead_invs) {
+        CellInfo *drv = ctx->cells.at(dn).get();
+        for (auto &p : drv->ports)
+            if (p.second.net != nullptr)
+                drv->disconnectPort(p.first);
+        ctx->cells.erase(dn);
+    }
+    if (folded > 0)
+        log_info("    folded %d inverter(s) into CMT control pins\n", folded);
+
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
         if (ci->type == id_INV) {
@@ -833,7 +1121,9 @@ void XilinxImpl::pack()
     packer.pack_constants();
     packer.pack_iologic();
     packer.pack_idelayctrl();
+    packer.pack_cfg();
     packer.pack_clocking();
+    packer.pack_gt();
     packer.generate_constraints();
     packer.pack_muxfs();
     packer.pack_carries();

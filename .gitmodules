@@ -3,10 +3,13 @@
 	url = https://github.com/YosysHQ/nextpnr-tests
 [submodule "himbaechel/uarch/xilinx/meta"]
 	path = himbaechel/uarch/xilinx/meta
-	url = https://github.com/gatecat/nextpnr-xilinx-meta
+	url = https://github.com/openXC7/nextpnr-xilinx-meta.git
 [submodule "3rdparty/corrosion"]
 	path = 3rdparty/corrosion
 	url = https://github.com/corrosion-rs/corrosion
 [submodule "3rdparty/googletest"]
 	path = 3rdparty/googletest
 	url = https://github.com/google/googletest.git
+[submodule "3rdparty/fasm2netlist"]
+	path = 3rdparty/fasm2netlist
+	url = https://github.com/jrrk2/fasm2netlist.git

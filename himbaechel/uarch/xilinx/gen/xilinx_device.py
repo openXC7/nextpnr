@@ -494,7 +494,24 @@ def import_device(fabricname, prjxray_root, metadata_root):
         d.height = max(d.height, y + 1)
         tiletype = tiledata["type"]
         t = Tile(x, y, tile, get_tile_type_data(tiletype), (-1, -1), [])
-        for idx, (site, sitetype) in enumerate(sorted(tiledata["sites"].items())):
+        # Ordered by PREFIX and then NUMERIC coordinates, not by the name as a
+        # string.  A tile type's bels are built once, from whichever instance
+        # is seen first, and their names carry that instance's site ordering --
+        # while each instance records its own sites in this list, and a bel
+        # refers to its site by index into it.  A lexicographic sort makes
+        # those two disagree whenever a tile's site numbers cross a digit
+        # boundary: in GTX_COMMON_X394Y23 "IPAD_X2Y10" sorts before
+        # "IPAD_X2Y8", so index 3 meant the lowest pad in the tile that defined
+        # the type and the third pad here.  Package pin AH8 -- MGTREFCLK0, the
+        # reference clock the board actually drives -- then resolved to the
+        # MGTREFCLK1 pad, and every GT design took its reference clock from
+        # pins nothing is connected to.
+        def site_sort_key(item):
+            name = item[0]
+            x, y = parse_xy(name)
+            return (name[:name.rfind("_X")], x, y)
+
+        for idx, (site, sitetype) in enumerate(sorted(tiledata["sites"].items(), key=site_sort_key)):
                 si = Site(t, site, idx, parse_xy(site), get_site_type_data(sitetype))
                 t.site_insts.append(si)
                 d.sites_by_name[site] = si

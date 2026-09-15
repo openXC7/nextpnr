@@ -78,6 +78,25 @@ struct SiteIndex
     unsigned hash() const { return mkhash(tile, site); }
 };
 
+// Key into the hand-maintained pseudo-pip table in fasm.cc.  Shared with
+// XilinxImpl::is_pip_unavail, which must not reject a pip the fasm writer can
+// in fact emit.
+struct PseudoPipKey
+{
+    IdString tileType;
+    IdString dest;
+    IdString source;
+
+    bool operator==(const PseudoPipKey &b) const
+    {
+        return std::tie(this->tileType, this->dest, this->source) == std::tie(b.tileType, b.dest, b.source);
+    }
+
+    unsigned int hash() const { return mkhash(mkhash(tileType.hash(), source.hash()), dest.hash()); }
+};
+
+void xlnx_build_pseudo_pip_config(Context *ctx, dict<PseudoPipKey, std::vector<std::string>> &pp_config);
+
 struct XilinxImpl : HimbaechelAPI
 {
 
@@ -124,24 +143,39 @@ struct XilinxImpl : HimbaechelAPI
     bool xc7_logic_tile_valid(IdString tileType, const LogicTileStatus &lts) const;
 
     // Pips
+    // Lazily-built copy of fasm.cc's pseudo-pip table, so is_pip_unavail can
+    // tell "no bits, and no hand-written fasm either" (a trap) from "no bits,
+    // but fasm.cc emits it anyway" (fine).  Built once on first use.
+    mutable dict<PseudoPipKey, std::vector<std::string>> pseudo_pip_config;
+    mutable bool pseudo_pip_keys_valid = false;
     bool is_pip_unavail(PipId pip) const;
+    // Does this design instantiate a BUFR?  The regional-clock datapath
+    // (RCLK_BEFORE_DIV -> RCLK_OUT -> RCLK2RCLK -> CK_BUFRCLK) runs through a
+    // BUFR, so those wires are a buffer's output rather than general routing.
+    // Cached: is_pip_unavail is on the router's hot path.
+    mutable bool design_has_bufr = false;
+    mutable bool design_has_bufr_valid = false;
     bool checkPipAvail(PipId pip) const override { return !is_pip_unavail(pip); }
     bool checkPipAvailForNet(PipId pip, const NetInfo *net) const override { return !is_pip_unavail(pip); }
 
     // Flow management
     void parse_xdc(const std::string &filename);
     void pack() override;
+    void apply_loc_constraints();
     void prePlace() override;
     void preRoute() override;
     void postPlace() override;
     void postRoute() override;
     void write_fasm(const std::string &filename);
+    void write_placement(const std::string &filename);
 
     void configurePlacerHeap(PlacerHeapCfg &cfg) override;
     void configurePlacerStatic(PlacerStaticCfg &cfg) override;
+    void configureRouter2(Router2Cfg &cfg) override;
 
     void fixup_placement();
     void fixup_routing();
+    void fixup_hold();
     void route_clocks();
 
     virtual std::string getDefaultRouter() const override { return "router2"; };
@@ -180,6 +214,29 @@ struct XilinxImpl : HimbaechelAPI
     dict<WireId, Loc> source_locs, sink_locs;
     bool is_general_routing(WireId wire) const;
     void find_source_sink_locs();
+
+    // Measured interconnect delay by tile offset; see delay_matrix.cc.
+    std::vector<delay_t> dm_delay;
+    int dm_window = 24;
+    int dm_max_explore = 4000000;
+    bool dm_valid = false;
+    // Out-of-window connections are extrapolated from the measured window
+    // edge at these marginal rates (ps per tile), derived from dm_delay
+    // itself -- so a loaded matrix and a freshly built one price long
+    // connections identically, and there is no arbitrary formula left in
+    // the path.
+    float dm_rate_x = 0.0f, dm_rate_y = 0.0f;
+    size_t dm_index(int dx, int dy) const
+    {
+        return size_t((dy + dm_window) * (2 * dm_window + 1) + (dx + dm_window));
+    }
+    int measure_from(WireId src, int sx, int sy, std::vector<delay_t> &out) const;
+    std::vector<std::pair<WireId, Loc>> pick_delay_sources(int count) const;
+    void build_delay_matrix();
+    delay_t delay_matrix_lookup(int dx, int dy) const;
+    void compute_edge_rates();
+    bool load_delay_matrix(const std::string &path);
+    void save_delay_matrix(const std::string &path) const;
 
     delay_t predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const override;
     delay_t estimateDelay(WireId src, WireId dst) const override;

@@ -1,0 +1,7 @@
+__pycache__/
+!Makefile
+*.json
+*.fasm
+*.bit
+*.frames
+*.slot*.uf2
