@@ -134,6 +134,18 @@ def dealias_tile_type(tile_type):
         return tile_type[:-len("_SING")]
     return tile_type
 
+def dealias_wire_name(wire):
+    """The name the base tile's bit database knows this SING wire by.
+
+    The wires that exist only in a ``*_SING`` tile carry an extra ``_SING``
+    infix over the base tile's name for the same wire:
+    ``IOI_SING_LEAF_GCLK1`` is ``IOI_LEAF_GCLK1`` in ``segbits_rioi3.db``.
+    The FASM writer strips exactly that infix before it emits the pip
+    (fasm.cc, ``src_name.erase(spos, 5)`` for ``RIOI3_SING`` / ``LIOI3_SING``
+    / ``RIOI_SING`` tiles), so the feature key the bitstream will actually
+    carry is the stripped one and the classifier has to look that one up."""
+    return wire.replace("_SING_", "_", 1)
+
 def tile_type_features(tile_type):
     """Set of fasm feature keys prjxray can express for this tile type.
     Returns None if the tile type has no bit database at all."""
@@ -176,7 +188,19 @@ def pip_has_bits(tile_type, dst_wire, src_wire):
         # accuse the pip.  Counted separately and reported.
         bits_stats["notiledb"] += 1
         return True
-    if f"{tile_type}.{dst_wire}.{src_wire}" in feats:
+    keys = [f"{tile_type}.{dst_wire}.{src_wire}"]
+    tile_is_aliased = dealias_tile_type(tile_type) != tile_type
+    if tile_is_aliased:
+        # The base type's rows, merged in by tile_type_features(), name the
+        # wires without the _SING infix -- and so does the FASM writer for
+        # this tile.  Without this second key every clock pip of a SING tile
+        # (IOI_OLOGIC0_CLKDIV <- IOI_SING_LEAF_GCLK*, the leaf clock into the
+        # OLOGIC) is judged against a key nothing ever writes, marked
+        # PIP_CFG_NO_BITS, and the router cannot bring a clock into a
+        # top/bottom-of-column OLOGIC -- the "Failed to route ... OLOGIC ...
+        # CLKDIVINV_OUT" abort on the LiteX Arty S7 demos.
+        keys.append(f"{tile_type}.{dealias_wire_name(dst_wire)}.{dealias_wire_name(src_wire)}")
+    if any(k in feats for k in keys):
         bits_stats["known"] += 1
         return True
     bits_stats["nobits"] += 1
