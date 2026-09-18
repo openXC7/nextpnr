@@ -134,6 +134,8 @@ env:
   # prjxray-db and the frames from prjxray's fasm2frames, so a moving
   # database or tool revision would change what is measured.
   PRJXRAY_DB_REV: ab1fc60c38a0dc1bc1d3d495f3189b25ae971e04
+  # site metadata for himbaechel/uarch/xilinx chipdb generation
+  NEXTPNR_XILINX_META_REV: a4af910cac907f2cbd3a545f26f8e26573e860de
   # virtex7-capable fasm2frames, used for every family; see header
   PRJXRAY_REV: e1302fc6f8662a237e42790073fa641f2d9f1371
   # demo-projects commit carrying the five pre-synthesized .json netlists
@@ -522,6 +524,13 @@ jobs:
           path: prjxray
           submodules: recursive
 
+      - name: Checkout nextpnr-xilinx-meta
+        uses: actions/checkout@v4
+        with:
+          repository: openXC7/nextpnr-xilinx-meta
+          ref: ${{ env.NEXTPNR_XILINX_META_REV }}
+          path: nextpnr-xilinx-meta
+
       - name: Checkout demo-projects
         if: matrix.source == 'demo-project'
         uses: actions/checkout@v4
@@ -585,7 +594,7 @@ jobs:
           # the job ran a current binary against a stale chipdb.
           h=$(cat nextpnr/himbaechel/uarch/xilinx/gen/*.py \
                   nextpnr/himbaechel/uarch/xilinx/constids.inc | sha256sum | cut -c1-16)
-          echo "key=${{ matrix.die }}-bba-${{ env.PRJXRAY_DB_REV }}-$h" >> "$GITHUB_OUTPUT"
+          echo "key=${{ matrix.die }}-bba-${{ env.PRJXRAY_DB_REV }}-${{ env.NEXTPNR_XILINX_META_REV }}-$h" >> "$GITHUB_OUTPUT"
 
       - name: Cache chipdb .bba
         uses: actions/cache@v4
@@ -601,6 +610,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH=/tmp/eigen-install \
             -DHIMBAECHEL_PRJXRAY_DB="$GITHUB_WORKSPACE/prjxray-db" \
+            -DHIMBAECHEL_XILINX_METADATA="$GITHUB_WORKSPACE/nextpnr-xilinx-meta" \
             -DHIMBAECHEL_XILINX_DEVICES="${{ matrix.die }}"
           free -h
           cmake --build build --parallel 4

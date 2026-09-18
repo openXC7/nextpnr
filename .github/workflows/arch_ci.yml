@@ -19,6 +19,7 @@ jobs:
       PRJOXIDE_REVISION: be5891272a783f6c7d890da7f8dbf663dcaf61f4
       MISTRAL_REVISION: ebfc0dd2cc7d6d2159b641a397c88554840e93c9
       APYCULA_REVISION: 0.8.2a1
+      NEXTPNR_XILINX_META_REV: a4af910cac907f2cbd3a545f26f8e26573e860de
     steps:
     - uses: actions/checkout@v4
       with:

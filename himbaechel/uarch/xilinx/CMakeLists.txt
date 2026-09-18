@@ -36,6 +36,12 @@ if (NOT HIMBAECHEL_PRJXRAY_DB AND NOT IMPORT_BBA_FILES)
     message(FATAL_ERROR "HIMBAECHEL_PRJXRAY_DB must be set to a prjxray database checkout")
 endif()
 
+set(HIMBAECHEL_XILINX_METADATA "${CMAKE_CURRENT_SOURCE_DIR}/meta" CACHE PATH
+    "Path to a nextpnr-xilinx-meta checkout")
+if (NOT EXISTS "${HIMBAECHEL_XILINX_METADATA}" AND NOT IMPORT_BBA_FILES)
+    message(FATAL_ERROR "HIMBAECHEL_XILINX_METADATA must point to a nextpnr-xilinx-meta checkout")
+endif()
+
 set(ALL_HIMBAECHEL_XILINX_DEVICES xc7a100t xc7a200t xc7a50t xc7k70t xc7k160t xc7k325t xc7k420t xc7k480t xc7s50 xc7vx485t xc7z010 xc7z020 xc7z030 xc7z045 xc7z100)
 set(HIMBAECHEL_XILINX_DEVICES ${ALL_HIMBAECHEL_XILINX_DEVICES} CACHE STRING
     "Include support for these Xilinx devices (available: ${ALL_HIMBAECHEL_XILINX_DEVICES})")
@@ -63,11 +69,17 @@ foreach (device ${HIMBAECHEL_XILINX_DEVICES})
         message(FATAL_ERROR "Unsupported Xilinx device family for device: ${device}. "
                             "Expected prefix xc7a, xc7k, xc7s, xc7v or xc7z.")
     endif()
+    set(METADATA_SUBDIR "${HIMBAECHEL_XILINX_METADATA}/${XRAY_SUBDIR}")
+    if (NOT EXISTS "${METADATA_SUBDIR}/wire_intents.json" AND NOT IMPORT_BBA_FILES)
+        message(FATAL_ERROR "Missing Xilinx metadata file: ${METADATA_SUBDIR}/wire_intents.json")
+    endif()
+    file(GLOB metadata_inputs CONFIGURE_DEPENDS "${METADATA_SUBDIR}/*.json")
     add_bba_produce_command(
         TARGET  nextpnr-himbaechel-xilinx-bba
         COMMAND ${XilinxChipdb_Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/gen/xilinx_gen.py
             --xray ${HIMBAECHEL_PRJXRAY_DB}/${XRAY_SUBDIR}
+            --metadata ${METADATA_SUBDIR}
             --device ${device}
             --bba ${CMAKE_CURRENT_BINARY_DIR}/chipdb-${device}.bba.new
         OUTPUT
@@ -86,6 +98,7 @@ foreach (device ${HIMBAECHEL_XILINX_DEVICES})
             ${CMAKE_CURRENT_SOURCE_DIR}/gen/tileconn.py
             ${CMAKE_CURRENT_SOURCE_DIR}/gen/parse_sdf.py
             ${CMAKE_CURRENT_SOURCE_DIR}/constids.inc
+            ${metadata_inputs}
     )
 
     add_bba_compile_command(
