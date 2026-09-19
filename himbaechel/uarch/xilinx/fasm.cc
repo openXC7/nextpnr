@@ -2115,6 +2115,20 @@ struct FasmBackend
             auto used_wraddrcasc = used_wires_starting_with(tile, "BRAM_CASCOUT_ADDRBWRADDR", false);
             write_bit("CASCOUT_ARD_ACTIVE", !used_rdaddrcasc.empty());
             write_bit("CASCOUT_BWR_ACTIVE", !used_wraddrcasc.empty());
+            // A RAMB36E1 port 1 or 9 bits wide -- the widths that do not
+            // halve evenly between the RAMB18s -- also needs a tile-level
+            // bit: width 1 is each half at 1 plus BRAM36_*_WIDTH_1, width 9
+            // each half at 4 plus the same bit (prjxray's 027-bram36-config).
+            // Without it the halves act as two independent memories and a
+            // read returns the wrong bits.
+            bool is_ramb36 = ci != nullptr && ci->type == id_RAMB36E1_RAMB36E1;
+            if (is_ramb36) {
+                for (const char *width : {"READ_WIDTH_A", "READ_WIDTH_B", "WRITE_WIDTH_A", "WRITE_WIDTH_B"}) {
+                    int bits = int_or_default(ci->params, ctx->id(width), 0);
+                    bool odd_width = bits == 1 || bits == 9;
+                    write_bit(std::string("RAMB36.BRAM36_") + width + "_1", odd_width);
+                }
+            }
         }
         pop();
     }
