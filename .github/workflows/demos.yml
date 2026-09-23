@@ -423,6 +423,27 @@ jobs:
           # resolves the ROM's $readmemh into RAMB INIT words at synthesis
           # time -- so it needs no compiler.  29.2 MB raw, 1.9 MB gzipped in
           # the tree.
+          # A processor whose instruction set is OCaml 4.14 bytecode, with the
+          # same Ethernet stack the LiteX SoCs use.  It is here for the paths
+          # the others do not reach: block RAM read at width 1 and 9 (the x1/x9
+          # encoding that was wrong in the RAMB36 width bits), two inputs
+          # sharing one HP I/O tile (the enable bits that left CPU_RESET deaf),
+          # and a packet DMA whose block-RAM writes are what the hold-fix
+          # detours exist for.  xc7-bitstream-tools builds the same design from
+          # source and proves its extraction; this asks what nextpnr does with
+          # the netlist.  75 MHz is the fastest it closes here -- see its
+          # README for the sweep.
+          - name: vc707-ocaml
+            tier: stretch
+            source: netlist
+            design: vc707-ocaml
+            netlist: vc707_ethmin_vm.json.gz
+            xdc: vc707_ethmin_vm.xdc
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 300
+
           - name: vc707-litex-linux
             tier: stretch
             source: netlist
