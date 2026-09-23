@@ -431,8 +431,8 @@ jobs:
           # and a packet DMA whose block-RAM writes are what the hold-fix
           # detours exist for.  xc7-bitstream-tools builds the same design from
           # source and proves its extraction; this asks what nextpnr does with
-          # the netlist.  75 MHz is the fastest it closes here -- see its
-          # README for the sweep.
+          # the netlist.  50 MHz is what it closes here with the FPU in it --
+          # see its README for the sweep.
           - name: vc707-ocaml
             tier: stretch
             source: netlist

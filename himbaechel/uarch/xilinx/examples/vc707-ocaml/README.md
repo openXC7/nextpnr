@@ -48,19 +48,22 @@ comes out, closes timing and stays correct.
 
 ## The clock
 
-The netlist asks for **75 MHz** on `clk_sys`, which is the fastest this
-design closes through this flow. The sweep, same design, same router:
+The netlist asks for **50 MHz** on `clk_sys`, which is what this design
+closes through this flow once the FPU is in it. The sweep, same design,
+same router:
 
-    100 MHz   71.8 MHz achieved   FAIL
-     80 MHz   77.8 MHz achieved   FAIL
-     75 MHz   77.3 MHz achieved   PASS   <- shipped
-     62.5 MHz 69.9 MHz achieved   PASS
+    100 MHz   Vivado closes it (WNS +0.559); the open flow reaches 71.8
+     75 MHz   61.0 MHz achieved   fails
+     62.5 MHz 59.5 MHz achieved   fails, and leaves two hold violations
+     50 MHz   62.2 MHz achieved   passes, no hold violations   <- shipped
 
-and on the board at 75 MHz `fib 20` takes 875 ms against 1051 ms at
-62.5 MHz — the 1.20 the two clocks predict, which is how one knows the
-clock is real and the processor is right at that speed. Vivado closes the
-same design at 100 MHz, so the ~25% between the two flows is a standing
-measure of what the open flow leaves on the table.
+Without the FPU the same design reaches about 72–77 MHz through the open
+flow, varying with placement — which is why 75 MHz, measured on an earlier
+netlist and tried first here, was too optimistic: the achieved figure moves
+several MHz between runs of the same sources, so a frequency that passes
+once is not one to ship. Vivado closes the FPU design at 100 MHz, so the
+gap between the two flows is a standing measure of what the open flow
+leaves on the table.
 
 `clk_sys` is derived from the MMCM in the netlist, not from the XDC, so
 changing the frequency means resynthesising with a different `SYS_DIV`.
