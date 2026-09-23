@@ -510,6 +510,7 @@ void XilinxImpl::fixup_hold()
         // 3. Place and reroute the feedthrough buffers (if any remained after
         //    detours).  Detours have already re-bound their routing directly.
         int placed = 0, failed = 0;
+        pool<IdString> unbuffered_nets;   // nets whose buffer did not land
         if (!pending.empty()) {
             // Reindex and re-tag so get_tags() (used by bindBel ->
             // notifyBelChange and isBelLocationValid) sees the new cells.
@@ -542,6 +543,19 @@ void XilinxImpl::fixup_hold()
                 ctx->cells.erase(p.buf->name);
                 if (buf_out)
                     ctx->nets.erase(buf_out->name);
+                // The net is as it was, so it is not one of the touched: a
+                // net whose buffer never landed must not be ripped up.
+                if (orig != nullptr)
+                    unbuffered_nets.insert(orig->name);
+            }
+            for (IdString nn : unbuffered_nets) {
+                bool still_buffered = false;
+                for (auto &q : pending)
+                    if (ctx->cells.count(q.buf->name) && q.buf->getPort(id_A1) != nullptr &&
+                        q.buf->getPort(id_A1)->name == nn)
+                        still_buffered = true;
+                if (!still_buffered)
+                    touched_nets.erase(nn);
             }
             if (failed)
                 log_warning("Hold-fix pass %d: %d buffer(s) had no free LUT bel nearby, skipped.\n", pass, failed);
@@ -549,7 +563,10 @@ void XilinxImpl::fixup_hold()
         if (no_exit)
             log_warning("Hold-fix pass %d: %d arc(s) left unbuffered, their source's slice has no output mux free.\n",
                         pass, no_exit);
-        if (!pending.empty()) {
+        // Only if a buffer actually landed: with none placed the netlist is
+        // exactly as it was, and rerouting would move routing that is
+        // already good -- in a replay, routing that was meant to be frozen.
+        if (placed > 0 && !touched_nets.empty()) {
 
             // Rip up only the touched source nets (minimal perturbation).  Each
             // buffer's input is a new sink on its source net, so rerouting just

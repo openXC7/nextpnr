@@ -981,6 +981,7 @@ void XilinxImpl::apply_prerouted()
             continue;
         }
         NetInfo *ni = it->second.get();
+        std::vector<std::pair<WireId, PipId>> previous;   // the route this replaces, if any
         if (!ni->wires.empty()) {
             // route_clocks got here first.  The reference's tree replaces
             // its work even when it reached every sink: a clock with a sink
@@ -989,11 +990,18 @@ void XilinxImpl::apply_prerouted()
             // the new leaves to the locked tree.
             log_info("Pre-routed: net '%s' was routed already (%zu wires); the reference route replaces it\n",
                      net_id.c_str(ctx), ni->wires.size());
-            std::vector<WireId> ws;
+            // Remember it in the order the router built it -- a wire's pip
+            // can only be re-bound once its source wire is back -- so that a
+            // reference route which turns out to collide leaves the net as
+            // it found it rather than unrouted.
             for (auto &w : ni->wires)
-                ws.push_back(w.first);
-            for (WireId w : ws)
-                ctx->unbindWire(w);
+                previous.push_back(std::make_pair(w.first, w.second.pip));
+            std::stable_sort(previous.begin(), previous.end(),
+                             [&](const std::pair<WireId, PipId> &a, const std::pair<WireId, PipId> &b) {
+                                 return (a.second == PipId()) && (b.second != PipId());
+                             });
+            for (auto &w : previous)
+                ctx->unbindWire(w.first);
         }
         std::vector<std::string> strs;
         boost::split(strs, line.substr(tab + 1), boost::is_any_of(";"));
@@ -1018,6 +1026,16 @@ void XilinxImpl::apply_prerouted()
         if (!ok) {
             for (auto p : pips_bound) ctx->unbindPip(p);
             for (auto w : wires_bound) ctx->unbindWire(w);
+            // Put back whatever route_clocks had made, so a net this pass
+            // cannot improve is no worse for having been tried.
+            for (auto &w : previous) {
+                if (ctx->getBoundWireNet(w.first) != nullptr)
+                    continue;
+                if (w.second == PipId())
+                    ctx->bindWire(w.first, ni, STRENGTH_LOCKED);
+                else if (ctx->checkPipAvail(w.second))
+                    ctx->bindPip(w.second, ni, STRENGTH_LOCKED);
+            }
             collided++;
             continue;
         }
