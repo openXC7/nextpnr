@@ -1112,6 +1112,26 @@ struct FasmBackend
         // LVCMOS .IN feature, with opposite polarity, so describing both halves
         // makes the second clear what the first set and fasm2frames rejects the
         // pair.  Vivado emits no .IN for such a tile at all.
+        auto partner_pad_is_output = [&]() {
+            Loc bl = ctx->getBelLocation(pad->bel);
+            for (auto other : ctx->getBelsByTile(bl.x, bl.y)) {
+                if (other == pad->bel)
+                    continue;
+                CellInfo *oc = ctx->getBoundBelCell(other);
+                if (oc == nullptr || oc->type != id_PAD)
+                    continue;
+                NetInfo *on = oc->getPort(id_PAD);
+                if (on == nullptr)
+                    continue;
+                for (auto &u : on->users)
+                    if (boost::contains(u.cell->type.str(ctx), "OUTBUF"))
+                        return true;
+                if (on->driver.cell != nullptr && boost::contains(on->driver.cell->type.str(ctx), "OUTBUF"))
+                    return true;
+            }
+            return false;
+        };
+
         auto partner_pad_is_input = [&]() {
             Loc bl = ctx->getBelLocation(pad->bel);
             for (auto other : ctx->getBelsByTile(bl.x, bl.y)) {
@@ -1368,15 +1388,21 @@ struct FasmBackend
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW");
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
                 if (yLoc == 0) {
-                    // The glue and .IN are skipped when the other half also
-                    // receives: they share a bit with IOB_Y1's .IN, and for a
-                    // tile of two pure inputs Vivado writes neither -- only
-                    // the IN_ONLY keys.  Taken from bit2fasm of the same SoC
-                    // (LIOB18_X81Y6), not inferred.
-                    if (!partner_pad_is_input()) {
-                        write_bit("IBUF_HP_BANK_GLUE");
-                        write_bit("LVCMOS12_LVCMOS15.IN");
-                    }
+                    // Each half has its own pair of enable bits: IOB_Y0's
+                    // .IN is 38_126 and 39_127, IOB_Y1's is 38_00 and 39_01.
+                    // They were once skipped here when the partner received
+                    // too, because bit2fasm of a working Vivado bitstream
+                    // showed neither -- but it could not show them: the
+                    // database's IOB_Y0 .IN carried a spurious !39_01 from a
+                    // fuzz where the partner was unused, so the feature never
+                    // matched a tile whose IOB_Y1 also receives.  Reading the
+                    // frames instead, Vivado sets all four bits.
+                    write_bit("IBUF_HP_BANK_GLUE");
+                    // The enable itself is written below, once, in the
+                    // LVCMOS12_LVCMOS15_LVCMOS18 spelling.  The database
+                    // gives LVCMOS12_LVCMOS15.IN the same two bits and a
+                    // stale !39_01 besides, so writing both would clear the
+                    // partner's enable and say the same thing twice.
                     write_bit("LVCMOS12_LVCMOS15_SSTL12_SSTL135_SSTL15.IN_ONLY");
                 } else {
                     write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY");
@@ -1450,23 +1476,13 @@ struct FasmBackend
                 // has no IBUF_HP_BANK_GLUE key at all, so there every
                 // receiving half describes its own .IN -- the HyperRAM data
                 // pairs on the Sonata are LVCMOS18 inouts on an HR bank.
-                bool halves_share_in_bit = is_hp_bank;
-                if (is_low_volt_lvcmos && !halves_share_in_bit) {
+                // Each receiving half describes its own .IN.  The pair
+                // of bits per half do not overlap -- IOB_Y0 has 38_126 and
+                // 39_127, IOB_Y1 has 38_00 and 39_01 -- so two inputs in one
+                // tile need no arbitration, once the database stops claiming
+                // IOB_Y0's .IN requires 39_01 clear.
+                if (is_low_volt_lvcmos)
                     write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
-                } else if (is_low_volt_lvcmos) {
-                    if (!partner_pad_is_input())
-                        write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
-                    else if (is_output) {
-                        // Both halves drive as well as receive -- SD cmd and
-                        // data.  Vivado sets the shared bit once, from IOB_Y1,
-                        // and gives IOB_Y0 the bank glue (LIOB18_X81Y10).
-                        if (yLoc == 1)
-                            write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
-                        else
-                            write_bit("IBUF_HP_BANK_GLUE");
-                    }
-                    // else: two pure inputs, and Vivado describes neither.
-                }
             } else /* is_diff */ {
                 if (is_riob18) {
                     // The high-performance differential receiver is configured
