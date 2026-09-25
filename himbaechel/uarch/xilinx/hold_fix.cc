@@ -452,6 +452,7 @@ void XilinxImpl::fixup_hold()
         };
         std::vector<Pending> pending;
         pool<IdString> touched_nets;
+        int no_exit = 0;
         for (const auto &t : ft) {
             if (!ctx->nets.count(t.net))
                 continue;
@@ -487,6 +488,25 @@ void XilinxImpl::fixup_hold()
             sink->disconnectPort(t.sink_port);
             sink->connectPort(t.sink_port, buf_out);
 
+            // The buffer is a fabric consumer of the source, which an O5, a
+            // carry sum or a 5FF Q can only reach through its position's one
+            // output mux.  If the source's slice has no exit left (a 5FF whose
+            // Q already uses it), the buffer would make an unroutable site:
+            // leave this arc alone rather than hand it to the router.
+            if (net->driver.cell->bel != BelId() && !isBelLocationValid(net->driver.cell->bel)) {
+                if (getenv("HOLDFIX_VERBOSE"))
+                    log_info("Hold-fix: %s -> %s.%s left: the source's slice has no output mux free for a buffer\n",
+                             ctx->nameOf(net), ctx->nameOf(sink), t.sink_port.c_str(ctx));
+                sink->disconnectPort(t.sink_port);
+                sink->connectPort(t.sink_port, net);
+                buf->disconnectPort(id_A1);
+                buf->disconnectPort(id_O6);
+                ctx->cells.erase(buf->name);
+                ctx->nets.erase(buf_out->name);
+                no_exit++;
+                continue;
+            }
+
             pending.push_back({buf, t.sink_cell, ctx->getBelLocation(sink->bel)});
             touched_nets.insert(net->name);
             total_buffers++;
@@ -494,6 +514,7 @@ void XilinxImpl::fixup_hold()
         // 3. Place and reroute the feedthrough buffers (if any remained after
         //    detours).  Detours have already re-bound their routing directly.
         int placed = 0, failed = 0;
+        pool<IdString> unbuffered_nets;   // nets whose buffer did not land
         if (!pending.empty()) {
             // Reindex and re-tag so get_tags() (used by bindBel ->
             // notifyBelChange and isBelLocationValid) sees the new cells.
@@ -526,9 +547,30 @@ void XilinxImpl::fixup_hold()
                 ctx->cells.erase(p.buf->name);
                 if (buf_out)
                     ctx->nets.erase(buf_out->name);
+                // The net is as it was, so it is not one of the touched: a
+                // net whose buffer never landed must not be ripped up.
+                if (orig != nullptr)
+                    unbuffered_nets.insert(orig->name);
+            }
+            for (IdString nn : unbuffered_nets) {
+                bool still_buffered = false;
+                for (auto &q : pending)
+                    if (ctx->cells.count(q.buf->name) && q.buf->getPort(id_A1) != nullptr &&
+                        q.buf->getPort(id_A1)->name == nn)
+                        still_buffered = true;
+                if (!still_buffered)
+                    touched_nets.erase(nn);
             }
             if (failed)
                 log_warning("Hold-fix pass %d: %d buffer(s) had no free LUT bel nearby, skipped.\n", pass, failed);
+        }
+        if (no_exit)
+            log_warning("Hold-fix pass %d: %d arc(s) left unbuffered, their source's slice has no output mux free.\n",
+                        pass, no_exit);
+        // Only if a buffer actually landed: with none placed the netlist is
+        // exactly as it was, and rerouting would move routing that is
+        // already good -- in a replay, routing that was meant to be frozen.
+        if (placed > 0 && !touched_nets.empty()) {
 
             // Rip up only the touched source nets (minimal perturbation).  Each
             // buffer's input is a new sink on its source net, so rerouting just
@@ -541,7 +583,30 @@ void XilinxImpl::fixup_hold()
             // curr_cong test), so congestion resolves without a global rip-up;
             // empty-tile placement keeps the new arcs clear of unresolvable
             // reserved-wire collisions, which is what deadlocked an earlier try.
-            for (IdString nn : touched_nets) {
+            // ...plus the nets driven from the same tile as a touched net's
+            // source: a touched net's only exit (a LUT5's O5 has one, the
+            // slice's output mux) may be held by a neighbour's first-pass
+            // route, which the incremental reroute cannot take back.  Locked
+            // routes (a replay's reference) stay.
+            pool<int> src_tiles;
+            for (IdString nn : touched_nets)
+                if (ctx->nets.count(nn) && ctx->nets.at(nn)->driver.cell != nullptr &&
+                    ctx->nets.at(nn)->driver.cell->bel != BelId())
+                    src_tiles.insert(ctx->nets.at(nn)->driver.cell->bel.tile);
+            pool<IdString> ripup(touched_nets.begin(), touched_nets.end());
+            for (auto &n : ctx->nets) {
+                NetInfo *ni = n.second.get();
+                if (ni->driver.cell == nullptr || ni->driver.cell->bel == BelId() ||
+                    !src_tiles.count(ni->driver.cell->bel.tile))
+                    continue;
+                bool locked = false;
+                for (auto &w : ni->wires)
+                    if (w.second.strength >= STRENGTH_LOCKED)
+                        locked = true;
+                if (!locked)
+                    ripup.insert(n.first);
+            }
+            for (IdString nn : ripup) {
                 if (!ctx->nets.count(nn))
                     continue;
                 NetInfo *net = ctx->nets.at(nn).get();

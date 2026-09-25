@@ -170,6 +170,11 @@ struct XilinxImpl : HimbaechelAPI
     void apply_loc_constraints();
     void prePlace() override;
     void preRoute() override;
+    void apply_prerouted();
+    void apply_preplaced(bool verbose = true);
+    void apply_holdbufs();
+    void close_routed_tiles();
+    pool<int> frozen_tiles; // tiles holding -o preplaced cells: no other cell may go there
     void postPlace() override;
     void postRoute() override;
     void postRouteArchInfo() override;

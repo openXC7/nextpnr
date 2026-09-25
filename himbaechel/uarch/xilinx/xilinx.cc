@@ -31,6 +31,8 @@
 #include "router2.h"
 
 #include "xilinx.h"
+#include <fstream>
+#include <boost/algorithm/string.hpp>
 
 #include "himbaechel_helpers.h"
 
@@ -79,6 +81,16 @@ po::options_description XilinxImpl::getUArchOptions()
     specific.add_options()("hold-fix", po::value<std::string>()->implicit_value(""),
                            "after routing, fix hold-time (min-delay) violations: small deficits by a routing "
                            "detour, larger ones by a feedthrough LUT; optional value sets the max passes (default 8)");
+    specific.add_options()("preplaced", po::value<std::string>(),
+                           "before placing, pin the cells named in this file to the bels they had in a reference "
+                           "build (scripts/routing_dump.py from that build's --write JSON), packer-made cells included");
+    specific.add_options()("prerouted", po::value<std::string>(),
+                           "before routing, give the nets named in this file the routes they had in a reference "
+                           "build (scripts/routing_dump.py from that build's --write JSON), locked; the router "
+                           "then routes only what is new -- a frozen routing, for adding to a routed design");
+    specific.add_options()("holdbufs", po::value<std::string>(),
+                           "before placing, re-create the reference build's hold-fix feedthrough buffers listed in "
+                           "this file (scripts/routing_dump.py), so -o preplaced / -o prerouted replay them too");
     specific.add_options()("hold-detour-max", po::value<double>(),
                            "hold deficit (ns) up to which a routing detour is used instead of a feedthrough LUT "
                            "(default 0.5)");
@@ -615,8 +627,174 @@ void XilinxImpl::apply_loc_constraints()
         log_info("Placed %d cell(s) from LOC constraints.\n", placed);
 }
 
+// -o preplaced=<file>: one line per cell, "<cell name>\t<bel name>", as
+// scripts/routing_dump.py writes from a reference build's --write JSON.
+// Applied after packing, so the packer's own cells (split LUTs, constant
+// LUTs, feed-throughs) are pinned along with the netlist's; the placer's
+// constraint pass binds them as a set.  A cell the file names that this
+// design lacks is noted and skipped.
+void XilinxImpl::apply_preplaced(bool verbose)
+{
+    const ArchArgs &args = ctx->args;
+    if (!args.options.count("preplaced"))
+        return;
+    std::string path = args.options.at("preplaced").as<std::string>();
+    std::ifstream in(path);
+    if (!in)
+        log_error("cannot read preplaced file '%s'\n", path.c_str());
+    int pinned = 0, missing = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+        auto tab = line.find('\t');
+        if (tab == std::string::npos)
+            continue;
+        auto it = ctx->cells.find(ctx->id(line.substr(0, tab)));
+        if (it == ctx->cells.end()) {
+            if (verbose && missing < 40)
+                log_info("Pre-placed: no cell '%s' in this design\n", line.substr(0, tab).c_str());
+            missing++;
+            continue;
+        }
+        it->second->attrs[ctx->id("BEL")] = line.substr(tab + 1);
+        pinned++;
+        // The pinned cells' tiles are theirs alone: a new cell placed beside
+        // them would need site routing (bypass pins, output muxes) the
+        // reference routes may already lock, and the router cannot rip those up.
+        BelId bel = ctx->getBelByNameStr(line.substr(tab + 1));
+        if (bel != BelId())
+            frozen_tiles.insert(bel.tile);
+    }
+    if (verbose)
+        log_info("Pre-placed: %d cell(s) pinned to their reference bel, %d not in this design; %d tile(s) closed to other cells.\n",
+                 pinned, missing, int(frozen_tiles.size()));
+}
+
+// -o holdbufs=<file>: one line per hold-fix feedthrough buffer of the
+// reference build, "<cell>\t<input net>\t<output net>\t<sink cell>\t<sink port>"
+// (scripts/routing_dump.py writes it).  Each is re-created here, before
+// placement, exactly as fixup_hold() makes them, so the reference's bels
+// and routes name only cells and nets this design has; the hold-fix then
+// finds nothing to do on the replayed part.
+void XilinxImpl::apply_holdbufs()
+{
+    const ArchArgs &args = ctx->args;
+    if (!args.options.count("holdbufs"))
+        return;
+    std::string path = args.options.at("holdbufs").as<std::string>();
+    std::ifstream in(path);
+    if (!in)
+        log_error("cannot read holdbufs file '%s'\n", path.c_str());
+    int made = 0, skipped = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+        std::vector<std::string> f;
+        boost::split(f, line, boost::is_any_of("\t"));
+        if (f.size() != 5)
+            continue;
+        IdString buf_name = ctx->id(f[0]), in_net = ctx->id(f[1]), out_net = ctx->id(f[2]), sink_name = ctx->id(f[3]),
+                 sink_port = ctx->id(f[4]);
+        if (!ctx->nets.count(in_net) || !ctx->cells.count(sink_name) || ctx->cells.count(buf_name) ||
+            ctx->nets.count(out_net)) {
+            log_info("holdbufs: %s skipped (net %s, sink %s: not as in the reference)\n", f[0].c_str(), f[1].c_str(),
+                     f[3].c_str());
+            skipped++;
+            continue;
+        }
+        NetInfo *net = ctx->nets.at(in_net).get();
+        CellInfo *sink = ctx->cells.at(sink_name).get();
+        if (sink->getPort(sink_port) != net) {
+            log_info("holdbufs: %s skipped (%s.%s is not on %s)\n", f[0].c_str(), f[3].c_str(), f[4].c_str(),
+                     f[1].c_str());
+            skipped++;
+            continue;
+        }
+        NetInfo *buf_out = ctx->createNet(out_net);
+        CellInfo *buf = ctx->createCell(buf_name, id_SLICE_LUTX);
+        buf->addInput(id_A1);
+        buf->addOutput(id_O6);
+        buf->params[id_INIT] = Property(2, 2);
+        buf->attrs[id_X_ORIG_TYPE] = std::string("LUT1");
+        buf->attrs[ctx->id("X_ORIG_PORT_A1")] = std::string("I0");
+        buf->attrs[ctx->id("X_ORIG_PORT_O6")] = std::string("O");
+        buf->connectPort(id_A1, net);
+        buf->connectPort(id_O6, buf_out);
+        sink->disconnectPort(sink_port);
+        sink->connectPort(sink_port, buf_out);
+        made++;
+    }
+    log_info("Hold buffers: %d re-created from the reference, %d skipped.\n", made, skipped);
+    if (made) {
+        ctx->assignArchInfo();
+        assign_cell_tags();
+    }
+}
+
+// With -o prerouted, the logic and block-RAM tiles a reference route passes
+// through are closed to new cells as well: a route-through LUT, or a block
+// RAM's address cascade used as a way in to the block RAM below, is a site
+// resource a new cell there would need.
+void XilinxImpl::close_routed_tiles()
+{
+    const ArchArgs &args = ctx->args;
+    if (!args.options.count("prerouted"))
+        return;
+    std::ifstream in(args.options.at("prerouted").as<std::string>());
+    std::string line;
+    int closed = 0;
+    while (std::getline(in, line)) {
+        auto tab = line.find('\t');
+        if (tab == std::string::npos)
+            continue;
+        size_t pos = tab + 1;
+        while (pos < line.size()) {
+            size_t semi = line.find(';', pos);
+            if (semi == std::string::npos)
+                semi = line.size();
+            // a wire is "<tile>/<name>", a pip "<tile>/<dst>/<src>", a strength a number: only wires wanted
+            std::string tok = line.substr(pos, semi - pos);
+            pos = semi + 1;
+            if (tok.empty() || std::count(tok.begin(), tok.end(), '/') != 1)
+                continue;
+            WireId w = ctx->getWireByName(IdStringList::parse(ctx, tok));
+            if (w == WireId() || w.tile < 0)
+                continue;
+            auto close = [&](int tile) {
+                if (tile < 0 || tile >= ctx->chip_info->width * ctx->chip_info->height)
+                    return;
+                BelId probe;
+                probe.tile = tile;
+                probe.index = 0;
+                if ((is_logic_tile(probe) || is_bram_tile(probe)) && !frozen_tiles.count(tile)) {
+                    frozen_tiles.insert(tile);
+                    closed++;
+                }
+            };
+            close(w.tile);
+            // An interconnect tile's pin-feeding wires (bypass, fan-out, input
+            // muxes, control) belong to the site tiles beside it: a locked one
+            // -- a bounce through BYP_ALT7 -- can be the only way into a pin
+            // (DX) a new cell there would need.
+            std::string wn = tok.substr(tok.find('/') + 1);
+            if (wn.rfind("BYP", 0) == 0 || wn.rfind("FAN", 0) == 0 || wn.rfind("IMUX", 0) == 0 ||
+                wn.rfind("CTRL", 0) == 0 || wn.rfind("GFAN", 0) == 0) {
+                int x, y;
+                tile_xy(ctx->chip_info, w.tile, x, y);
+                if (x > 0)
+                    close(tile_by_xy(ctx->chip_info, x - 1, y));
+                if (x + 1 < ctx->chip_info->width)
+                    close(tile_by_xy(ctx->chip_info, x + 1, y));
+            }
+        }
+    }
+    if (closed)
+        log_info("Pre-routed: %d more tile(s) closed to new cells, a reference route passes through them.\n", closed);
+}
+
 void XilinxImpl::prePlace()
 {
+    apply_holdbufs();
+    apply_preplaced();
+    close_routed_tiles();
     // Before placement, so the measured table reaches the placer (through
     // predictDelay and criticality) as well as the router's A* guidance.  On by
     // default: the measured matrix converges the router (rocket goes from 672
@@ -809,6 +987,131 @@ void XilinxImpl::preRoute()
     }
     find_source_sink_locs();
     route_clocks();
+    apply_prerouted();
+}
+
+// -o prerouted=<file>: one line per net, "<net name>\t<wire>;<pip>;<strength>;..."
+// as nextpnr's own ROUTING attribute spells it (a source wire has an empty
+// pip).  A net whose name and driver survive packing gets its reference
+// route bound with STRENGTH_LOCKED; a net that has gone, or whose route
+// collides with something already bound (the clocks are routed first), is
+// left to the router with a note.
+void XilinxImpl::apply_prerouted()
+{
+    const ArchArgs &args = ctx->args;
+    if (!args.options.count("prerouted"))
+        return;
+    std::string path = args.options.at("prerouted").as<std::string>();
+    std::ifstream in(path);
+    if (!in)
+        log_error("cannot read prerouted file '%s'\n", path.c_str());
+    int bound_nets = 0, missing = 0, collided = 0, pruned = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+        auto tab = line.find('\t');
+        if (tab == std::string::npos)
+            continue;
+        IdString net_id = ctx->id(line.substr(0, tab));
+        auto it = ctx->nets.find(net_id);
+        if (it == ctx->nets.end()) {
+            if (missing < 10)
+                log_info("Pre-routed: net '%s' is not in this design\n", net_id.c_str(ctx));
+            missing++;
+            continue;
+        }
+        NetInfo *ni = it->second.get();
+        std::vector<std::pair<WireId, PipId>> previous;   // the route this replaces, if any
+        if (!ni->wires.empty()) {
+            // route_clocks got here first.  The reference's tree replaces
+            // its work even when it reached every sink: a clock with a sink
+            // added since (a probe) would otherwise get a fresh tree, and
+            // the arrival at every reference leaf with it.  The router adds
+            // the new leaves to the locked tree.
+            log_info("Pre-routed: net '%s' was routed already (%zu wires); the reference route replaces it\n",
+                     net_id.c_str(ctx), ni->wires.size());
+            // Remember it in the order the router built it -- a wire's pip
+            // can only be re-bound once its source wire is back -- so that a
+            // reference route which turns out to collide leaves the net as
+            // it found it rather than unrouted.
+            for (auto &w : ni->wires)
+                previous.push_back(std::make_pair(w.first, w.second.pip));
+            std::stable_sort(previous.begin(), previous.end(),
+                             [&](const std::pair<WireId, PipId> &a, const std::pair<WireId, PipId> &b) {
+                                 return (a.second == PipId()) && (b.second != PipId());
+                             });
+            for (auto &w : previous)
+                ctx->unbindWire(w.first);
+        }
+        std::vector<std::string> strs;
+        boost::split(strs, line.substr(tab + 1), boost::is_any_of(";"));
+        std::vector<PipId> pips_bound;
+        std::vector<WireId> wires_bound;
+        bool ok = true;
+        for (size_t i = 0; i + 2 < strs.size(); i += 3) {
+            const std::string &wire = strs[i], &pip = strs[i + 1];
+            if (pip.empty()) {
+                WireId w = ctx->getWireByNameStr(wire);
+                if (w == WireId() || (ctx->getBoundWireNet(w) != nullptr && ctx->getBoundWireNet(w) != ni)) { ok = false; break; }
+                if (ctx->getBoundWireNet(w) == nullptr) { ctx->bindWire(w, ni, STRENGTH_LOCKED); wires_bound.push_back(w); }
+            } else {
+                PipId p = ctx->getPipByNameStr(pip);
+                if (p == PipId()) { ok = false; break; }
+                WireId dst = ctx->getPipDstWire(p);
+                if (ctx->getBoundWireNet(dst) != nullptr) { ok = false; break; }
+                ctx->bindPip(p, ni, STRENGTH_LOCKED);
+                pips_bound.push_back(p);
+            }
+        }
+        if (!ok) {
+            for (auto p : pips_bound) ctx->unbindPip(p);
+            for (auto w : wires_bound) ctx->unbindWire(w);
+            // Put back whatever route_clocks had made, so a net this pass
+            // cannot improve is no worse for having been tried.
+            for (auto &w : previous) {
+                if (ctx->getBoundWireNet(w.first) != nullptr)
+                    continue;
+                if (w.second == PipId())
+                    ctx->bindWire(w.first, ni, STRENGTH_LOCKED);
+                else if (ctx->checkPipAvail(w.second))
+                    ctx->bindPip(w.second, ni, STRENGTH_LOCKED);
+            }
+            collided++;
+            continue;
+        }
+        // Keep only what leads from the source to a sink this design has:
+        // a reference route can end at a hold-fix buffer that does not exist
+        // yet, and a dangling branch fails the router's tree check.
+        pool<WireId> keep;
+        for (auto &usr : ni->users) {
+            for (int i = 0; i < ctx->getNetinfoSinkWireCount(ni, usr); i++) {
+                WireId cur = ctx->getNetinfoSinkWire(ni, usr, i);
+                while (cur != WireId() && ni->wires.count(cur) && !keep.count(cur)) {
+                    keep.insert(cur);
+                    PipId p = ni->wires.at(cur).pip;
+                    if (p == PipId())
+                        break;
+                    cur = ctx->getPipSrcWire(p);
+                }
+            }
+        }
+        std::vector<WireId> drop;
+        for (auto &w : ni->wires)
+            if (!keep.count(w.first))
+                drop.push_back(w.first);
+        for (WireId w : drop) {
+            PipId p = ni->wires.at(w).pip;
+            if (p != PipId())
+                ctx->unbindPip(p);
+            else
+                ctx->unbindWire(w);
+        }
+        if (!drop.empty())
+            pruned += drop.size();
+        bound_nets++;
+    }
+    log_info("Pre-routed: %d net(s) given their reference route (%d dangling wire(s) pruned), %d not in this design, "
+             "%d collided and left to the router.\n",
+             bound_nets, pruned, missing, collided);
 }
 
 void XilinxImpl::postRoute()
@@ -1120,9 +1423,12 @@ void XilinxImpl::find_source_sink_locs()
             std::queue<WireId> visit;
             dict<WireId, WireId> backtrace;
             int iter = 0;
-            // as this is a best-effort optimisation to slightly improve routing,
-            // don't spend too long with a nice low iteration limit
-            const int iter_max = 500;
+            // A best-effort optimisation, so bounded -- but generously: a
+            // BSCAN's pins leave the CFG_CENTER tile further than 500 wires
+            // of search, and a source with no exit location gets a bounding
+            // box its route cannot fit, which costs the router a failed
+            // bounded search per arc (seconds each, on every routing pass).
+            const int iter_max = 20000;
             visit.push(source);
             while (!visit.empty() && iter < iter_max) {
                 ++iter;
