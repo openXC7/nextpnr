@@ -101,13 +101,23 @@ void XilinxImpl::init_database(Arch *arch)
     // (non-XT) Virtex-7 names such as xc7v585t; openXC7/prjxray-db carries
     // no plain xc7v part -- virtex7/ holds xc7vx485t alone -- so nothing
     // that could previously be built stops building.
-    std::regex devicere = std::regex("(xc7[azks]\\d+t?|xc7vx\\d+t?)([a-z0-9]*)(?:-([0-9]L?))?");
+    //
+    // The class also gains the Zynq-7000S dies, spelled out ahead of the
+    // generic class because there the trailing s is part of the die name:
+    // xc7z007s is a die, while xc7z030sbg485-1's s belongs to the package
+    // (sbg485).  Without them xc7z007sclg400-1 parses as die "xc7z007" with
+    // package "sclg400" -- neither the die's chipdb nor a real package.
+    std::regex devicere = std::regex("(xc7z007s|xc7z012s|xc7z014s|xc7[azks]\\d+t?|xc7vx\\d+t?)([a-z0-9]*)(?:-([0-9]L?))?");
     if (!std::regex_match(args.device, match, devicere)) {
         log_error("Invalid device %s\n", args.device.c_str());
     }
     std::string die = match[1].str();
     if (die == "xc7a35t")
         die = "xc7a50t";
+    // xc7z007s is the xc7z010 die with fewer resources enabled, and has no
+    // chipdb of its own (see prjxray-db/zynq7/mapping/devices.yaml).
+    if (die == "xc7z007s")
+        die = "xc7z010";
     arch->load_chipdb(stringf("xilinx/chipdb-%s.bin", die.c_str()));
     std::string package = match[2].str();
     // A bare die name carries no package, and set_package("") is not the
