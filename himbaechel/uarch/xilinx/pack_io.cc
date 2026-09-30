@@ -1237,8 +1237,22 @@ void XC7Packer::pack_idelayctrl()
             ioctrl_sites.insert(get_ioctrl_site(ctx->getBelByNameStr(ci->attrs.at(id_X_IO_BEL).as_string())));
         }
     }
-    if (ioctrl_sites.empty())
-        log_error("Found IDELAYCTRL but no I/ODELAYs\n");
+    const bool design_has_no_iodelays = ioctrl_sites.empty();
+    if (design_has_no_iodelays) {
+        // An IDELAYCTRL in a design with no I/ODELAYs is useless but legal --
+        // Vivado places it and drives RDY rather than rejecting the design, and a
+        // design can legitimately arrive in that state after optimisation removed
+        // the last delay element. Warn, rename the cell so it still gets placed,
+        // and stop here. (port of nextpnr-xilinx 06769c05)
+        //
+        // The early return is load-bearing, not tidiness: falling through would
+        // leave dup_rdys empty, and the RDY-AND tree below calls dup_rdys.front().
+        log_warning("Found IDELAYCTRL '%s' but no I/ODELAYs; leaving it unreplicated\n",
+                    ctx->nameOf(idelayctrl));
+        ioctrl_rules[id_IDELAYCTRL].new_type = id_IDELAYCTRL_IDELAYCTRL;
+        generic_xform(ioctrl_rules);
+        return;
+    }
     NetInfo *rdy = idelayctrl->getPort(id_RDY);
     idelayctrl->disconnectPort(id_RDY);
     std::vector<NetInfo *> dup_rdys;
