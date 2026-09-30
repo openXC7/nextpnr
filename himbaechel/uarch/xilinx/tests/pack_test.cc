@@ -283,3 +283,69 @@ TEST_F(XilinxPackTestK325t, pack_io_pcie_retype_preplace)
     EXPECT_NE(ci->bel, BelId());
     EXPECT_EQ(ctx->getBelType(ci->bel), id_PCIE_2_1_PCIE_2_1);
 }
+
+// Helper: a RAMB36E1 as yosys emits it for a single-port-width memory.
+static CellInfo *create_ramb36e1(Context *ctx, const char *name, int write_width_a, int read_width_b)
+{
+    CellInfo *ci = ctx->createCell(ctx->id(name), id_RAMB36E1);
+    for (int i = 0; i < 16; i++) {
+        ci->addInput(ctx->idf("ADDRARDADDR[%d]", i));
+        ci->addInput(ctx->idf("ADDRBWRADDR[%d]", i));
+    }
+    for (int i = 0; i < 32; i++) {
+        ci->addInput(ctx->idf("DIADI[%d]", i));
+        ci->addInput(ctx->idf("DIBDI[%d]", i));
+        ci->addOutput(ctx->idf("DOADO[%d]", i));
+        ci->addOutput(ctx->idf("DOBDO[%d]", i));
+    }
+    for (int i = 0; i < 4; i++) {
+        ci->addInput(ctx->idf("DIPADIP[%d]", i));
+        ci->addInput(ctx->idf("DIPBDIP[%d]", i));
+        ci->addOutput(ctx->idf("DOPADOP[%d]", i));
+        ci->addOutput(ctx->idf("DOPBDOP[%d]", i));
+        ci->addInput(ctx->idf("WEA[%d]", i));
+    }
+    for (int i = 0; i < 8; i++)
+        ci->addInput(ctx->idf("WEBWE[%d]", i));
+    for (auto p : {"CLKARDCLK", "CLKBWRCLK", "ENARDEN", "ENBWREN", "REGCEAREGCE", "REGCEB", "RSTRAMARSTRAM",
+                   "RSTRAMB", "RSTREGARSTREG", "RSTREGB"})
+        ci->addInput(ctx->id(p));
+    ci->params[ctx->id("RAM_MODE")] = Property("TDP");
+    ci->params[id_WRITE_WIDTH_A] = Property(write_width_a);
+    ci->params[ctx->id("READ_WIDTH_B")] = Property(read_width_b);
+    return ci;
+}
+
+TEST_F(XilinxPackTest, pack_bram_ramb36_width9_parity_on_both_halves)
+{
+    // At width 9 a RAMB36E1 keeps the ninth bit of a word in the lower
+    // RAMB18 at even addresses and in the upper one at odd addresses, and the
+    // upper half reads it from DIPADIP1. Left unconnected (yosys drives only
+    // DIPADIP[0]), every odd address reads its parity bit back as 0.
+    CellInfo *ci = create_ramb36e1(ctx, "ram_x9", 9, 9);
+    NetInfo *parity = ctx->createNet(ctx->id("parity"));
+    ci->connectPort(ctx->id("DIPADIP[0]"), parity);
+
+    XC7Packer p(ctx, xil);
+    p.pack_bram();
+
+    EXPECT_EQ(ci->type, id_RAMB36E1_RAMB36E1);
+    EXPECT_EQ(ci->getPort(id_DIPADIP0), parity);
+    EXPECT_EQ(ci->getPort(id_DIPADIP1), parity);
+}
+
+TEST_F(XilinxPackTest, pack_bram_ramb36_width18_parity_untouched)
+{
+    // At width 18 the two parity pins carry two different bits of the word.
+    CellInfo *ci = create_ramb36e1(ctx, "ram_x18", 18, 18);
+    NetInfo *p0 = ctx->createNet(ctx->id("p0"));
+    NetInfo *p1 = ctx->createNet(ctx->id("p1"));
+    ci->connectPort(ctx->id("DIPADIP[0]"), p0);
+    ci->connectPort(ctx->id("DIPADIP[1]"), p1);
+
+    XC7Packer p(ctx, xil);
+    p.pack_bram();
+
+    EXPECT_EQ(ci->getPort(id_DIPADIP0), p0);
+    EXPECT_EQ(ci->getPort(id_DIPADIP1), p1);
+}
