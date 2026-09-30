@@ -209,7 +209,16 @@ void Arch::late_init()
 BelId Arch::getBelByName(IdStringList name) const
 {
     NPNR_ASSERT(name.size() == 2);
-    int tile = tile_name2idx.at(name[0]);
+    // A name that matches no tile must yield an empty BelId, not an
+    // uncaught dict::at() -- the callers have a diagnostic for the empty
+    // case (e.g. placer1.cc "No Bel named ... located for this chip")
+    // that an aborting lookup never lets run. The bel half below already
+    // returns BelId() on a miss; the tile half needs the same guard.
+    auto tile_it = tile_name2idx.find(name[0]);
+    const bool tile_name_is_unknown = (tile_it == tile_name2idx.end());
+    if (tile_name_is_unknown)
+        return BelId();
+    const int tile = tile_it->second;
     const auto &tdata = chip_tile_info(chip_info, tile);
     for (int bel = 0; bel < tdata.bels.ssize(); bel++) {
         if (IdString(tdata.bels[bel].name) == name[1])
@@ -343,7 +352,13 @@ void Arch::assignArchInfo()
 WireId Arch::getWireByName(IdStringList name) const
 {
     NPNR_ASSERT(name.size() == 2);
-    int tile = tile_name2idx.at(name[0]);
+    // Same guard as getBelByName: unknown tile means empty WireId, not an
+    // uncaught dict::at().
+    auto tile_it = tile_name2idx.find(name[0]);
+    const bool tile_name_is_unknown = (tile_it == tile_name2idx.end());
+    if (tile_name_is_unknown)
+        return WireId();
+    const int tile = tile_it->second;
     const auto &tdata = chip_tile_info(chip_info, tile);
     for (int wire = 0; wire < tdata.wires.ssize(); wire++) {
         if (IdString(tdata.wires[wire].name) == name[1])
@@ -360,7 +375,13 @@ IdStringList Arch::getWireName(WireId wire) const
 PipId Arch::getPipByName(IdStringList name) const
 {
     NPNR_ASSERT(name.size() == 3 || (name.size() == 4 && name[3] == id("INV")));
-    const int tile = tile_name2idx.at(name[0]);
+    // Same guard as getBelByName: unknown tile means empty PipId, not an
+    // uncaught dict::at().
+    auto tile_it = tile_name2idx.find(name[0]);
+    const bool tile_name_is_unknown = (tile_it == tile_name2idx.end());
+    if (tile_name_is_unknown)
+        return PipId();
+    const int tile = tile_it->second;
     const auto &tdata = chip_tile_info(chip_info, tile);
     for (int pip = 0; pip < tdata.pips.ssize(); pip++) {
         if (IdString(tdata.wires[tdata.pips[pip].dst_wire].name) == name[1] &&
