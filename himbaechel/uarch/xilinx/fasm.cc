@@ -21,6 +21,7 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/range/adaptor/reversed.hpp>
 
+#include <cmath>
 #include <fstream>
 #include <regex>
 
@@ -2595,11 +2596,22 @@ struct FasmBackend
         }
         pop();
 
-        auto clkfbout_mult = (int)float_or_default(ci, "CLKFBOUT_MULT_F", 5.000);
-        if (63 < clkfbout_mult)
-            log_error("MMCME2_ADV: CLKFBOUT_MULT_F must not be greater than 63");
-        if (0 == clkfbout_mult)
-            log_error("MMCME2_ADV: CLKFBOUT_MULT_F must not be 0");
+        double clkfbout_mult_f = float_or_default(ci, "CLKFBOUT_MULT_F", 5.000);
+        // lk_table[] holds 63 rows; the 64-row filter_lookup*[] tables and it
+        // are both read at [mult-1], so 63 is the honest upper bound.  The old
+        // pair of tests rejected 0 and >63 but let every NEGATIVE value
+        // through, and (int) of an out-of-range double is undefined behaviour
+        // that differs by host -- x86-64 yields INT_MIN, arm64 saturates to
+        // INT_MAX -- so the same netlist crashed on one machine and passed the
+        // guards on another (nextpnr-xilinx#78).  So range-check the double
+        // itself, before any cast: NaN and +-inf fail the finiteness test, and
+        // [1, 64) is exactly the set that truncates to 1..63.  Name the
+        // offending value as given.
+        bool clkfbout_mult_in_range =
+                std::isfinite(clkfbout_mult_f) && clkfbout_mult_f >= 1.0 && clkfbout_mult_f < 64.0;
+        if (!clkfbout_mult_in_range)
+            log_error("MMCME2_ADV: CLKFBOUT_MULT_F must be in the range 1..63 (got %.10g)\n", clkfbout_mult_f);
+        int clkfbout_mult = (int)clkfbout_mult_f;
         write_int_vector("LKTABLE[39:0]", Xc7MMCM::lk_table[clkfbout_mult - 1], 40);
 
         std::string bandwidth = str_or_default(ci->params, id_BANDWIDTH, "OPTIMIZED");
