@@ -151,6 +151,7 @@ void XilinxPacker::pack_dram()
     dict<IdString, DRAMType> dram_types;
 
     dram_types[id_RAM32X1S] = {5, 1, 0};
+    dram_types[id_RAM32X2S] = {5, 2, 0};
     dram_types[id_RAM32X1D] = {5, 1, 1};
     dram_types[id_RAM64X1S] = {6, 1, 0};
     dram_types[id_RAM64X1D] = {6, 1, 1};
@@ -398,6 +399,76 @@ void XilinxPacker::pack_dram()
                     z--;
                 }
 
+                packed_cells.insert(cell->name);
+            }
+        } else if (cs.memtype == id_RAM32X2S) {
+            int z = (height - 1);
+            CellInfo *base = nullptr;
+            for (auto cell : group.second) {
+                NPNR_ASSERT(cell->type == id_RAM32X2S);
+
+                // A full site means the next cell starts a fresh one, which the
+                // placer places anywhere, as the RAM64X1S path does.
+                const bool site_is_full = (z < 0);
+                if (site_is_full) {
+                    z = height - 1;
+                    base = nullptr;
+                }
+
+                // One set of address lines is shared by both bits; the two bits
+                // of one cell are the two LUT halves of one slice position, the
+                // same shape the RAM32M path builds (bit 0 in the 5LUT, bit 1 in
+                // the 6LUT), so one cell costs one z, not two. (port of
+                // nextpnr-xilinx d76edb61, adapted to create_dram32_lut)
+                std::vector<NetInfo *> address(cs.wa.begin(), cs.wa.begin() + std::min<size_t>(cs.wa.size(), 5));
+                for (int i = 0; i < 2; i++) {
+                    IdString dport = ctx->idf("D%d", i);
+                    IdString oport = ctx->idf("O%d", i);
+                    NetInfo *di = cell->getPort(dport);
+                    NetInfo *dout = cell->getPort(oport);
+                    cell->disconnectPort(oport);
+                    CellInfo *ram_lut =
+                            create_dram32_lut(cell->name.str(ctx) + "/RAM32X1S" + std::to_string(i) + "/SP", base, cs,
+                                              address, di, dout, (i == 0), z);
+                    IdString init_param = ctx->idf("INIT_0%d", i);
+                    const bool has_init_for_bit = cell->params.count(init_param);
+                    if (has_init_for_bit)
+                        ram_lut->params[id_INIT] = cell->params[init_param];
+                    const bool ram_lut_is_site_base = (base == nullptr);
+                    if (ram_lut_is_site_base)
+                        base = ram_lut;
+                }
+                z--;
+                packed_cells.insert(cell->name);
+            }
+        } else if (cs.memtype == id_RAM32X1S) {
+            int z = (height - 1);
+            CellInfo *base = nullptr;
+            for (auto cell : group.second) {
+                NPNR_ASSERT(cell->type == id_RAM32X1S);
+
+                // A full site means the next cell starts a fresh one, which the
+                // placer places anywhere, as the RAM64X1S path does.
+                const bool site_is_full = (z < 0);
+                if (site_is_full) {
+                    z = height - 1;
+                    base = nullptr;
+                }
+
+                std::vector<NetInfo *> address(cs.wa.begin(), cs.wa.begin() + std::min<size_t>(cs.wa.size(), 5));
+                // The replacement LUT drives this net, so the RAM cell that drives
+                // it today has to let go first, as the RAM64X1S path explains.
+                NetInfo *di = cell->getPort(id_D);
+                NetInfo *o = cell->getPort(id_O);
+                cell->disconnectPort(id_O);
+                CellInfo *ram = create_dram32_lut(cell->name.str(ctx) + "/SP", base, cs, address, di, o, false, z);
+                const bool has_init = cell->params.count(id_INIT);
+                if (has_init)
+                    ram->params[id_INIT] = cell->params[id_INIT];
+                const bool ram_is_site_base = (base == nullptr);
+                if (ram_is_site_base)
+                    base = ram;
+                z--;
                 packed_cells.insert(cell->name);
             }
         } else if (cs.memtype.in(id_RAM128X1D, id_RAM256X1D)) {
