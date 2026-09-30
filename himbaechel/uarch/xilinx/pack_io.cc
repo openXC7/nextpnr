@@ -268,6 +268,61 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
         std::string tile_p = ctx->get_tile_type(site_p.tile).str(ctx);
         bool is_iob18 = boost::contains(tile_p, "IOB18");
 
+        // Name a pad the way the user wrote it, so a placement complaint can be traced
+        // back to a line of XDC rather than to a site number. (port of nextpnr-xilinx
+        // 0ebf6394)
+        auto pad_desc = [&](NetInfo *n, SiteIndex site) {
+            for (auto user : n->users) {
+                bool is_pad_cell = user.cell->type == id_PAD;
+                if (!is_pad_cell)
+                    continue;
+                std::string d = "'" + user.cell->name.str(ctx) + "'";
+                bool has_package_pin = user.cell->attrs.count(id_PACKAGE_PIN);
+                bool has_loc = user.cell->attrs.count(id_LOC);
+                if (has_package_pin)
+                    d += " (package pin " + user.cell->attrs.at(id_PACKAGE_PIN).as_string() + ")";
+                else if (has_loc)
+                    d += " (package pin " + user.cell->attrs.at(id_LOC).as_string() + ")";
+                return d + " at site " + uarch->get_site_name(site).str(ctx);
+            }
+            return std::string("<unknown pad>");
+        };
+
+        // A differential pair is the master (P) and slave (N) site of one IOB tile, and
+        // only the master site carries the M bels.  Constraining P to an N pin, or
+        // splitting the pair across two tiles, therefore failed much later as an
+        // uncaught std::out_of_range out of bindBel -- no pin names, no hint of the
+        // swap.  Check it up front and say what is wrong.
+        //
+        // Each site is classified by its OWN tile type: a split pair can put P in an
+        // IOB33 tile and N in an IOB18 one, and judging N by P's tile type would look
+        // for an IOB33S bel in an IOB18 site and misreport a valid slave as a master.
+        auto site_is_iob18 = [&](SiteIndex site) {
+            return boost::contains(ctx->get_tile_type(site.tile).str(ctx), "IOB18");
+        };
+        auto check_diff_pair = [&](NetInfo *p_net, NetInfo *n_net, SiteIndex p_site, SiteIndex n_site) {
+            IdString m_bel = site_is_iob18(p_site) ? ctx->id("IOB18M.OUTBUF_DCIEN") : ctx->id("IOB33M.OUTBUF");
+            IdString s_bel = site_is_iob18(n_site) ? ctx->id("IOB18S.O_ININV") : ctx->id("IOB33S.O_ININV");
+            bool p_is_master = uarch->get_site_bel(p_site, m_bel) != BelId();
+            bool n_is_slave = uarch->get_site_bel(n_site, s_bel) != BelId();
+            bool same_tile = p_site.tile == n_site.tile;
+            bool is_valid_pair = p_is_master && n_is_slave && same_tile;
+            if (is_valid_pair)
+                return;
+            const char *why = !p_is_master ? "its P side is constrained to the N (slave) pin of a pair"
+                            : !n_is_slave ? "its N side is constrained to a P (master) pin"
+                                          : "the two pins are not the two halves of one differential pair";
+            log_error("%s '%s' cannot be placed: %s.\n"
+                      "       P side: %s\n"
+                      "       N side: %s\n"
+                      "       Constrain the P port to an IO_L<n>P_... pin and the N port to the matching\n"
+                      "       IO_L<n>N_... pin of the same pair (see package_pins.csv for the part).\n",
+                      xil_iob->type.c_str(ctx), ctx->nameOf(xil_iob), why,
+                      pad_desc(p_net, p_site).c_str(), pad_desc(n_net, n_site).c_str());
+        };
+
+        check_diff_pair(pad_p_net, pad_n_net, site_p, site_n);
+
         xil_iob->disconnectPort((is_diff_iobuf || is_diff_out_iobuf) ? id_IO : id_O);
         xil_iob->disconnectPort((is_diff_iobuf || is_diff_out_iobuf) ? id_IOB : id_OB);
 
