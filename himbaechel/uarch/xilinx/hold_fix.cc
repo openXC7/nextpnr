@@ -22,7 +22,8 @@
  *  The pass runs AFTER routing (in postRoute, before FASM): route -> analyse
  *  hold -> insert+place buffers -> reroute (router2 keeps already-routed arcs
  *  and routes only the new ones) -> re-analyse, up to a bounded number of
- *  passes.  Opt-in via --xilinx-hold-fix (or settings xilinx/holdFix).
+ *  passes.  Opt-in via -o hold-fix (an optional value sets the maximum number
+ *  of passes, 8 by default).
  */
 
 #include <queue>
@@ -670,9 +671,11 @@ void XilinxImpl::fixup_hold()
         // so the exit status reflects the POST-fix state: a clean fix passes,
         // while any residual hold violation, or a genuine setup failure, still
         // fails.  This is what lets hold-fix run without --timing-allow-fail and
-        // still surface real timing failures.
+        // still surface real timing failures.  The fmax is computed too:
+        // update_results replaces ctx->timing_result, which --report reads, and
+        // without it the report of a fixed design has an empty fmax.
         had_nonfatal_error = false;
-        timing_analysis(ctx, false /*histogram*/, false /*fmax*/, false /*path*/, true /*warn_on_failure*/,
+        timing_analysis(ctx, false /*histogram*/, true /*fmax*/, false /*path*/, true /*warn_on_failure*/,
                         true /*update_results*/);
     }
 }

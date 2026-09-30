@@ -1195,7 +1195,7 @@ void XilinxImpl::apply_prerouted()
 void XilinxImpl::postRoute()
 {
     // Insert feedthrough buffers on hold-violating arcs and reroute, before
-    // routing is finalised and FASM is written.  No-op unless --xilinx-hold-fix.
+    // routing is finalised and FASM is written.  No-op unless -o hold-fix.
     fixup_hold();
     fixup_routing();
     ctx->assignArchInfo();
@@ -1337,6 +1337,23 @@ int XilinxImpl::hclk_for_ioi(int tile) const
     NPNR_ASSERT_FALSE("failed to find HCLK pips");
 }
 
+namespace {
+// The chipdb's RAMB timing variants carry the SDF's names for the write
+// modes. An unset WRITE_MODE is WRITE_FIRST, the primitive's default, as in
+// the FASM writer.
+const char *bram_write_mode_code(const CellInfo *ci, IdString param)
+{
+    std::string mode = str_or_default(ci->params, param, "WRITE_FIRST");
+    const bool no_change = mode == "NO_CHANGE";
+    if (no_change)
+        return "NC";
+    const bool read_first = mode == "READ_FIRST";
+    if (read_first)
+        return "RF";
+    return "WF";
+}
+} // namespace
+
 void XilinxImpl::assign_cell_tags()
 {
     cell_tags.resize(ctx->cells.size());
@@ -1411,8 +1428,12 @@ void XilinxImpl::assign_cell_tags()
                                int_or_default(ci->params, ctx->id("WRITE_WIDTH_B"), 0) == 36) ||
                               (ci->type == id_RAMB36E1_RAMB36E1 &&
                                int_or_default(ci->params, ctx->id("WRITE_WIDTH_B"), 0) == 72));
-            ci->timing_index = ctx->get_cell_timing_idx(
-                    ctx->idf("%s_%s_%s", ci->type.c_str(ctx), write_sdp ? "WSDP" : "WTDP", read_sdp ? "RSDP" : "RTDP"));
+            // The data-in setup and hold of each port follow its WRITE_MODE.
+            const char *write_mode_a = bram_write_mode_code(ci, ctx->id("WRITE_MODE_A"));
+            const char *write_mode_b = bram_write_mode_code(ci, ctx->id("WRITE_MODE_B"));
+            IdString variant = ctx->idf("%s_%s_%s_%s_%s", ci->type.c_str(ctx), write_sdp ? "WSDP" : "WTDP",
+                                        read_sdp ? "RSDP" : "RTDP", write_mode_a, write_mode_b);
+            ci->timing_index = ctx->get_cell_timing_idx(variant);
         }
     }
 }

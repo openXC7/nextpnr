@@ -4,6 +4,7 @@ import argparse
 import xilinx_device
 import filters
 import struct
+import itertools
 import parse_sdf
 sys.path.append(path.join(path.dirname(__file__), "../../.."))
 from himbaechel_dbgen.chip import *
@@ -447,8 +448,28 @@ def import_bram_timings(timing, sdf):
         cell.add_setup_hold(clock, f"{port}", ClockEdge.RISING, TimingValue(int(entry.setup.minv*1000), int(entry.setup.maxv*1000)),
                 TimingValue(int(entry.hold.minv*1000), int(entry.hold.maxv*1000)))
 
-    for wsdp, rsdp in ((False, False), (False, True), (True, False), (True, True)):
-        bram18 = timing.add_cell_variant("DEFAULT", f"RAMB18E1_RAMB18E1_{'WSDP' if wsdp else 'WTDP'}_{'RSDP' if rsdp else 'RTDP'}")
+    # The data-in setup and hold depend on the port's WRITE_MODE: the SDF has
+    # one cell per RAM_MODE and WRITE_MODE (NC = NO_CHANGE, RF = READ_FIRST,
+    # WF = WRITE_FIRST), and READ_FIRST's setup and hold are shorter. DIADI and
+    # DIPADIP take WRITE_MODE_A's entry, DIBDI and DIPBDIP WRITE_MODE_B's, so
+    # each variant name ends in both modes; the uarch picks it per cell.
+    def import_data_in_sethold(cell, di_width, dip_width, wsdp, mode_a, mode_b):
+        # In SDP both halves of the data in are written by the port B clock.
+        clock_a = "CLKBWRCLK" if wsdp else "CLKARDCLK"
+        ram_mode = "RAMB18SDP" if wsdp else "RAMB18TDP"
+        for port, mode in (("A", mode_a), ("B", mode_b)):
+            sdfcell = sdf.cells[(f"RAMBFIFO36E1RAM_MODE_{ram_mode}_U_WRITE_MODE_U_{mode}_EN_ECC_READ_FALSE_EN_ECC_WRITE_FALSE", "RAMBFIFO36E1")]
+            for entry in sdfcell.entries:
+                if isinstance(entry, parse_sdf.SetupHoldCheck):
+                    if port == "A" and entry.pin == "DIADIU": import_bus_sethold(cell, "DIADI", di_width, clock_a, entry)
+                    if port == "A" and entry.pin == "DIPADIPU": import_bus_sethold(cell, "DIPADIP", dip_width, clock_a, entry)
+                    if port == "B" and entry.pin == "DIBDIU": import_bus_sethold(cell, "DIBDI", di_width, "CLKBWRCLK", entry)
+                    if port == "B" and entry.pin == "DIPBDIPU": import_bus_sethold(cell, "DIPBDIP", dip_width, "CLKBWRCLK", entry)
+
+    write_modes = ("NC", "RF", "WF")
+    for wsdp, rsdp, mode_a, mode_b in itertools.product((False, True), (False, True), write_modes, write_modes):
+        variant = f"{'WSDP' if wsdp else 'WTDP'}_{'RSDP' if rsdp else 'RTDP'}_{mode_a}_{mode_b}"
+        bram18 = timing.add_cell_variant("DEFAULT", f"RAMB18E1_RAMB18E1_{variant}")
 
         for entry in sdf.cells[("RAMBFIFO36E1", "RAMBFIFO36E1")].entries:
             if isinstance(entry, parse_sdf.SetupHoldCheck):
@@ -462,12 +483,7 @@ def import_bram_timings(timing, sdf):
                 if entry.pin == "ENBWRENU": import_pin_sethold(bram18, "ENBWREN", "CLKBWRCLK", entry)
                 if entry.pin == "RSTRAMAU": import_pin_sethold(bram18, "RSTRAMARSTRAM", "CLKARDCLK", entry)
                 if entry.pin == "RSTRAMBU": import_pin_sethold(bram18, "RSTRAMB", "CLKBWRCLK", entry)
-        for entry in sdf.cells[("RAMBFIFO36E1RAM_MODE_RAMB18TDP_U_WRITE_MODE_U_NC_EN_ECC_READ_FALSE_EN_ECC_WRITE_FALSE", "RAMBFIFO36E1")].entries:
-            if isinstance(entry, parse_sdf.SetupHoldCheck):
-                if entry.pin == "DIADIU": import_bus_sethold(bram18, "DIADI", 16, "CLKBWRCLK" if wsdp else "CLKARDCLK", entry)
-                if entry.pin == "DIBDIU": import_bus_sethold(bram18, "DIBDI", 16, "CLKBWRCLK", entry)
-                if entry.pin == "DIPADIPU": import_bus_sethold(bram18, "DIPADIP", 2, "CLKBWRCLK" if wsdp else "CLKARDCLK", entry)
-                if entry.pin == "DIPBDIPU": import_bus_sethold(bram18, "DIPBDIP", 2, "CLKBWRCLK", entry)
+        import_data_in_sethold(bram18, 16, 2, wsdp, mode_a, mode_b)
         for entry in sdf.cells[("RAMBFIFO36E1RAM_MODE_U_RAMB18SDP_U_DOA_REG_U_0_EN_ECC_READ_FALSE", "RAMBFIFO36E1")].entries:
             if isinstance(entry, parse_sdf.IOPath):
                 if entry.to_pin == "DOADOU": import_bus_clkq(bram18, "DOADO", 16, "CLKARDCLK", entry)
@@ -477,7 +493,7 @@ def import_bram_timings(timing, sdf):
                 if entry.to_pin == "DOBDOU": import_bus_clkq(bram18, "DOBDO", 16, "CLKARDCLK" if rsdp else "CLKBWRCLK", entry)
                 if entry.to_pin == "DOPBDOPU": import_bus_clkq(bram18, "DOPBDOP", 2, "CLKARDCLK" if rsdp else "CLKBWRCLK", entry)
 
-        bram36 = timing.add_cell_variant("DEFAULT", f"RAMB36E1_RAMB36E1_{'WSDP' if wsdp else 'WTDP'}_{'RSDP' if rsdp else 'RTDP'}")
+        bram36 = timing.add_cell_variant("DEFAULT", f"RAMB36E1_RAMB36E1_{variant}")
 
         for u in ('L', 'U'):
             for entry in sdf.cells[("RAMBFIFO36E1", "RAMBFIFO36E1")].entries:
@@ -492,12 +508,7 @@ def import_bram_timings(timing, sdf):
                     if entry.pin == "ENBWRENU": import_pin_sethold(bram36, f"ENBWREN{u}", f"CLKBWRCLK{u}", entry)
                     if entry.pin == "RSTRAMAU": import_pin_sethold(bram36, f"RSTRAMARSTRAM{u}", f"CLKARDCLK{u}", entry)
                     if entry.pin == "RSTRAMBU": import_pin_sethold(bram36, f"RSTRAMB{u}", f"CLKBWRCLK{u}", entry)
-        for entry in sdf.cells[("RAMBFIFO36E1RAM_MODE_RAMB18TDP_U_WRITE_MODE_U_NC_EN_ECC_READ_FALSE_EN_ECC_WRITE_FALSE", "RAMBFIFO36E1")].entries:
-            if isinstance(entry, parse_sdf.SetupHoldCheck):
-                if entry.pin == "DIADIU": import_bus_sethold(bram36, "DIADI", 32, "CLKBWRCLK" if wsdp else "CLKARDCLK", entry)
-                if entry.pin == "DIBDIU": import_bus_sethold(bram36, "DIBDI", 32, "CLKBWRCLK", entry)
-                if entry.pin == "DIPADIPU": import_bus_sethold(bram36, "DIPADIP", 4, "CLKBWRCLK" if wsdp else "CLKARDCLK", entry)
-                if entry.pin == "DIPBDIPU": import_bus_sethold(bram36, "DIPBDIP", 4, "CLKBWRCLK", entry)
+        import_data_in_sethold(bram36, 32, 4, wsdp, mode_a, mode_b)
         for entry in sdf.cells[("RAMBFIFO36E1RAM_MODE_U_RAMB18SDP_U_DOA_REG_U_0_EN_ECC_READ_FALSE", "RAMBFIFO36E1")].entries:
             if isinstance(entry, parse_sdf.IOPath):
                 if entry.to_pin == "DOADOU": import_bus_clkq(bram36, "DOADO", 32, "CLKARDCLK", entry)
