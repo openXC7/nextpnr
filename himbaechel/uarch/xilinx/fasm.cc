@@ -1261,16 +1261,19 @@ struct FasmBackend
                 else if (iostandard == "LVCMOS18" && (drive == 12 || drive == 8))
                     write_bit("LVCMOS18.DRIVE.I12_I8");
                 // prjxray-db names both patterns as covering DRIVE=12
-                // (I12_I8 and I12_I16), which cannot both be right.  The tie is
-                // broken by the four Vivado-built references in
-                // prjxray-db/artix7/harness/{arty-a7/{swbut,uart,pmod},basys3/swbut}:
-                // across all 35 LVCMOS33 output pads at Vivado's default drive
-                // the pattern is I12_I16, and I12_I8 does not occur once.  So 12
-                // belongs with 16 here, and I12_I8 is left to its other member, 8.
-                else if ((iostandard == "LVCMOS33" && (drive == 16 || drive == 12)) ||
-                         (iostandard == "LVTTL" && (drive == 16 || drive == 12)))
+                // (I12_I8 and I12_I16), which cannot both be right.  Vivado
+                // settles it per standard (a Vivado build of every drive of
+                // each, and the four references in
+                // prjxray-db/artix7/harness/{arty-a7/{swbut,uart,pmod},basys3/swbut}):
+                // LVCMOS33 at its default drive 12 is I12_I16, and its drive
+                // 16 has a pattern of its own, LVCMOS33.DRIVE.I16; LVTTL
+                // drive 12 is I12_I8 and drive 16 is I12_I16.
+                else if (iostandard == "LVCMOS33" && drive == 16)
+                    write_bit("LVCMOS33.DRIVE.I16");
+                else if ((iostandard == "LVCMOS33" && drive == 12) || (iostandard == "LVTTL" && drive == 16))
                     write_bit("LVCMOS33_LVTTL.DRIVE.I12_I16");
-                else if ((iostandard == "LVCMOS33" && drive == 8) || (iostandard == "LVTTL" && drive == 8))
+                else if ((iostandard == "LVCMOS33" && drive == 8) ||
+                         (iostandard == "LVTTL" && (drive == 8 || drive == 12)))
                     write_bit("LVCMOS33_LVTTL.DRIVE.I12_I8");
                 else if ((iostandard == "LVCMOS33" && drive == 4) || (iostandard == "LVTTL" && drive == 4))
                     write_bit("LVCMOS33_LVTTL.DRIVE.I4");
@@ -1489,11 +1492,14 @@ struct FasmBackend
                     // direction owns the slew choice.
                     if (!is_output)
                         write_bit("LVCMOS12_LVCMOS15_LVCMOS18.SLEW.SLOW");
+                } else if (is_tmds33) {
+                    // TMDS_33 has a receiver key of its own, defined on the P
+                    // half only; the N half carries no IN_DIFF (a reference
+                    // bitstream for an IBUFDS TMDS_33 sets exactly this one).
+                    if (is_master_half)
+                        write_bit("TMDS_33.IN_DIFF");
                 } else {
-                    if (iostandard == "TDMS_33")
-                        write_bit("TDMS_33.IN_DIFF");
-                    else
-                        write_bit("LVDS_25_SSTL135_SSTL15.IN_DIFF");
+                    write_bit("LVDS_25_SSTL135_SSTL15.IN_DIFF");
                 }
 
                 if (pad->attrs.count(id_IN_TERM))
@@ -1553,6 +1559,11 @@ struct FasmBackend
             bool is_hp_lvds_slave_half = is_hp_bank && iostandard == "LVDS" && yLoc == 1;
             if (is_hp_lvds_slave_half)
                 write_bit("LVCMOS12_LVCMOS15_LVCMOS18_SSTL12_SSTL135_SSTL15.IN_ONLY");
+            // The same holds for LVDS_25 on a high-range bank: the slave half
+            // is input-only, as it already is for TMDS_33 below.
+            const bool is_hr_lvds25_slave_half = !is_hp_bank && is_lvds25 && yLoc == 1;
+            if (is_hr_lvds25_slave_half)
+                write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVDS_25_LVTTL_SSTL135_SSTL15_TMDS_33.IN_ONLY");
             if (is_tmds33 && yLoc == 1) {
                 if (pad->attrs.count(id_IN_TERM))
                     write_bit("IN_TERM." + pad->attrs.at(id_IN_TERM).as_string());
@@ -1577,10 +1588,13 @@ struct FasmBackend
         // OUT_DIFF belongs to the pseudo-differential outputs (DIFF_SSTL*),
         // whose S half is really driven through the inverter.  A true LVDS
         // driver on a high-performance bank is enabled by IOB_Y0.LVDS.OUT
-        // instead, and a reference bitstream for one sets no OUT_DIFF.
+        // instead, and a reference bitstream for one sets no OUT_DIFF.  The
+        // same holds for LVDS_25 and TMDS_33 on a high-range bank
+        // (IOB_Y0.LVDS_25.OUT / IOB_Y0.TMDS_33.OUT).
         bool output_inverter_used = inv != BelId() && ctx->getBoundBelCell(inv) != nullptr;
         bool is_true_hp_lvds_driver = is_hp_bank && iostandard == "LVDS";
-        if (output_inverter_used && !is_true_hp_lvds_driver)
+        bool is_true_hr_diff_driver = !is_hp_bank && (is_lvds25 || is_tmds33);
+        if (output_inverter_used && !is_true_hp_lvds_driver && !is_true_hr_diff_driver)
             write_bit("OUT_DIFF");
 
         if (is_stepdown && !is_sing)
@@ -1673,11 +1687,20 @@ struct FasmBackend
             // The IFF is physically a four-flop block shared with ISERDESE2;
             // an IDDR only exposes Q1/Q2, so Q3/Q4 were left unwritten -- and
             // on silicon that is observable (outputs read the wrong value
-            // despite programmed INIT).  IDDR has no INIT_Q3/Q4 parameters,
-            // so those default to 0.  (Port of nextpnr-xilinx d455ae52.)
+            // despite programmed INIT).  IDDR has no INIT_Q3/Q4 parameters;
+            // Vivado derives them from the mode (measured with a Vivado build
+            // of an IDDR for every mode and every INIT_Q1/INIT_Q2): Q3 and Q4
+            // copy INIT_Q1 and INIT_Q2 in SAME_EDGE and SAME_EDGE_PIPELINED,
+            // and are 1 in OPPOSITE_EDGE.  (Port of nextpnr-xilinx d455ae52.)
+            const bool q3_q4_copy_q1_q2 = edge != "OPPOSITE_EDGE";
+            int init_q[5] = {0, 0, 0, 0, 0};
+            for (int i = 1; i <= 2; i++)
+                init_q[i] = int_or_default(ci->params, ctx->id("INIT_Q" + std::to_string(i)), 0);
+            init_q[3] = q3_q4_copy_q1_q2 ? init_q[1] : 1;
+            init_q[4] = q3_q4_copy_q1_q2 ? init_q[2] : 1;
             for (int i = 1; i <= 4; i++) {
-                auto init = int_or_default(ci->params, ctx->id("INIT_Q" + std::to_string(i)), 0);
-                if (init == 0)
+                const bool init_is_zero = init_q[i] == 0;
+                if (init_is_zero)
                     write_bit("IFF.ZINIT_Q" + std::to_string(i));
             }
 

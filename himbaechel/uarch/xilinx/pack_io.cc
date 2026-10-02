@@ -583,9 +583,8 @@ else if (usr.cell->type.in(id_GTPE2_CHANNEL, id_GTXE2_CHANNEL))
 void XC7Packer::check_valid_pad(CellInfo *ci, std::string type)
 {
     // GT pads (OPAD/IPAD sites) don't need IOSTANDARD constraints
+    const std::string belname = ci->bel != BelId() ? ctx->nameOfBel(ci->bel) : str_or_default(ci->attrs, id_BEL);
     {
-        std::string belname = ci->bel != BelId() ? ctx->nameOfBel(ci->bel)
-                                                 : str_or_default(ci->attrs, id_BEL);
         bool is_gt_pad = boost::contains(belname, "OPAD") || boost::contains(belname, "IPAD");
         if (is_gt_pad)
             return;
@@ -604,7 +603,10 @@ void XC7Packer::check_valid_pad(CellInfo *ci, std::string type)
         return;
     auto drive = int_or_default(ci->attrs, id_DRIVE, 0);
 
-    bool is_iob33 = boost::starts_with(type, "IOB33");
+    // The cell type is "PAD" here, so the bank type comes from the site the pad
+    // sits on.  Testing the type never matched and sent every pad down the
+    // high-performance branch below.
+    bool is_iob33 = boost::contains(belname, "IOB33");
     if (is_iob33) {
         if (drive == 4 || drive == 8 || drive == 12)
             return;
