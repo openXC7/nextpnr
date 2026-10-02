@@ -657,6 +657,87 @@ bool XilinxImpl::isBelLocationValid(BelId bel, bool explain_invalid) const
     return true;
 }
 
+// The bel a RAMB36E1 cascade continues on from `bel`: the chipdb wires its
+// CASCADEOUTA (site wire -> tile wire -> the next BRAM tile's CASCADEINA ->
+// site wire) to the CASCADEINA of exactly one other RAMB36, in the BRAM tile
+// above; BelId() at the top of a column.
+BelId XilinxImpl::bram_cascade_next(BelId bel) const
+{
+    IdString cascade_in = ctx->id("CASCADEINA");
+    std::vector<WireId> frontier{ctx->getBelPinWire(bel, ctx->id("CASCADEOUTA"))}, next;
+    for (int hop = 0; hop < 3; hop++) {
+        next.clear();
+        for (WireId wire : frontier) {
+            const bool no_wire = wire == WireId();
+            if (no_wire)
+                continue;
+            for (PipId pip : ctx->getPipsDownhill(wire))
+                next.push_back(ctx->getPipDstWire(pip));
+        }
+        for (WireId wire : next) {
+            for (auto bp : ctx->getWireBelPins(wire)) {
+                const bool is_next_cascade_input =
+                        bp.pin == cascade_in && bp.bel != bel && ctx->getBelType(bp.bel) == id_RAMB36E1_RAMB36E1;
+                if (is_next_cascade_input)
+                    return bp.bel;
+            }
+        }
+        frontier.swap(next);
+    }
+    return BelId();
+}
+
+bool XilinxImpl::getClusterPlacement(ClusterId cluster, BelId root_bel,
+                                     std::vector<std::pair<CellInfo *, BelId>> &placement) const
+{
+    CellInfo *root = getClusterRootCell(cluster);
+    const bool is_a_bram_cascade = root->type == id_RAMB36E1_RAMB36E1;
+    if (!is_a_bram_cascade)
+        return HimbaechelAPI::getClusterPlacement(cluster, root_bel, placement);
+    const bool root_bel_fits = ctx->isValidBelForCellType(root->type, root_bel);
+    if (!root_bel_fits)
+        return false;
+    placement.clear();
+    placement.emplace_back(root, root_bel);
+    BelId bel = root_bel;
+    for (CellInfo *child : root->constr_children) {
+        bel = bram_cascade_next(bel);
+        const bool the_column_continues = bel != BelId();
+        if (!the_column_continues)
+            return false;
+        placement.emplace_back(child, bel);
+    }
+    return true;
+}
+
+// constr_y of a cascade block is only an estimate (5 rows per link; 6 across
+// a clock-region or BRKH row).  Once the root is placed, the offset is the
+// real one along the chipdb wires -- placer1 checks a child against this
+// offset, and with the estimate it rejected a legal pair 6 rows apart.
+Loc XilinxImpl::getClusterOffset(const CellInfo *cell) const
+{
+    CellInfo *root = getClusterRootCell(cell->cluster);
+    const bool in_a_bram_cascade = root->type == id_RAMB36E1_RAMB36E1 && root != cell;
+    const bool root_is_placed = root->bel != BelId();
+    const bool offset_follows_the_chipdb = in_a_bram_cascade && root_is_placed;
+    if (!offset_follows_the_chipdb)
+        return HimbaechelAPI::getClusterOffset(cell);
+    Loc root_loc = ctx->getBelLocation(root->bel);
+    BelId bel = root->bel;
+    for (CellInfo *child : root->constr_children) {
+        bel = bram_cascade_next(bel);
+        const bool the_column_ends = bel == BelId();
+        if (the_column_ends)
+            break;
+        const bool reached_this_block = child == cell;
+        if (reached_this_block) {
+            Loc loc = ctx->getBelLocation(bel);
+            return Loc(loc.x - root_loc.x, loc.y - root_loc.y, 0);
+        }
+    }
+    return HimbaechelAPI::getClusterOffset(cell);
+}
+
 void XilinxImpl::fixup_placement()
 {
     log_info("Running post-placement legalisation...\n");

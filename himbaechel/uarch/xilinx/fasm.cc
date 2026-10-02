@@ -2275,6 +2275,14 @@ struct FasmBackend
                     bool odd_width = bits == 1 || bits == 9;
                     write_bit(std::string("RAMB36.BRAM36_") + width + "_1", odd_width);
                 }
+                // The LOWER block of a cascaded pair is the one that drives
+                // CASCADEOUTA/B; an UPPER block and a block on its own share
+                // the cleared bit (prjxray's RAM_EXTENSION_*_NONE_OR_UPPER).
+                for (char port : {'A', 'B'}) {
+                    std::string extension = str_or_default(ci->params, ctx->idf("RAM_EXTENSION_%c", port), "NONE");
+                    const bool lower_of_a_pair = extension == "LOWER";
+                    write_bit(stringf("RAMB36.RAM_EXTENSION_%c_LOWER", port), lower_of_a_pair);
+                }
             }
             // Ported from nextpnr-xilinx f0975539. Vivado sets both offsets
             // to all-ones on a used tile whose lower half is occupied.

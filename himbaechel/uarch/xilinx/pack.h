@@ -231,6 +231,7 @@ struct XC7Packer : public XilinxPacker
 
     // BRAM
     void pack_bram();
+    void constrain_bram_cascades();
 
     // DSP
     void pack_dsps();

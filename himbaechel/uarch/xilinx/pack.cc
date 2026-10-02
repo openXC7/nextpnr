@@ -1166,7 +1166,18 @@ void XC7Packer::pack_bram()
                 ci->connectPort(p, ctx->nets[ctx->id("$PACKER_VCC_NET")].get());
             }
         } else if (ci->type == id_RAMB36E1_RAMB36E1) {
-            for (auto p : {id_ADDRARDADDRL15, id_ADDRBWRADDRL15}) {
+            for (auto &a15 : {std::make_pair(id_ADDRARDADDRL15, "RAM_EXTENSION_A"),
+                              std::make_pair(id_ADDRBWRADDRL15, "RAM_EXTENSION_B")}) {
+                IdString p = a15.first;
+                // Address bit 15 is unused by a RAMB36E1 on its own, and tied
+                // high.  In a cascaded pair (RAM_EXTENSION LOWER/UPPER) it is
+                // what picks the LOWER or the UPPER block (UG473), so it keeps
+                // its net: tying it high would fold the 64K memory onto 32K.
+                std::string extension = str_or_default(ci->params, ctx->id(a15.second), "NONE");
+                const bool port_is_cascaded = extension == "LOWER" || extension == "UPPER";
+                const bool a15_has_a_net = ci->getPort(p) != nullptr;
+                if (port_is_cascaded && a15_has_a_net)
+                    continue;
                 if (!ci->ports.count(p)) {
                     ci->ports[p].name = p;
                     ci->ports[p].type = PORT_IN;
@@ -1215,6 +1226,88 @@ void XC7Packer::pack_bram()
             }
         }
     }
+
+    constrain_bram_cascades();
+}
+
+// RAMB36E1 blocks joined by the data cascade (RAM_EXTENSION LOWER/UPPER: the
+// LOWER's CASCADEOUTA/B drive the UPPER's CASCADEINA/B) have no path through
+// general routing: the chipdb wires a CASCADEOUT to the CASCADEIN of exactly
+// one other RAMB36, the one in the BRAM tile above.  Placed apart, the router
+// fails on the first cascade net:
+//   Failed to route arc 0.0 of net '...CAS_A', from X19Y109/RAMB36_X0Y0.CASCADEOUTA
+//   to X19Y119/RAMB36_X0Y0.CASCADEINA
+// So each chain becomes a cluster rooted at its first block.  The step up is
+// 5 rows, or 6 across a clock-region or BRKH row, so constr_y is only the
+// placer's estimate: XilinxImpl::getClusterPlacement() puts every next block
+// on the bel the chipdb reaches from the previous one.
+void XC7Packer::constrain_bram_cascades()
+{
+    // The RAMB36E1 that ci's cascade outputs drive, or nullptr.
+    auto cascade_sink = [&](CellInfo *ci) -> CellInfo * {
+        CellInfo *sink = nullptr;
+        for (char port : {'A', 'B'}) {
+            NetInfo *casc = ci->getPort(ctx->idf("CASCADEOUT%c", port));
+            const bool cascade_out_unused = casc == nullptr;
+            if (cascade_out_unused)
+                continue;
+            IdString cascade_in = ctx->idf("CASCADEIN%c", port);
+            for (auto &usr : casc->users) {
+                const bool user_is_a_cascade_input = usr.cell->type == id_RAMB36E1_RAMB36E1 && usr.port == cascade_in;
+                if (!user_is_a_cascade_input)
+                    log_error("%s.CASCADEOUT%c drives %s.%s, but a RAMB36E1 cascade output only reaches the "
+                              "CASCADEIN%c of another RAMB36E1\n",
+                              ctx->nameOf(ci), port, ctx->nameOf(usr.cell), usr.port.c_str(ctx), port);
+                const bool drives_a_second_block = sink != nullptr && sink != usr.cell;
+                if (drives_a_second_block)
+                    log_error("the cascade outputs of %s drive two blocks, %s and %s\n", ctx->nameOf(ci),
+                              ctx->nameOf(sink), ctx->nameOf(usr.cell));
+                sink = usr.cell;
+            }
+        }
+        return sink;
+    };
+
+    std::vector<CellInfo *> rams;
+    pool<IdString> cascaded_into;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        const bool is_ramb36 = ci->type == id_RAMB36E1_RAMB36E1;
+        if (!is_ramb36)
+            continue;
+        rams.push_back(ci);
+        CellInfo *sink = cascade_sink(ci);
+        const bool cascades_into_another_block = sink != nullptr;
+        if (cascades_into_another_block)
+            cascaded_into.insert(sink->name);
+    }
+
+    int chains = 0;
+    for (CellInfo *root : rams) {
+        const bool starts_a_chain = !cascaded_into.count(root->name) && cascade_sink(root) != nullptr;
+        if (!starts_a_chain)
+            continue;
+        root->cluster = root->name;
+        root->constr_z = BEL_RAM36;
+        root->constr_abs_z = true;
+        int dy = 0;
+        for (CellInfo *ci = cascade_sink(root); ci != nullptr; ci = cascade_sink(ci)) {
+            const bool already_in_a_chain = ci->cluster != ClusterId();
+            if (already_in_a_chain)
+                log_error("the RAMB36E1 cascade from %s reaches %s twice\n", ctx->nameOf(root), ctx->nameOf(ci));
+            dy -= 5;
+            ci->cluster = root->name;
+            ci->constr_x = 0;
+            ci->constr_y = dy;
+            ci->constr_z = BEL_RAM36;
+            ci->constr_abs_z = true;
+            root->constr_children.push_back(ci);
+        }
+        ++chains;
+    }
+    const bool found_any_chain = chains > 0;
+    if (found_any_chain)
+        log_info("Found %d RAMB36E1 cascade chain(s)\n", chains);
 }
 
 void XilinxPacker::pack_inverters()

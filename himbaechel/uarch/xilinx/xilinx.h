@@ -148,6 +148,13 @@ struct XilinxImpl : HimbaechelAPI
     bool isBelLocationValid(BelId bel, bool explain_invalid = false) const override;
     bool xc7_logic_tile_valid(IdString tileType, const LogicTileStatus &lts) const;
 
+    // Clusters: a RAMB36E1 cascade chain is placed bel by bel along the
+    // chipdb's CASCADEOUT -> CASCADEIN wires; everything else is BaseArch's.
+    bool getClusterPlacement(ClusterId cluster, BelId root_bel,
+                             std::vector<std::pair<CellInfo *, BelId>> &placement) const override;
+    Loc getClusterOffset(const CellInfo *cell) const override;
+    BelId bram_cascade_next(BelId bel) const;
+
     // Pips
     // Lazily-built copy of fasm.cc's pseudo-pip table, so is_pip_unavail can
     // tell "no bits, and no hand-written fasm either" (a trap) from "no bits,
