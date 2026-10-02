@@ -2103,6 +2103,9 @@ struct FasmBackend
         //     width-1 default kills the B-side read path on silicon.
         //   - RAMB18E1 READ_WIDTH_A=36: READ_WIDTH_B_18.
         //   - RAMB18E1 WRITE_WIDTH_B=36: WRITE_WIDTH_A_18.
+        //   - RAMB36E1 WRITE_WIDTH_B=72: WRITE_WIDTH_A_18 on BOTH halves (yosys
+        //     leaves WRITE_WIDTH_A at 0; the 72-bit write is the B port plus
+        //     the 32 low bits on the A port).
         // (Port of nextpnr-xilinx f1c77134.)
         const int read_width_a = int_or_default(ci->params, ctx->id("READ_WIDTH_A"), 0);
         const int write_width_b = int_or_default(ci->params, ctx->id("WRITE_WIDTH_B"), 0);
@@ -2111,7 +2114,9 @@ struct FasmBackend
         const bool this_param_is_read_width_b = (name == "READ_WIDTH_B");
         const bool this_param_is_write_width_a = (name == "WRITE_WIDTH_A");
         const bool b_side_reads_half_the_word = (is_36 ? (read_width_a == 72) : (read_width_a == 36));
-        const bool a_side_writes_half_the_word = (!is_36 && (write_width_b == 36));
+        const bool is_18_sdp_write = (!is_36 && (write_width_b == 36));
+        const bool is_36_sdp_write = (is_36 && (write_width_b == 72));
+        const bool a_side_writes_half_the_word = (is_18_sdp_write || is_36_sdp_write);
 
         const bool widen_unset_read_width_b =
                 this_width_param_is_unset && this_param_is_read_width_b && b_side_reads_half_the_word;
@@ -2213,6 +2218,69 @@ struct FasmBackend
         }
     }
 
+    // The word bit that Z{INIT,SRVAL}_{A,B}[k] of one RAMB18 half holds, as
+    // Vivado's golden bitstreams place it (the index runs from the top of the
+    // 18-bit half word down).  A 9-bit word ends in its parity bit, which
+    // Vivado stores in slot 1, the parity slot of the 18-bit word.
+    int bram_output_word_bit(bool is_36, int half, int port_width, int k)
+    {
+        const int top_down_bit = 17 - k;
+        const bool is_18_nine_wide = (!is_36 && port_width == 9);
+        if (is_18_nine_wide) {
+            // The parity bit and bit 16 trade places.
+            const bool k_is_parity_slot = (k == 1);
+            if (k_is_parity_slot)
+                return 8;
+            const bool k_is_displaced_slot = (k == 9);
+            if (k_is_displaced_slot)
+                return 16;
+            return top_down_bit;
+        }
+        // In a RAMB36 the 9-bit halves of an 18-bit port, and the low half of
+        // a 9-bit port, end in a parity bit; it takes slot 1 and the bits
+        // above it move down one slot.
+        const bool is_36_eighteen_wide = (is_36 && port_width == 18);
+        const bool is_36_nine_wide_low_half = (is_36 && port_width == 9 && half == 0);
+        const int parity_bit = is_36_eighteen_wide ? 8 : (is_36_nine_wide_low_half ? 4 : -1);
+        const bool word_has_parity_to_move = (parity_bit >= 0);
+        if (word_has_parity_to_move) {
+            const bool k_is_parity_slot = (k == 1);
+            if (k_is_parity_slot)
+                return parity_bit;
+            const bool k_is_shifted_slot = (k >= 2 && k <= 17 - parity_bit);
+            if (k_is_shifted_slot)
+                return 18 - k;
+        }
+        return top_down_bit;
+    }
+
+    // INIT_A/B and SRVAL_A/B give the value of the output register of port A
+    // or B at power-up and on reset.  The fabric stores them inverted, like
+    // the other Z* bits.  The 36 bits of a RAMB36 word alternate between its
+    // two RAMB18 halves: even bits in Y0, odd bits in Y1.  The word that
+    // counts is the one of the read port.
+    void write_bram_output_values(CellInfo *ci, int half, bool is_36)
+    {
+        for (const char *value : {"INIT", "SRVAL"}) {
+            for (const char *port : {"A", "B"}) {
+                const int port_width = int_or_default(ci->params, ctx->idf("READ_WIDTH_%s", port), 0);
+                std::vector<bool> stored(18, true);
+                const IdString param = ctx->idf("%s_%s", value, port);
+                const bool param_is_given = ci->params.count(param) && !ci->params.at(param).is_string;
+                if (param_is_given) {
+                    const std::string &bits = ci->params.at(param).str;
+                    for (int k = 0; k < 18; k++) {
+                        const int word_bit = bram_output_word_bit(is_36, half, port_width, k);
+                        const int param_bit = is_36 ? (2 * word_bit + half) : word_bit;
+                        const bool bit_is_set = (param_bit < int(bits.size()) && bits[param_bit] == Property::S1);
+                        stored[k] = !bit_is_set;
+                    }
+                }
+                write_vector(stringf("Z%s_%s[17:0]", value, port), stored);
+            }
+        }
+    }
+
     void write_bram_half(int tile, int half, CellInfo *ci)
     {
         push(uarch->tile_name(tile));
@@ -2249,10 +2317,7 @@ struct FasmBackend
                 if (mode != "WRITE_FIRST")
                     write_bit(std::string(wrmode) + "_" + mode);
             }
-            write_vector("ZINIT_A[17:0]", std::vector<bool>(18, true));
-            write_vector("ZINIT_B[17:0]", std::vector<bool>(18, true));
-            write_vector("ZSRVAL_A[17:0]", std::vector<bool>(18, true));
-            write_vector("ZSRVAL_B[17:0]", std::vector<bool>(18, true));
+            write_bram_output_values(ci, half, is_36);
 
             write_bram_init(half, ci, is_36);
         }
