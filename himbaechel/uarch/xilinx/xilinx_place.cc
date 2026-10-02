@@ -50,6 +50,8 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
     if (lts.cells[(3 << 4) | BEL_5LUT] != nullptr && get_tags(lts.cells[(3 << 4) | BEL_5LUT])->lut.is_memory)
         small_memory = true;
     NetInfo *wclk = nullptr;
+    // polarity of the write clock: the half-slice clock inverter is shared with the flipflops
+    bool wclk_inv = false;
 
     // SLICEM-only guard, run UNCONDITIONALLY (not behind the per-eight dirty
     // cache in the loop below).  A distributed-RAM / SRL LUT (is_memory /
@@ -198,11 +200,16 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                     return false;
                 }
                 if (lut6->lut.is_memory || lut6->lut.is_srl) {
-                    if (wclk == nullptr)
+                    if (wclk == nullptr) {
                         wclk = lut6->lut.wclk;
-                    else if (lut6->lut.wclk != wclk) {
-                        DBG();
-                        return false;
+                        wclk_inv = lut6->lut.wclk_inv;
+                    } else {
+                        const bool wclk_differs = lut6->lut.wclk != wclk;
+                        const bool wclk_polarity_differs = lut6->lut.wclk_inv != wclk_inv;
+                        if (wclk_differs || wclk_polarity_differs) {
+                            DBG();
+                            return false;
+                        }
                     }
                 }
                 if (lut5) {
@@ -248,11 +255,16 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                     return false; // Memory and SRLs only valid in SLICEMs
                 }
                 if (lut5->lut.is_srl) {
-                    if (wclk == nullptr)
+                    if (wclk == nullptr) {
                         wclk = lut5->lut.wclk;
-                    else if (lut5->lut.wclk != wclk) {
-                        DBG();
-                        return false;
+                        wclk_inv = lut5->lut.wclk_inv;
+                    } else {
+                        const bool wclk_differs = lut5->lut.wclk != wclk;
+                        const bool wclk_polarity_differs = lut5->lut.wclk_inv != wclk_inv;
+                        if (wclk_differs || wclk_polarity_differs) {
+                            DBG();
+                            return false;
+                        }
                     }
                 }
                 // 5LUT can use at most 5 inputs and 1 output
@@ -495,6 +507,7 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                             continue;
                         if (lut->lut.wclk != nullptr) {
                             wclk = lut->lut.wclk;
+                            wclk_inv = lut->lut.wclk_inv;
                             break;
                         }
                     }
@@ -574,7 +587,10 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                         }
                     } else {
                         clk = ff->ff.clk;
-                        if (i == 0 && wclk != nullptr && clk != wclk) {
+                        const bool ff_in_the_memory_half = i == 0 && wclk != nullptr;
+                        const bool ff_clock_is_not_wclk = clk != wclk;
+                        const bool ff_polarity_is_not_wclk = ff->ff.is_clkinv != wclk_inv;
+                        if (ff_in_the_memory_half && (ff_clock_is_not_wclk || ff_polarity_is_not_wclk)) {
                             DBG();
                             return false;
                         }

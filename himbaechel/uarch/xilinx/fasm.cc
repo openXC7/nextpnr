@@ -847,25 +847,29 @@ struct FasmBackend
                 found_ff = true;
             }
         }
-        // A LUT-RAM shares the half-slice clock inverter with the flipflops: on
-        // 7-series the CLKINV/NOCLKINV bit inverts the clock of every clocked
-        // element of the slice, so a distributed RAM whose write clock is
-        // inverted (the RAM*X1S_1 Unisim variants, or IS_WCLK_INVERTED on an
-        // imported netlist) is expressed by that same bit.  The packer carries
-        // the parameter this far; ignoring it here produced a FASM
-        // byte-identical to the non-inverted design, i.e. a memory written on
-        // the wrong clock edge with a clean exit status.
+        // A LUT-RAM or a shift register shares the half-slice clock inverter
+        // with the flipflops: on 7-series the CLKINV/NOCLKINV bit inverts the
+        // clock of every clocked element of the slice, so a distributed RAM
+        // whose write clock is inverted (the RAM*X1S_1 Unisim variants, or
+        // IS_WCLK_INVERTED on an imported netlist) or a shift register with
+        // IS_CLK_INVERTED (what yosys writes for a negedge SRL16E/SRLC32E; the
+        // packer renames it to IS_WCLK_INVERTED) is expressed by that same
+        // bit.  The packer carries the parameter this far; ignoring it here
+        // produced a FASM byte-identical to the non-inverted design, i.e. a
+        // memory written on the wrong clock edge with a clean exit status.
         bool found_mem = false, mem_clkinv = false;
         for (int i = 0; i < 4; i++) {
             for (int k = 0; k < 2; k++) {
                 CellInfo *lut = lts->cells[(half << 6) | (i << 4) | (k ? BEL_5LUT : BEL_6LUT)];
-                if (lut == nullptr || !lut->attrs.count(id_X_LUT_AS_DRAM))
+                const bool lut_is_memory_or_srl =
+                        lut != nullptr && (lut->attrs.count(id_X_LUT_AS_DRAM) || lut->attrs.count(id_X_LUT_AS_SRL));
+                if (!lut_is_memory_or_srl)
                     continue;
                 const bool lut_clkinv = bool_or_default(lut->params, id_IS_WCLK_INVERTED, false);
                 const bool mem_disagrees = found_mem && (lut_clkinv != mem_clkinv);
                 if (mem_disagrees) {
                     const std::string bel_name = ctx->getBelName(lut->bel).str(ctx);
-                    log_error("FASM: LUT-RAM '%s' (type %s) at bel %s disagrees with its half-slice on "
+                    log_error("FASM: LUT-RAM/SRL '%s' (type %s) at bel %s disagrees with its half-slice on "
                               "'IS_WCLK_INVERTED' (tile %s) -- control-set contention in the placement\n",
                               lut->name.c_str(ctx), lut->type.c_str(ctx), bel_name.c_str(),
                               tname.c_str());

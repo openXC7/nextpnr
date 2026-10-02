@@ -395,6 +395,7 @@ bool XilinxPacker::can_add_ff_to_cluster(const CellInfo *lut, const CellInfo *ff
     bool found_ff = false;
     const NetInfo *clk = nullptr, *ce = nullptr, *sr = nullptr;
     bool is_clkinv = false, is_srinv = false, is_latch = false, is_ffsync = false;
+    bool wclk_inv = false;
     CellInfo *base = ctx->cells.at(lut->cluster).get();
 
     auto process_cell = [&](const CellInfo *cell) {
@@ -403,6 +404,7 @@ bool XilinxPacker::can_add_ff_to_cluster(const CellInfo *lut, const CellInfo *ff
         if (cell->type == id_SLICE_LUTX && cell->getPort(id_CLK)) {
             found_wclk = true;
             clk = cell->getPort(id_CLK);
+            wclk_inv = bool_or_default(cell->params, id_IS_WCLK_INVERTED, false);
         }
         if (cell->type == id_SLICE_FFX) {
             found_ff = true;
@@ -427,6 +429,10 @@ bool XilinxPacker::can_add_ff_to_cluster(const CellInfo *lut, const CellInfo *ff
         return true;
     if (ff->getPort(id_CK) != clk)
         return false;
+    const bool ff_clock_inverted = int_or_default(ff->params, id_IS_C_INVERTED, 0) == 1;
+    const bool ff_edge_is_not_wclk_edge = found_wclk && ff_clock_inverted != wclk_inv;
+    if (ff_edge_is_not_wclk_edge)
+        return false;
     if (!found_ff)
         return true;
     if (ff->getPort(id_CE) != ce)
@@ -434,7 +440,6 @@ bool XilinxPacker::can_add_ff_to_cluster(const CellInfo *lut, const CellInfo *ff
     if (ff->getPort(id_SR) != sr)
         return false;
 
-    bool ff_clock_inverted = int_or_default(ff->params, id_IS_C_INVERTED, 0) == 1;
     if (ff_clock_inverted != is_clkinv)
         return false;
 
@@ -479,6 +484,16 @@ void XilinxPacker::pack_lutffs()
                 ci->constr_z = lut->constr_z + (BEL_FF - BEL_6LUT);
                 ++pairs;
             } else {
+                // a shift register or memory LUT writes on its own clock, which the flipflop in the same
+                // half-slice must share, edge included
+                NetInfo *lut_clk = lut->getPort(id_CLK);
+                const bool lut_is_clocked = lut_clk != nullptr;
+                const bool ff_clock_is_not_lut_clock = lut_is_clocked && ci->getPort(id_CK) != lut_clk;
+                const bool ff_clock_inverted = int_or_default(ci->params, id_IS_C_INVERTED, 0) == 1;
+                const bool lut_clock_inverted = bool_or_default(lut->params, id_IS_WCLK_INVERTED, false);
+                const bool ff_edge_is_not_lut_edge = lut_is_clocked && ff_clock_inverted != lut_clock_inverted;
+                if (ff_clock_is_not_lut_clock || ff_edge_is_not_lut_edge)
+                    continue;
                 lut->constr_children.push_back(ci);
                 lut->cluster = lut->name;
                 ci->cluster = lut->name;
@@ -655,6 +670,7 @@ void XilinxPacker::pack_srls()
     srl_rules[id_SRL16E].port_xform[id_CE] = id_WE;
     srl_rules[id_SRL16E].port_xform[id_D] = id_DI2;
     srl_rules[id_SRL16E].port_xform[id_Q] = id_O6;
+    srl_rules[id_SRL16E].param_xform[id_IS_CLK_INVERTED] = id_IS_WCLK_INVERTED;
     srl_rules[id_SRL16E].set_attrs.emplace_back(id_X_LUT_AS_SRL, "1");
 
     srl_rules[id_SRLC32E].new_type = id_SLICE_LUTX;
@@ -667,6 +683,7 @@ void XilinxPacker::pack_srls()
     // so the cascade routes through the dedicated in-slice path rather than
     // being dropped.  (Port of nextpnr-xilinx pack.cc.)
     srl_rules[id_SRLC32E].port_xform[id_Q31] = id_MC31;
+    srl_rules[id_SRLC32E].param_xform[id_IS_CLK_INVERTED] = id_IS_WCLK_INVERTED;
     srl_rules[id_SRLC32E].set_attrs.emplace_back(id_X_LUT_AS_SRL, "1");
     generic_xform(srl_rules, true);
     // Fixup SRL inputs

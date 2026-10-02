@@ -512,8 +512,8 @@ void XilinxPacker::pack_dram()
                                                      dout, zoffset + i);
                     if (base == nullptr)
                         base = dram;
-                    if (ci->params.count(ctx->idf("INIT%c", 'A' + i)))
-                        dram->params[id_INIT] = ci->params[ctx->idf("INIT%c", 'A' + i)];
+                    if (ci->params.count(ctx->idf("INIT_%c", 'A' + i)))
+                        dram->params[id_INIT] = ci->params[ctx->idf("INIT_%c", 'A' + i)];
                 } else {
                     for (int j = 0; j < dbits; j++) {
                         NetInfo *di = ci->getPort(ctx->idf("DI%c[%d]", 'A' + i, j));
@@ -524,11 +524,12 @@ void XilinxPacker::pack_dram()
                                                            address, di, dout, (j == 0), zoffset + i);
                         if (base == nullptr)
                             base = dram;
-                        if (ci->params.count(ctx->idf("INIT%c", 'A' + i))) {
-                            auto orig_init = ci->params.at(ctx->idf("INIT%c", 'A' + i)).extract(0, 64).as_bits();
+                        if (ci->params.count(ctx->idf("INIT_%c", 'A' + i))) {
+                            auto orig_init = ci->params.at(ctx->idf("INIT_%c", 'A' + i)).extract(0, 64).as_bits();
+                            // from_string() reads the most significant bit first
                             std::string init;
-                            for (int k = 0; k < 32; k++) {
-                                init.push_back(orig_init.at(k * 2 + j));
+                            for (int k = 31; k >= 0; k--) {
+                                init.push_back(orig_init.at(k * 2 + j) ? '1' : '0');
                             }
                             dram->params[id_INIT] = Property::from_string(init);
                         }
