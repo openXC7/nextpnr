@@ -445,6 +445,13 @@ struct FasmBackend
                             c.replace(y0pos, 2, "Y1");
                     }
                 }
+                if (boost::contains(c, ".DATA_RATE_TQ.BUF")) {
+                    auto dot = c.find('.');
+                    bool site_has_tristate_register =
+                            dot != std::string::npos && ologic_t_registered.count(tile_name + "/" + c.substr(0, dot));
+                    if (site_has_tristate_register)
+                        continue;
+                }
                 // Phantom-BUFGCTRL guard (per-slot variant): suppress
                 // BUFGCTRL.BUFGCTRL_X0Y<n>.* features on (tile, slot) pairs
                 // that have no actually-bound BUFGCTRL cell.
@@ -1598,6 +1605,13 @@ struct FasmBackend
     // the DDR rate and leaves OMUX alone.
     std::set<std::string> ologic_registered;
 
+    // OLOGIC sites whose tristate flip-flop (TFF) holds an ODDR that drives the
+    // pad's T input, as "TILE/OLOGIC_Yn".  The pseudo-pip that crosses the site
+    // for the fabric data (D1 -> OQ) also sets DATA_RATE_TQ.BUF, the unregistered
+    // tristate; Vivado sets DATA_RATE_TQ.DDR for such a site instead, and the two
+    // are alternatives of one field.
+    std::set<std::string> ologic_t_registered;
+
     void write_iol_config(CellInfo *ci)
     {
         std::string tile = uarch->tile_name(ci->bel.tile);
@@ -1614,6 +1628,8 @@ struct FasmBackend
         push(site_y);
         if (ci->type.in(id_OLOGICE2_OUTFF, id_OLOGICE3_OUTFF))
             ologic_registered.insert(tile + "/" + site_y);
+        if (ci->type.in(id_OLOGICE2_TFF, id_OLOGICE3_TFF))
+            ologic_t_registered.insert(tile + "/" + site_y);
 
         if (ci->type == id_ILOGICE3_IFF) {
             write_bit("IDDR.IN_USE");
@@ -1694,7 +1710,10 @@ struct FasmBackend
             write_bit("ODDR_TDDR.IN_USE");
             write_bit("OQUSED");
             write_bit("OSERDES.DATA_RATE_OQ.DDR");
-            write_bit("OSERDES.DATA_RATE_TQ.BUF");
+            const BelId tff_bel = uarch->get_site_bel(site_key, ctx->id("TFF"));
+            const bool tristate_is_an_oddr = tff_bel != BelId() && ctx->getBoundBelCell(tff_bel) != nullptr;
+            if (!tristate_is_an_oddr)
+                write_bit("OSERDES.DATA_RATE_TQ.BUF");
 
             std::string srtype = str_or_default(ci->params, id_SRTYPE, "SYNC");
             if (srtype == "SYNC")
@@ -1704,7 +1723,7 @@ struct FasmBackend
                 write_bit("IS_" + d + "_INVERTED",
                           bool_or_default(ci->params, ctx->id("IS_" + d + "_INVERTED"), false));
 
-            auto init = int_or_default(ci->params, id_INIT, 1);
+            auto init = int_or_default(ci->params, id_INIT, 0);
             if (init == 0)
                 write_bit("ZINIT_OQ");
 
@@ -1716,6 +1735,36 @@ struct FasmBackend
             auto clk_inv = bool_or_default(ci->params, id_IS_CLK_INVERTED);
             if (!clk_inv)
                 write_bit("ZINV_CLK");
+        } else if (ci->type.in(id_OLOGICE2_TFF, id_OLOGICE3_TFF)) {
+            // An ODDR on the pad's T input.  Measured against Vivado 2026.1 (T1 = D1, T2 = D2):
+            // the tristate register runs in DDR mode, SRTYPE has its own bit, INIT is
+            // ZINIT_TQ (the library default is 0), T2 is not inverted.  The site's clock and
+            // edge bits come from the output ODDR when there is one; alone, Vivado sets
+            // SAME_EDGE whichever edge the ODDR asks for.
+            const bool is_d1_inverted = bool_or_default(ci->params, ctx->id("IS_D1_INVERTED"), false);
+            const bool is_d2_inverted = bool_or_default(ci->params, ctx->id("IS_D2_INVERTED"), false);
+            if (is_d1_inverted || is_d2_inverted)
+                log_error("%s '%s' drives a tristate input with an inverted D1 or D2, which is not supported\n",
+                          ci->type.c_str(ctx), ctx->nameOf(ci));
+
+            write_bit("OSERDES.DATA_RATE_TQ.DDR");
+            std::string srtype = str_or_default(ci->params, id_SRTYPE, "SYNC");
+            if (srtype == "SYNC")
+                write_bit("OSERDES.TSRTYPE.SYNC");
+            write_bit("TDDR.SRUSED", ci->getPort(id_SR) != nullptr);
+            auto init = int_or_default(ci->params, id_INIT, 0);
+            if (init == 0)
+                write_bit("ZINIT_TQ");
+            write_bit("ZINV_T2");
+
+            const BelId outff_bel = uarch->get_site_bel(site_key, ctx->id("OUTFF"));
+            const bool output_is_an_oddr = outff_bel != BelId() && ctx->getBoundBelCell(outff_bel) != nullptr;
+            if (!output_is_an_oddr) {
+                write_bit("ODDR.DDR_CLK_EDGE.SAME_EDGE");
+                auto clk_inv = bool_or_default(ci->params, id_IS_CLK_INVERTED);
+                if (!clk_inv)
+                    write_bit("ZINV_CLK");
+            }
         } else if (ci->type == id_OSERDESE2_OSERDESE2) {
             write_bit("ODDR.DDR_CLK_EDGE.SAME_EDGE");
             write_bit("ODDR.SRUSED");
@@ -1872,7 +1921,8 @@ struct FasmBackend
                 }
                 write_io_config(ci);
                 blank();
-            } else if (ci->type.in(id_ILOGICE3_IFF, id_OLOGICE2_OUTFF, id_OLOGICE3_OUTFF, id_OSERDESE2_OSERDESE2,
+            } else if (ci->type.in(id_ILOGICE3_IFF, id_OLOGICE2_OUTFF, id_OLOGICE3_OUTFF, id_OLOGICE2_TFF,
+                                   id_OLOGICE3_TFF, id_OSERDESE2_OSERDESE2,
                                    id_ISERDESE2_ISERDESE2, id_IDELAYE2_IDELAYE2, id_ODELAYE2_ODELAYE2)) {
                 write_iol_config(ci);
                 blank();
