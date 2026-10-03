@@ -431,11 +431,30 @@ def import_sdf_timings(variant, sdfcell):
                 TimingValue(int(min(entry.rising.minv, entry.falling.minv)*1000),
                     int(max(entry.rising.maxv, entry.falling.maxv)*1000)))
 
-def import_bram_timings(timing, sdf):
+def import_bram_timings(timing, sdf, is_virtex7=False):
+    # RAMB18 hold figures read off Vivado's own probed paths on the VC707
+    # oracle (docs/extracted-timing.md), in place of the SDF's generic
+    # (and much wider) device-level hold envelope. No equivalent
+    # measurement exists for any other family.
+    def vivado_hold_ps(port):
+        if not is_virtex7: return None
+        table = {
+            "DIADI": 255, "DIPADIP": 255, "DIBDI": 296, "DIPBDIP": 296,
+            "ADDRARDADDR": 183, "ADDRBWRADDR": 183,
+            "ENARDEN": 96, "ENBWREN": 96,
+            "WEA": 46, "WEBWE": 46,
+        }
+        # bram36's control-bus ports carry a trailing L/U (18K-half) suffix
+        if port not in table and port[-1:] in ("L", "U") and port[:-1] in table:
+            port = port[:-1]
+        return table.get(port)
+
     def import_bus_sethold(cell, port, width, clock, entry):
+        override = vivado_hold_ps(port)
+        hold = TimingValue(override) if override is not None else TimingValue(int(entry.hold.minv*1000), int(entry.hold.maxv*1000))
         for i in range(width):
             cell.add_setup_hold(clock, f"{port}{i}", ClockEdge.RISING, TimingValue(int(entry.setup.minv*1000), int(entry.setup.maxv*1000)),
-                TimingValue(int(entry.hold.minv*1000), int(entry.hold.maxv*1000)))
+                hold)
 
     def import_bus_clkq(cell, port, width, clock, entry):
         for i in range(width):
@@ -444,8 +463,10 @@ def import_bram_timings(timing, sdf):
 
 
     def import_pin_sethold(cell, port, clock, entry):
+        override = vivado_hold_ps(port)
+        hold = TimingValue(override) if override is not None else TimingValue(int(entry.hold.minv*1000), int(entry.hold.maxv*1000))
         cell.add_setup_hold(clock, f"{port}", ClockEdge.RISING, TimingValue(int(entry.setup.minv*1000), int(entry.setup.maxv*1000)),
-                TimingValue(int(entry.hold.minv*1000), int(entry.hold.maxv*1000)))
+                hold)
 
     for wsdp, rsdp in ((False, False), (False, True), (True, False), (True, True)):
         bram18 = timing.add_cell_variant("DEFAULT", f"RAMB18E1_RAMB18E1_{'WSDP' if wsdp else 'WTDP'}_{'RSDP' if rsdp else 'RTDP'}")
@@ -533,6 +554,7 @@ def main():
     if "xc7v" in args.device:
         metadata_root = metadata_root.replace("artix7", "virtex7")
         xraydb_root = xraydb_root.replace("artix7", "virtex7")
+    is_virtex7 = "xc7v" in args.device
     # segbits_*.db / ppips_*.db live alongside the tile_type_*.json we import
     global xraydb_root_for_bits
     xraydb_root_for_bits = xraydb_root
@@ -603,11 +625,19 @@ def main():
                 seen_nodes.add(uid)
     # Stub timing class
     ch.timing.set_pip_class("DEFAULT", "SITE_NULL", delay=TimingValue(20))
-    # Stub bel timings
+    # Stub bel timings. On virtex7 the LUT comb delay and the FF D/CK->Q
+    # figures are replaced by the VC707 Vivado-oracle calibration
+    # (docs/extracted-timing.md): nextpnr's generic guesses of 0.30 ns
+    # clk->Q and 0.20 ns FF hold measured as low by 3x and 2x respectively
+    # against Vivado's own probed paths.
+    lut_delay = TimingValue(45, 124) if is_virtex7 else None
+    ff_d_setup = TimingValue(34) if is_virtex7 else TimingValue(100, 100)
+    ff_d_hold = TimingValue(87) if is_virtex7 else TimingValue(200, 200)
+    ff_clk_q = TimingValue(100, 303) if is_virtex7 else TimingValue(300, 350)
     lut = ch.timing.add_cell_variant("DEFAULT", "SLICE_LUTX")
     for i in range(1, 6+1):
-        lut.add_comb_arc(f"A{i}", "O6", TimingValue(100, 125))
-        if i <= 5: lut.add_comb_arc(f"A{i}", "O5", TimingValue(120, 150))
+        lut.add_comb_arc(f"A{i}", "O6", lut_delay or TimingValue(100, 125))
+        if i <= 5: lut.add_comb_arc(f"A{i}", "O5", lut_delay or TimingValue(120, 150))
     for i in range(1, 8+1):
         lut.add_setup_hold("CLK", f"WA{i}", ClockEdge.RISING, TimingValue(100, 500), TimingValue(100, 200))
     lut.add_setup_hold("CLK", "WE", ClockEdge.RISING, TimingValue(100, 600), TimingValue(100, 100))
@@ -615,22 +645,20 @@ def main():
     ff = ch.timing.add_cell_variant("DEFAULT", "SLICE_FFX")
     ff.add_setup_hold("CK", "CE", ClockEdge.RISING, TimingValue(100, 100), TimingValue(0, 0))
     ff.add_setup_hold("CK", "SR", ClockEdge.RISING, TimingValue(100, 100), TimingValue(0, 0))
-    ff.add_setup_hold("CK", "D", ClockEdge.RISING, TimingValue(100, 100), TimingValue(200, 200))
-    ff.add_clock_out("CK", "Q", ClockEdge.RISING, TimingValue(300, 350))
+    ff.add_setup_hold("CK", "D", ClockEdge.RISING, ff_d_setup, ff_d_hold)
+    ff.add_clock_out("CK", "Q", ClockEdge.RISING, ff_clk_q)
 
     # Load SDF for carry and mux
     timings_root = xraydb_root
     if "kintex7" in xraydb_root: # TODO: missing
         timings_root = xraydb_root.replace("kintex7", "artix7")
-    if "virtex7" in xraydb_root: # TODO: missing
-        timings_root = xraydb_root.replace("virtex7", "artix7")
     slicem_sdf = parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "slicem.sdf"))
     mux = ch.timing.add_cell_variant("DEFAULT", "SELMUX2_1")
     import_sdf_timings(mux, slicem_sdf.cells[("SELMUX2_1", "SLICEM/F7BMUX")])
     carry = ch.timing.add_cell_variant("DEFAULT", "CARRY4")
     import_sdf_timings(carry, slicem_sdf.cells[("CARRY4", "SLICEM")])
 
-    import_bram_timings(ch.timing, parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "BRAM_L.sdf")))
+    import_bram_timings(ch.timing, parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "BRAM_L.sdf")), is_virtex7)
 
     # Import package pins
     for package_name, package in sorted(d.packages.items(), key=lambda x:x[0]):
