@@ -1166,7 +1166,24 @@ void XC7Packer::pack_bram()
                 ci->connectPort(p, ctx->nets[ctx->id("$PACKER_VCC_NET")].get());
             }
         } else if (ci->type == id_RAMB36E1_RAMB36E1) {
+            // Address bit 15 of a RAMB36 is the lower/upper select of a cascaded pair
+            // (RAM_EXTENSION), so on a cell of a cascaded pair it is a real address
+            // input and keeps the net the design drives it with (Vivado connects it
+            // on both RAMB36s of the pair); only a stand-alone RAMB36 ties it high.
+            bool cascaded = false;
+            for (auto cp : {ctx->id("CASCADEINA"), ctx->id("CASCADEINB")}) {
+                NetInfo *cn = ci->getPort(cp);
+                if (cn != nullptr && cn->driver.cell != nullptr && cn->driver.cell->type == id_RAMB36E1_RAMB36E1)
+                    cascaded = true;
+            }
+            for (auto cp : {ctx->id("CASCADEOUTA"), ctx->id("CASCADEOUTB")}) {
+                NetInfo *cn = ci->getPort(cp);
+                if (cn != nullptr && !cn->users.empty())
+                    cascaded = true;
+            }
             for (auto p : {id_ADDRARDADDRL15, id_ADDRBWRADDRL15}) {
+                if (cascaded && ci->getPort(p) != nullptr)
+                    continue;   // keep the design's own address bit 15
                 if (!ci->ports.count(p)) {
                     ci->ports[p].name = p;
                     ci->ports[p].type = PORT_IN;
@@ -1188,6 +1205,22 @@ void XC7Packer::pack_bram()
                 ci->attrs[id_X_ORIG_PORT_DIBDI1] = std::string("DIBDI[0]");
                 ci->disconnectPort(id_DIPBDIP0);
                 ci->disconnectPort(id_DIPBDIP1);
+            }
+            // x9 on a RAMB36: the single parity bit of a port feeds BOTH 18Kb halves, as
+            // site pins DIPADIP0 (lower half) and DIPADIP1 (upper half), and likewise
+            // DIPBDIP0/DIPBDIP1.  The netlist declares only DIPxDIP[0] for it; the upper
+            // half's pin is implicit, so without this it is left tied low and the parity
+            // bit of every word is written into one half only (Vivado fans the net out
+            // to both).  Width 1 handles its own pins above.
+            if (int_or_default(ci->params, id_WRITE_WIDTH_A, 0) == 9) {
+                NetInfo *par = ci->getPort(id_DIPADIP0);
+                ci->disconnectPort(id_DIPADIP1);
+                ci->connectPort(id_DIPADIP1, par);
+            }
+            if (int_or_default(ci->params, id_WRITE_WIDTH_B, 0) == 9) {
+                NetInfo *par = ci->getPort(id_DIPBDIP0);
+                ci->disconnectPort(id_DIPBDIP1);
+                ci->connectPort(id_DIPBDIP1, par);
             }
             if (int_or_default(ci->params, id_WRITE_WIDTH_B, 0) != 72) {
                 for (std::string s : {"L", "U"}) {
@@ -1215,6 +1248,112 @@ void XC7Packer::pack_bram()
             }
         }
     }
+}
+
+// RAMB36 cascades: CASCADEOUT{A,B} of one RAMB36 feeds CASCADEIN{A,B} of the
+// RAMB36 in the next BRAM tile of the same column, over dedicated wires that
+// reach nothing else.  prjxray's tileconn joins CASCADEIN of a tile at grid_y
+// to CASCADEOUT_1 of the tile 5 rows further on (grid_y + 5), and the chipdb
+// keeps grid_y as the tile Y, so the consumer sits at a LOWER Y than its
+// producer.  Unless the pair is placed as a unit the placer puts
+// the halves in different columns and the router fails with
+//   Failed to route arc of net '...CAS_A', from X104Y166/RAMB36_X0Y0.CASCADEOUTA
+//   to X75Y171/RAMB36_X0Y0.CASCADEINA
+// so each chain becomes a cluster: the first producer is the root and every
+// consumer a child at the same X, one BRAM tile further down in Y.  The tile
+// step and the RAMB36 bel's z are read from the chipdb, not assumed.
+void XC7Packer::constrain_bram_cascades()
+{
+    const IdString out_ports[2] = {ctx->id("CASCADEOUTA"), ctx->id("CASCADEOUTB")};
+    const IdString in_ports[2] = {ctx->id("CASCADEINA"), ctx->id("CASCADEINB")};
+
+    // The RAMB36 this one's cascade outputs drive, if any.
+    auto cascade_next = [&](CellInfo *ci) -> CellInfo * {
+        CellInfo *next = nullptr;
+        for (IdString port : out_ports) {
+            NetInfo *ni = ci->getPort(port);
+            if (ni == nullptr || ni->users.empty())
+                continue;
+            for (auto &user : ni->users) {
+                if (user.cell->type != id_RAMB36E1_RAMB36E1 || (user.port != in_ports[0] && user.port != in_ports[1]))
+                    log_error("Cascade output %s of %s drives %s.%s, which is not the cascade input of a RAMB36\n",
+                              port.c_str(ctx), ctx->nameOf(ci), ctx->nameOf(user.cell), user.port.c_str(ctx));
+                if (next != nullptr && next != user.cell)
+                    log_error("The cascade outputs of %s are connected to different cells (%s and %s)\n",
+                              ctx->nameOf(ci), ctx->nameOf(next), ctx->nameOf(user.cell));
+                next = user.cell;
+            }
+        }
+        return next;
+    };
+    auto has_cascade_input = [&](CellInfo *ci) {
+        for (IdString port : in_ports) {
+            NetInfo *ni = ci->getPort(port);
+            if (ni == nullptr)
+                continue;
+            if (ni->driver.cell != nullptr && ni->driver.cell->type == id_RAMB36E1_RAMB36E1)
+                return true;
+        }
+        return false;
+    };
+
+    std::vector<CellInfo *> roots;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (ci->type == id_RAMB36E1_RAMB36E1 && !has_cascade_input(ci) && cascade_next(ci) != nullptr)
+            roots.push_back(ci);
+    }
+    if (roots.empty())
+        return;
+
+    // Geometry from the chipdb: the RAMB36 bel's z, and the smallest gap
+    // between two RAMB36 tiles in one column.
+    int bel_z = -1, step = 0;
+    dict<int, std::vector<int>> column_ys;
+    for (auto bel : ctx->getBels()) {
+        if (ctx->getBelType(bel) != id_RAMB36E1_RAMB36E1)
+            continue;
+        Loc loc = ctx->getBelLocation(bel);
+        if (bel_z == -1)
+            bel_z = loc.z;
+        column_ys[loc.x].push_back(loc.y);
+    }
+    for (auto &col : column_ys) {
+        std::sort(col.second.begin(), col.second.end());
+        for (size_t i = 1; i < col.second.size(); i++) {
+            int gap = col.second[i] - col.second[i - 1];
+            if (gap > 0 && (step == 0 || gap < step))
+                step = gap;
+        }
+    }
+    if (bel_z < 0 || step <= 0)
+        log_error("Cascaded RAMB36 cells found, but the device has no vertically adjacent RAMB36 bels\n");
+
+    unsigned links = 0, longest = 0;
+    for (CellInfo *root : roots) {
+        root->constr_abs_z = true;
+        root->constr_z = bel_z;
+        unsigned depth = 0;
+        CellInfo *cur = root;
+        while (CellInfo *next = cascade_next(cur)) {
+            if (next->cluster != ClusterId() || next == root)
+                log_error("RAMB36 cascade through %s is a cycle or joins another chain\n", ctx->nameOf(next));
+            ++depth;
+            next->cluster = root->name;
+            root->constr_children.push_back(next);
+            next->constr_x = 0;
+            next->constr_y = -int(depth) * step;
+            next->constr_z = bel_z;
+            next->constr_abs_z = true;
+            cur = next;
+        }
+        root->cluster = root->name;
+        links += depth;
+        longest = std::max(longest, depth + 1);
+    }
+    log_info("Constrained %u RAMB36 cascade link(s) in %u chain(s) (longest %u, tile step %d)\n", links,
+             (unsigned)roots.size(), longest, step);
+
 }
 
 void XilinxPacker::pack_inverters()
@@ -1319,6 +1458,7 @@ void XilinxImpl::pack()
     packer.constrain_lut6_2_pairs(lut6_2_pairs);
     packer.pack_dram();
     packer.pack_bram();
+    packer.constrain_bram_cascades();
     packer.pack_dsps();
     packer.pack_ffs();
     packer.finalise_muxfs();

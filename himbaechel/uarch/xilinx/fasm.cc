@@ -2313,6 +2313,17 @@ struct FasmBackend
                     bool odd_width = bits == 1 || bits == 9 || (bits == 0 && tile_is_narrow);
                     write_bit(std::string("RAMB36.BRAM36_") + width + "_1", odd_width);
                 }
+                // The lower RAMB36 of a cascaded pair (RAM_EXTENSION = LOWER) needs its
+                // tile-level extension bit, which turns the address-bit-15 select and the
+                // CASCADEIN output mux on; the upper one (and a stand-alone RAMB36) leaves
+                // it clear (prjxray 027-bram36-config: RAM_EXTENSION_{A,B}_LOWER at 27_188 /
+                // 27_187, NONE_OR_UPPER being the same bit clear).  Without it a cascaded
+                // pair acts as two independent 32K memories and every access aliases
+                // across address bit 15.
+                for (const char *ab : {"A", "B"}) {
+                    std::string ext = str_or_default(ci->params, ctx->id(std::string("RAM_EXTENSION_") + ab), "NONE");
+                    write_bit(std::string("RAMB36.RAM_EXTENSION_") + ab + "_LOWER", ext == "LOWER");
+                }
             }
             // Ported from nextpnr-xilinx f0975539. Vivado sets both offsets
             // to all-ones on a used tile whose lower half is occupied.
