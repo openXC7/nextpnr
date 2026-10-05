@@ -1467,7 +1467,14 @@ struct FasmBackend
                         else
                             write_bit("IBUF_HP_BANK_GLUE");
                     }
-                    // else: two pure inputs, and Vivado describes neither.
+                    else {
+                        // Two pure inputs.  Vivado sets each half's own .IN (bit2fasm of LIOB18_X81Y128,
+                        // the VC707 CPU_RESET tile, shows IOB_Y0.IN and IOB_Y1.IN both set).  This used
+                        // to write neither, because the database's IOB_Y0.IN carried IOB_Y1's bit as a
+                        // negated !39_01 and the pair could not be described; the database no longer does
+                        // (prjxray-db 43af59b), and with neither written both inputs read as constant high.
+                        write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
+                    }
                 }
             } else /* is_diff */ {
                 if (is_riob18) {
