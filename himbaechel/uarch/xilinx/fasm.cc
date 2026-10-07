@@ -393,7 +393,14 @@ struct FasmBackend
                     boost::erase_all(loc, "_T1");
                     boost::replace_all(loc, "IOI_OLOGIC", "OLOGIC_Y");
                     // the replacements transformed it into : LIOI3_X0Y73.OLOGIC_Y1
-                    out << loc << "." << "ZINV_T1" << std::endl;
+                    // a T1 tied low needs the site inverter active, as in the pseudo-pip rule below
+                    auto dot = loc.find('.');
+                    std::string tile_name = uarch->tile_name(pip.tile);
+                    std::string site_y = dot == std::string::npos ? "" : loc.substr(dot + 1);
+                    if (boost::contains(tile_name, "_SING_") && pip.tile < uarch->hclk_for_ioi(pip.tile))
+                        boost::replace_all(site_y, "Y0", "Y1"); // write_iol_config's naming for a top SING tile
+                    if (!ologic_t1_low.count(tile_name + "/" + site_y))
+                        out << loc << "." << "ZINV_T1" << std::endl;
                 }
             }
             return;
