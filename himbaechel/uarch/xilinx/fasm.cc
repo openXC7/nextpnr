@@ -4159,6 +4159,8 @@ struct FasmBackend
         write_inv("CPLLLOCKDETCLK");
         write_bit("GTREFCLK0_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK0_USED"), false));
         write_bit("GTREFCLK1_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK1_USED"), false));
+        // GTGREFCLK fabric-input enable, supplied by the GTX channel database.
+        write_bit("GTGREFCLK_USED", bool_or_default(ci->params, ctx->id("_GTGREFCLK_USED"), false));
 
         auto outrefclk_sel_inv = int_or_default(ci->params, ctx->id("OUTREFCLK_SEL_INV"), 0b10);
         write_int_vector("OUTREFCLK_SEL_INV[1:0]", outrefclk_sel_inv, 2);

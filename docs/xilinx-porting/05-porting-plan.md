@@ -377,3 +377,25 @@ cases block, the outstanding ones run `continue-on-error` naming their issue.
 `dsp-const-only-pins` (#159) is **not** a blocker: it is red on the fork's main
 too, with the fix unmerged in the fork's PR #159.
 
+
+### GTX fabric reference follow-up (2026-10-10)
+
+The GTX hardwired-clock filter also matched `CPLLREFCLKSEL` control pins and
+`GTGREFCLK`, disconnecting selectors and the routable fabric reference input.
+Preserve those connections, record nonconstant `GTGREFCLK` use and emit the
+`GTGREFCLK_USED` feature. The companion X-Ray database feature is minor 31,
+channel-relative bit 54 for the tested GTX_CHANNEL_2 on XC7Z045.
+
+Physical ZC706 validation: a timing-checked Yosys/nextpnr/openXC7 image
+with 100 MHz PS fabric reference passed 1000/1000 complete PCS/MAC PMA
+loopback frames, zero errors, user clocks approximately 125 MHz. The
+otherwise identical frame-only control without bit 31_54 lost the CPLL
+reference and failed loopback. Tests were performed on the pinned backend
+`c68c13582e972292c86a5025140d52e713384cbc` with the isolated patches in
+the linked reproducer; this rebased upstream change has not had a full
+8006fbc6 build/hardware rerun. Fabric reference is test-only; dedicated
+Si5324 cross-quad routing and external SFP/switch traffic remain unqualified.
+
+[Reproducer and qualification](https://github.com/codex-hil/kasli-soc-linux/blob/main/docs/zc706-sfp.md),
+[bit-isolation evidence](https://github.com/codex-hil/kasli-soc-linux/tree/main/evidence/zc706/sfp-20261010/fclk-bit-isolation),
+[integrated hardware evidence](https://github.com/codex-hil/kasli-soc-linux/tree/main/evidence/zc706/sfp-20261010/fclk-integrated).
