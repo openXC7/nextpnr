@@ -1,0 +1,12 @@
+{
+  "fail.bit.gz": {
+    "original_uncompressed_sha256": "94b28456a7b6d625be414232924a815f31356288c599b61eadc483692b28d31e",
+    "public_uncompressed_sha256": "380cf3fdbd8157c1b0632b60dc55198ca87e3a7e3b1154d7b721c3c6f50a66a9",
+    "configuration_payload_sha256": "6ad3ec1a5ac21b02d4414de982c2de651e0adf6034fe32c62b2775ea776e912d"
+  },
+  "pass.bit.gz": {
+    "original_uncompressed_sha256": "c7d2f4bc05e233d8b2949537701630662e5b4034fc50741b13bec851691f9d62",
+    "public_uncompressed_sha256": "56db6b546b37ca4aeaa09c6ce7866d79f866aadcf4a08735f2c22e9fcd8b18a0",
+    "configuration_payload_sha256": "bea139bcdbd294cf51963d8bb9717b0d9c56110de42c5bec3b3a04273948de7d"
+  }
+}

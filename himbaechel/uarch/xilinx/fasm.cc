@@ -3151,7 +3151,15 @@ struct FasmBackend
         push(tile_name);
         Loc siteLoc = uarch->rel_site_loc(uarch->get_bel_site(ci->bel));
         push("IBUFDS_GTE2_Y" + std::to_string(siteLoc.y));
-        write_bit("IN_USE");
+        // On XC7A100T with CEB tied low, setting IN_USE silences a minimal
+        // fabric UART transmitter; Vivado leaves this feature clear. The
+        // 063 fuzzer left CEB unconnected. Restrict this correction to
+        // Artix-7 and constant-low CEB until other cases are characterized.
+        NetInfo *ceb = ci->getPort(ctx->id("CEB"));
+        const bool artix_enabled_buffer =
+                boost::starts_with(ctx->args.device, "xc7a") && ceb &&
+                ceb->driver.cell && ceb->constant_value == id_GND;
+        write_bit("IN_USE", !artix_enabled_buffer);
         // Xilinx sources write these as the STRINGS "TRUE"/"FALSE", which is
         // what the LiteEth PCS instantiates them with; bool_or_default wants a
         // number and aborts the whole fasm write with "Expecting numeric value
