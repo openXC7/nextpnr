@@ -1717,7 +1717,15 @@ void XC7Packer::pack_gt()
                 bool is_clock_status_port =
                         boost::contains(port_name, "CLKMONITOR") || boost::contains(port_name, "CLKLOST");
                 bool is_hardwired_clock_input =
-                        net != nullptr && (is_pll_clock_port || is_refclk_or_qpll_port) && !is_clock_status_port;
+                        net != nullptr && (is_pll_clock_port || is_refclk_or_qpll_port) && !is_clock_status_port &&
+                        !boost::contains(port_name, "REFCLKSEL") && port_name != "GTGREFCLK";
+                // REFCLKSEL pins are mux-control inputs, not hardwired clocks.
+                // Dropping their constant nets leaves selector 000 (reserved).
+                // GTGREFCLK is the fabric reference input (UG476), so it must
+                // also remain connected and be routed through the fabric.
+                if (!is_gtp && port_name == "GTGREFCLK" && net != nullptr &&
+                    net->name != ctx->id("$PACKER_GND_NET") && net->name != ctx->id("$PACKER_VCC_NET"))
+                    ci->params[ctx->id("_GTGREFCLK_USED")] = Property(1, 1);
                 if (is_hardwired_clock_input) {
                     bool tied_to_constant_net =
                             net->name == ctx->id("$PACKER_GND_NET") || net->name == ctx->id("$PACKER_VCC_NET");
