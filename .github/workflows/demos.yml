@@ -289,6 +289,8 @@ jobs:
             tier: essential
             synth: -nobram
             lvs: true
+            lvs_blocked: "the LVS compares ADREG and DREG, which Vivado and nextpnr both write off when USE_DPORT is FALSE, jrrk2/fasm2netlist#6"
+            lvs_blocked_differ: 2
             source: example
             design: vc707-dsp
             family: virtex7
@@ -347,6 +349,8 @@ jobs:
           - name: litex-minimal-arty-s7
             tier: essential
             lvs: true
+            lvs_blocked: "the extraction does not name the PLLE2 output a BUFG is traced to, jrrk2/fasm2netlist#6"
+            lvs_blocked_differ: 4
             source: demo-project
             project: litex-minimal-arty-s7
             top: digilent_arty_s7
@@ -384,6 +388,8 @@ jobs:
           - name: litex-ddr-arty-s7
             tier: essential
             lvs: true
+            lvs_blocked: "the extraction does not name the PLLE2 output a BUFG is traced to, jrrk2/fasm2netlist#6"
+            lvs_blocked_differ: 4
             source: demo-project
             project: litex-ddr-arty-s7
             top: digilent_arty_s7
@@ -399,6 +405,8 @@ jobs:
           - name: litex-ddr-qmtech-kintex7
             tier: essential
             lvs: true
+            lvs_blocked: "the extraction does not name the PLLE2 output a BUFG is traced to (4), reads an SDP RAMB18's write enables from site pin i rather than 2i (9) and compares the x bit of a RAM32M's write data (1), jrrk2/fasm2netlist#6"
+            lvs_blocked_differ: 14
             source: demo-project
             project: litex-ddr-qmtech-kintex7
             top: qmtech_xc7k325t
@@ -688,6 +696,7 @@ jobs:
       - name: Build fasm2netlist
         if: matrix.lvs
         run: |
+          # lvs_equiv links CaDiCaL from fasm2netlist's own third_party/cadical submodule (the recursive checkout brings it); without it, libz3.
           cmake -S nextpnr/3rdparty/fasm2netlist -B build-f2n -DCMAKE_BUILD_TYPE=Release
           cmake --build build-f2n --target tileverilog lvs_equiv --parallel 4
 
@@ -993,6 +1002,14 @@ jobs:
       # step did not produce one there is nothing to say: running anyway
       # turned a failed build into "blocked -- extraction from the bitstream
       # failed", which reads like a modelling gap and hides the real error.
+      #
+      # An entry the LVS cannot prove yet, for a reason it can name, carries
+      # lvs_blocked (the reason) and lvs_blocked_differ (how many differ that
+      # reason leaves, as measured).  It passes only at that count: a proof
+      # means the entry should go, fewer differ mean the count should come
+      # down, more mean a new difference -- each one fails, so it is noticed.
+      # lvs_blocked without its count fails too, since it would let any count
+      # through.
       - name: LVS equivalence against the synthesis
         if: matrix.lvs && env.PNR_KNOWN_FAILURE != '1'
         env:
@@ -1002,6 +1019,7 @@ jobs:
           PRJXRAY_DB: ${{ github.workspace }}/prjxray-db
           EQUIV_TIMEOUT: 600
           EXPECT_BLOCKED: ${{ matrix.lvs_blocked }}
+          EXPECT_DIFFER: ${{ matrix.lvs_blocked_differ }}
         run: |
           # Each source keeps its netlist and constraints in its own place:
           # an example synthesises them into the workspace, a demo project

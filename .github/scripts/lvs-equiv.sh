@@ -9,18 +9,28 @@
 #   lvs-equiv.sh <name> <workdir> <fasm> <placement> <gold.json> <xdc>
 #                <part> <device> <family> <top>
 #
-# Environment: YOSYS, TILEVERILOG, LVS_EQUIV, PRJXRAY_DB, EQUIV_TIMEOUT.
+# Environment: YOSYS, TILEVERILOG, LVS_EQUIV, PRJXRAY_DB, EQUIV_TIMEOUT,
+# EXPECT_BLOCKED, EXPECT_DIFFER.
 #
 # Exit 0 proved, 1 not equivalent, 77 blocked (extraction unsupported, or the
 # proof timed out).  A timeout is NOT a failure: it says the design was not
 # proved, for a known reason, which is a different statement from "these two
-# netlists differ".
+# netlists differ".  What a timeout prints is lvs_equiv's last progress line
+# and the last 15 lines of lvs.log: where the proof had got to, not a count.
+# The exception is an entry listed as blocked: it passes only at its recorded
+# count, so a run that never reaches a count -- the extraction failed, or no
+# summary within EQUIV_TIMEOUT -- fails (exit 1) instead of passing unchecked.
 #
-# EXPECT_BLOCKED names a known extraction gap.  Three outcomes then, kept
-# distinguishable on purpose:
-#   blocked    still stopped by the named gap        expected, exit 0
-#   UNBLOCKED  it proves now -- promote it           exit 1, so it is noticed
-#   DIFFER     it broke somewhere else               exit 1, a real regression
+# EXPECT_BLOCKED names a known gap, and EXPECT_DIFFER the number of differ it
+# leaves, as measured.  A blocked entry must state that count: without it any
+# count would pass, and a new difference on the design would go unseen.  Four
+# outcomes then, kept distinguishable on purpose:
+#   blocked    the named gap, at its recorded count   expected, exit 0
+#   UNBLOCKED  it proves now -- promote it            exit 1, so it is noticed
+#   FEWER      fewer differ than recorded: the gap    exit 1, update the count
+#              narrowed
+#   MORE       more differ than recorded: something   exit 1, a real regression
+#              else broke too
 set -u -o pipefail
 
 name=$1; d=$2; fasm=$3; placement=$4; goldjson=$5; xdc=$6
@@ -31,6 +41,18 @@ part=$7; device=$8; family=$9; top=${10}
 : "${LVS_EQUIV:?}"
 : "${PRJXRAY_DB:?}"
 : "${EQUIV_TIMEOUT:=600}"
+
+# A blocked entry without its count is refused before anything runs: it would
+# accept any number of differ, which is the hole the count closes.
+if [ -n "${EXPECT_BLOCKED:-}" ]; then
+    case "${EXPECT_DIFFER:-}" in
+        ''|*[!0-9]*)
+            echo "::error::$name: listed as blocked without its differ count (lvs_blocked_differ is '${EXPECT_DIFFER:-}')"
+            echo "A blocked entry states how many differ its gap leaves, as measured, so that a new"
+            echo "difference on the design is still caught.  Measure it and set lvs_blocked_differ."
+            exit 1 ;;
+    esac
+fi
 
 log="$d/lvs.log"; mkdir -p "$d"; : > "$log"
 
@@ -72,6 +94,11 @@ fi
 if ! "$TILEVERILOG" --fasm "$fasm" --db "$PRJXRAY_DB/$family" --device "$device" \
         --xdc "$xdc" --part "$part" --placement "$placement" --out "$d/fabric.v" \
         --model-out "$d/tile_model.v" >>"$log" 2>&1; then
+    if [ -n "${EXPECT_BLOCKED:-}" ]; then
+        echo "::error::$name: listed as blocked at $EXPECT_DIFFER differ (lvs_blocked_differ; blocked on: $EXPECT_BLOCKED), and that count was not checked -- extraction from the bitstream failed"
+        tail -15 "$log"
+        exit 1
+    fi
     echo "::notice::$name: blocked -- extraction from the bitstream failed"
     tail -15 "$log"
     exit 77
@@ -84,6 +111,7 @@ fi
 "$YOSYS" -q -p "read_json $goldjson; hierarchy -top $top; splitnets; select $top; \
     write_verilog -noattr -norename -selected $d/gold.v" >>"$log" 2>&1
 
+start=$(wc -l < "$log")
 res=$(timeout "$EQUIV_TIMEOUT" \
       "$LVS_EQUIV" --gold "$d/gold.v" --gold-top "$top" \
                    --gate "$d/fabric.v" --gate-top fabric \
@@ -92,10 +120,25 @@ res=$(timeout "$EQUIV_TIMEOUT" \
       2>&1 | tee -a "$log" | grep -E '^[0-9]+ proved')
 rc=$?
 
+# The lines lvs_equiv prints before its summary are per-register verdicts in
+# the order it reaches them, so whatever it printed before the kill is where
+# it had got to, not a count: say so, and lead with its last progress line.
+# The kill can cut the last line short; end it, so that the step's own notice
+# after this starts a line and is still read as one.
 if [ $rc -eq 124 ] || [ -z "$res" ]; then
-    echo "::notice::$name: blocked -- not proved within ${EQUIV_TIMEOUT}s"
+    if [ -n "${EXPECT_BLOCKED:-}" ]; then
+        echo "::error::$name: listed as blocked at $EXPECT_DIFFER differ (lvs_blocked_differ; blocked on: $EXPECT_BLOCKED), and that count was not checked -- no summary from lvs_equiv within ${EQUIV_TIMEOUT}s; the last 15 lines of lvs.log follow, they are not a count"
+        status=1
+    else
+        echo "::notice::$name: blocked -- not proved within ${EQUIV_TIMEOUT}s; the last 15 lines of lvs.log follow, they are not a count"
+        status=77
+    fi
+    progress=$(tail -n +"$((start + 1))" "$log" | grep -vE '^  (DIFFER|unknown|proved) |^[[:space:]]*$' | tail -1)
+    [ -n "$progress" ] && echo "last progress line of lvs_equiv: $progress"
+    echo "--- last 15 lines of lvs.log ---"
     tail -15 "$log"
-    exit 77
+    [ -n "$(tail -c 1 "$log")" ] && echo
+    exit $status
 fi
 
 proved=$(echo "$res" | awk '{print $1}')
@@ -104,15 +147,26 @@ if [ "${differ:-1}" = 0 ] && [ "${proved:-0}" -gt 0 ]; then
     if [ -n "${EXPECT_BLOCKED:-}" ]; then
         echo "::error::$name: now proves ($proved registers/outputs), but is still"
         echo "listed as blocked on: $EXPECT_BLOCKED"
-        echo "The gap is fixed -- drop lvs_blocked for this design so it is gated on."
+        echo "The gap is fixed -- drop lvs_blocked and lvs_blocked_differ for this design so it is gated on."
         exit 1
     fi
     echo "$name: PROVED $proved registers/outputs, 0 differ"
     exit 0
 fi
 if [ -n "${EXPECT_BLOCKED:-}" ]; then
-    echo "::notice::$name: blocked as expected -- $EXPECT_BLOCKED (${differ:-?} differ, ${proved:--} proved)"
-    exit 0
+    if [ "$differ" -eq "$EXPECT_DIFFER" ]; then
+        echo "::notice::$name: blocked as expected -- $EXPECT_BLOCKED ($differ differ, the recorded count; $proved proved)"
+        exit 0
+    fi
+    if [ "$differ" -lt "$EXPECT_DIFFER" ]; then
+        echo "::error::$name: $differ differ, fewer than the $EXPECT_DIFFER recorded in lvs_blocked_differ (blocked on: $EXPECT_BLOCKED)"
+        echo "The gap narrowed -- set lvs_blocked_differ to $differ."
+        exit 1
+    fi
+    echo "::error::$name: $differ differ, more than the $EXPECT_DIFFER recorded in lvs_blocked_differ (blocked on: $EXPECT_BLOCKED)"
+    echo "A difference the named gap does not account for:"
+    tail -25 "$log"
+    exit 1
 fi
 echo "::error::$name: the extracted netlist is not equivalent to its synthesis -- ${differ:-?} differ, ${proved:--} proved"
 tail -25 "$log"
