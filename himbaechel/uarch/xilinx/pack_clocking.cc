@@ -478,6 +478,13 @@ void XC7Packer::constrain_regional_clock_sinks(CellInfo *buf)
                 const bool already_visited = visited.count(dst) > 0;
                 if (already_visited)
                     continue;
+                // GFAN wires take the clock out of the clock tree into general
+                // routing. A CLK pin reached that way is not clocked by this
+                // buffer on silicon, so the walk does not follow them.
+                const bool leaves_the_clock_tree =
+                        std::string(ctx->nameOfWire(dst)).find("/GFAN") != std::string::npos;
+                if (leaves_the_clock_tree)
+                    continue;
                 visited.insert(dst);
                 next_frontier.push_back(dst);
             }
