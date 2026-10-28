@@ -80,6 +80,28 @@ jobs:
       # part directories but no xc7a35t die directory, so the part is served by
       # the xc7a50t die it aliases to (docs/xilinx-porting/04-gap-assessment.md),
       # and the case's part.txt resolves to a chipdb we name for the part.
+      # Compiler cache (see .github/workflows/arch_ci.yml): the C++ build of
+      # nextpnr-himbaechel is a hash lookup per unchanged file on a warm cache.
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-regression
+          max-size: 500M
+
+      # Chip databases: minutes of Python per device, and a pure function of
+      # the generator sources, the metadata submodule and the prjxray-db
+      # revision. Restore them keyed on exactly those inputs; the build then
+      # finds the .bba/.bin up to date and only compiles C++.
+      - name: Cache the generated chip databases
+        id: cache-chipdb
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/himbaechel/uarch/xilinx/chipdb-*.bba
+            build/himbaechel/uarch/xilinx/chipdb-*.bin
+            build/himbaechel/xilinx/chipdb-*.bin
+          key: chipdb-xc7a50t-xc7a200t-xc7z010-${{ env.PRJXRAY_DB_REV }}-${{ hashFiles('nextpnr/himbaechel/uarch/xilinx/gen/**', 'nextpnr/himbaechel/uarch/xilinx/constids.inc', 'nextpnr/.gitmodules') }}-${{ hashFiles('nextpnr/himbaechel/uarch/xilinx/meta/**/*.json') }}
+
       - name: Configure
         run: |
           cmake -S nextpnr -B build -G Ninja \
@@ -89,6 +111,8 @@ jobs:
             -DHIMBAECHEL_XILINX_DEVICES="xc7a50t;xc7a200t;xc7z010"
 
       - name: Build nextpnr-himbaechel and the chipdbs
+        env:
+          CCACHE_REMOTE_STORAGE: ${{ secrets.CCACHE_REMOTE_STORAGE }}
         run: cmake --build build --target nextpnr-himbaechel -j"$(nproc)"
 
       - name: Assemble the chipdb directory and the shim

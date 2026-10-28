@@ -36,6 +36,7 @@ option(EXTERNAL_CHIPDB "Create build with pre-built chipdb binaries" OFF)
 option(WERROR "pass -Werror to compiler (used for CI)" OFF)
 option(PROFILER "Link against libprofiler" OFF)
 option(USE_IPO "Compile nextpnr with IPO" ON)
+option(USE_CCACHE "Use ccache (or sccache) as the compiler launcher when one is on PATH" ON)
 
 set(PROGRAM_PREFIX "" CACHE STRING "Name prefix for executables")
 
@@ -60,6 +61,22 @@ if (USE_IPO)
 else()
     message(STATUS "Building without IPO")
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
+endif()
+
+# Compiler cache. CMake's launcher mechanism runs every C++ compile through
+# ccache/sccache, so a rebuild after a branch switch, a clean build directory
+# or a second checkout of the same revision costs a hash lookup per
+# translation unit instead of a compile. Nothing changes when neither tool is
+# installed; a launcher given on the command line (-DCMAKE_CXX_COMPILER_LAUNCHER=...)
+# always wins. The Visual Studio generators do not support launchers.
+if (USE_CCACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER AND NOT CMAKE_GENERATOR MATCHES "Visual Studio")
+    find_program(CCACHE_PROGRAM NAMES ccache sccache)
+    if (CCACHE_PROGRAM)
+        message(STATUS "Compiler launcher: ${CCACHE_PROGRAM}")
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    else()
+        message(STATUS "Compiler launcher: none (neither ccache nor sccache found; set USE_CCACHE=OFF to silence)")
+    endif()
 endif()
 
 check_cxx_compiler_hash_embed(HAS_HASH_EMBED CXX_FLAGS_HASH_EMBED)
@@ -233,6 +250,16 @@ endif()
 if (BUILD_RUST)
     add_subdirectory(3rdparty/corrosion)
     corrosion_import_crate(MANIFEST_PATH rust/Cargo.toml PROFILE "release" IMPORTED_CRATES RUST_CRATES)
+    # The Rust side of the same idea: sccache wraps rustc (ccache cannot).
+    if (USE_CCACHE AND NOT DEFINED ENV{RUSTC_WRAPPER})
+        find_program(SCCACHE_PROGRAM sccache)
+        if (SCCACHE_PROGRAM)
+            message(STATUS "rustc wrapper: ${SCCACHE_PROGRAM}")
+            foreach(rust_crate ${RUST_CRATES})
+                corrosion_set_env_vars(${rust_crate} RUSTC_WRAPPER=${SCCACHE_PROGRAM})
+            endforeach()
+        endif()
+    endif()
 else()
     add_definitions("-DNO_RUST")
 endif()
