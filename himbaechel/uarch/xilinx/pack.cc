@@ -1514,14 +1514,21 @@ void XilinxImpl::pack()
     packer.pack_lutffs();
 
     // Now that LUT-FF clusters exist, keep the sinks of every placed regional
-    // buffer (BUFIO/BUFR) inside the clock region that buffer drives.  The
+    // buffer (BUFIO/BUFR/BUFHCE) inside the clock region that buffer drives.  The
     // placer positions a cluster by its root, so the region must land on the
     // root -- walked inside constrain_regional_clock_sinks -- not on the
     // pre-cluster FF, which is why this runs after pack_lutffs() rather than
     // in constrain_bufios() alongside the bel binding.
+    //
+    // A BUFHCE drives the one clock region it sits in, so a LOC on it is a
+    // floorplan for everything it clocks: a design that gives each block its
+    // own BUFHCE gets each block placed in its own region, which nextpnr's
+    // XDC reader (no pblocks) has no other way to say.  An unplaced BUFHCE
+    // (no LOC, placed later) constrains nothing.
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
-        const bool is_regional_buffer = ci->type == id_BUFIO_BUFIO || ci->type == id_BUFR_BUFR;
+        const bool is_regional_buffer =
+                ci->type == id_BUFIO_BUFIO || ci->type == id_BUFR_BUFR || ci->type == id_BUFHCE_BUFHCE;
         const bool buffer_is_placed = ci->bel != BelId();
         if (is_regional_buffer && buffer_is_placed)
             packer.constrain_regional_clock_sinks(ci);
