@@ -104,6 +104,9 @@ po::options_description XilinxImpl::getUArchOptions()
     specific.add_options()("hold-detour-max", po::value<double>(),
                            "hold deficit (ns) up to which a routing detour is used instead of a feedthrough LUT "
                            "(default 0.5)");
+    specific.add_options()("macro-region", po::value<std::string>(),
+                           "<prefix>:<buffer>[,...]: confine every cell whose name begins with <prefix> to the clock "
+                           "region of the placed regional buffer (BUFHCE/BUFR/BUFIO) <buffer>, not only its clock sinks");
     return specific;
 }
 
