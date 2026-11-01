@@ -340,9 +340,13 @@ void XC7Packer::pack_carries()
                     unique_lut_inputs = shared_inputs;
                     ++moved;
                 } else if (duplicate_fits) {
-                    CellInfo *dup = ctx->createCell(ctx->idf("%s$S_DUP%d", s_dup_source->name.c_str(ctx), ++autoidx),
-                                                    s_dup_source->type);
-                    NetInfo *dup_out = ctx->createNet(ctx->idf("%s$S_DUP%d", c4_s->name.c_str(ctx), ++autoidx));
+                    // Named after the carry and the S input it feeds (at most one
+                    // duplicate each), not a counter over the design: a block
+                    // instantiated many times from one mapped netlist then gets the
+                    // same names in every instance, which placing it by template
+                    // relies on.
+                    CellInfo *dup = ctx->createCell(ctx->idf("%s$S%d_DUP", c4->name.c_str(ctx), z), s_dup_source->type);
+                    NetInfo *dup_out = ctx->createNet(ctx->idf("%s$S%d_DUP_O", c4->name.c_str(ctx), z));
                     for (int j = 0; j < 5; j++) {
                         IdString ip = ctx->idf("I%d", j);
                         const bool source_has_input = s_dup_source->ports.count(ip);
