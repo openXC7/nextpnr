@@ -47,6 +47,7 @@ struct PlacerHeapCfg
     // regions the router cannot otherwise route.  congestionWeight scales how
     // hard hot tiles are penalised.
     bool congestionSpread;
+    int legaliseEffort; // rip-up budget: max(5000, legaliseEffort * cells) legalisations
     float congestionWeight;
     float solverTolerance;
     bool placeAllAtOnce;
