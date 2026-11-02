@@ -525,10 +525,20 @@ class HeAPPlacer
                 if (member_already_has_a_bel)
                     continue;
                 const bool wanted_bel_is_taken = (ctx->getBoundBelCell(pb.second) != nullptr);
-                if (wanted_bel_is_taken)
-                    log_error("cluster member '%s' of pinned '%s' needs bel '%s', which '%s' holds\n",
-                              pb.first->name.c_str(ctx), root->name.c_str(ctx), ctx->nameOfBel(pb.second),
-                              ctx->getBoundBelCell(pb.second)->name.c_str(ctx));
+                if (wanted_bel_is_taken) {
+                    // The pins are authoritative (a placement imported from
+                    // another tool, say, which packed differently): the
+                    // member leaves the cluster and is placed on its own.
+                    log_warning("cluster member '%s' of pinned '%s' needs bel '%s', which '%s' holds; placing it "
+                                "freely\n",
+                                pb.first->name.c_str(ctx), root->name.c_str(ctx), ctx->nameOfBel(pb.second),
+                                ctx->getBoundBelCell(pb.second)->name.c_str(ctx));
+                    CellInfo *member = pb.first;
+                    member->cluster = ClusterId();
+                    auto &kids = root->constr_children;
+                    kids.erase(std::remove(kids.begin(), kids.end(), member), kids.end());
+                    continue;
+                }
                 ctx->bindBel(pb.second, pb.first, STRENGTH_USER);
                 constrained.push_back(pb.second);
                 placed_cells++;
@@ -613,15 +623,19 @@ class HeAPPlacer
         FastBels::FastBelsData *ff_bels;
         fast_bels.getBelsForBelBucket(cfg.ff_bel_bucket, &ff_bels);
         control_sets.reset(max_x + 1, max_y + 1);
-        for (int x = 0; x <= max_x; x++) {
-            if (x >= int(ff_bels->size()))
+        // Every tile with a flip-flop bel gets its groups, bound or not:
+        // fast_bels lists only the free bels, so a tile whose flip-flops
+        // are all pinned (an imported placement) would otherwise have no
+        // entry and bind_ctrl_set() would index an empty vector.
+        for (auto bel : ctx->getBels()) {
+            if (ctx->getBelBucketForBel(bel) != cfg.ff_bel_bucket)
                 continue;
-            auto &col = ff_bels->at(x);
-            for (int y = 0; y <= max_y; y++) {
-                if (y < int(col.size()) && !col.at(y).empty())
-                    control_sets.at(x, y).resize(cfg.ff_control_set_groups.size());
-            }
+            Loc loc = ctx->getBelLocation(bel);
+            auto &tile = control_sets.at(loc.x, loc.y);
+            if (tile.empty())
+                tile.resize(cfg.ff_control_set_groups.size());
         }
+        (void)ff_bels;
         for (int g = 0; g < int(cfg.ff_control_set_groups.size()); g++) {
             for (int z : cfg.ff_control_set_groups.at(g)) {
                 z_to_ctrl_set[z] = g;
@@ -1167,6 +1181,28 @@ class HeAPPlacer
             }
             auto endt = std::chrono::high_resolution_clock::now();
             p->sl_time += std::chrono::duration<float>(endt - startt).count();
+            // How far legalisation moved the cells from the solved positions,
+            // per bel bucket: a sparse bucket (DSPs, block RAMs) that lands
+            // far from where the solver wanted it is a placement-quality
+            // problem no amount of routing fixes.
+            std::map<IdString, std::vector<int>> disp;
+            for (auto cell : p->solve_cells) {
+                if (cell->bel == BelId())
+                    continue;
+                auto &cl = p->cell_locs.at(cell->name);
+                Loc l = ctx->getBelLocation(cell->bel);
+                disp[ctx->getBelBucketForCellType(cell->type)].push_back(std::abs(l.x - int(cl.rawx)) +
+                                                                          std::abs(l.y - int(cl.rawy)));
+            }
+            for (auto &d : disp) {
+                auto &v = d.second;
+                std::sort(v.begin(), v.end());
+                int64_t sum = 0;
+                for (int x : v)
+                    sum += x;
+                log_info("    legalised %s: %zu cells moved %.1f tiles on average, p90 %d, max %d\n",
+                         d.first.c_str(ctx), v.size(), double(sum) / double(v.size()), v[v.size() * 9 / 10], v.back());
+            }
         }
         void legalise_cell(CellInfo *ci)
         {
@@ -2367,6 +2403,9 @@ PlacerHeapCfg::PlacerHeapCfg(Context *ctx)
         const int64_t n = int64_t(ctx->cells.size());
         const int64_t limit = std::min<int64_t>(n * n / timeout_divisor, std::numeric_limits<int>::max());
         cell_placement_timeout = std::max(10000, int(limit));
+        if (ctx->verbose)
+            log_info("placer-heap: cell placement timeout %d (cells %lld, divisor %d, limit %lld)\n",
+                     cell_placement_timeout, (long long)n, timeout_divisor, (long long)limit);
     } else {
         cell_placement_timeout = 0;
     }
