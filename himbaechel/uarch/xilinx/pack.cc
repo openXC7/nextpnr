@@ -1769,13 +1769,16 @@ void XilinxImpl::pack()
             packer.constrain_regional_clock_sinks(ci);
     }
 
-    // -o macro-region=<prefix>:<buffer>[,<prefix>:<buffer>...]
+    // -o macro-region=<prefix>:<buffer>[:<rows>][,...]
     // A regional buffer's clock region holds only what that clock reaches --
     // the flip-flops, BRAMs and DSPs -- and leaves a block's LUTs and carries
     // free to wander, which stretches the very paths the region was meant to
     // keep short.  This confines every cell whose name begins with <prefix>
     // (a block spliced in under one prefix, as synthgui's lane_macro.py does)
-    // to the region of the placed buffer <buffer>.
+    // to the region of the placed buffer <buffer>.  With <rows>, the cells the
+    // clock does not reach (LUTs, carries) may lie up to that many tile rows
+    // above or below it -- the clock sinks stay inside: packing a dense block
+    // into exactly one region can be more than the greedy legaliser settles.
     if (args.options.count("macro-region")) {
         std::string spec = args.options["macro-region"].as<std::string>();
         size_t pos = 0;
@@ -1787,9 +1790,19 @@ void XilinxImpl::pack()
             pos = end + 1;
             if (item.empty())
                 continue;
+            int margin = 0;
             size_t colon = item.rfind(':');
+            if (colon != std::string::npos && colon + 1 < item.size() &&
+                item.find_first_not_of("0123456789", colon + 1) == std::string::npos) {
+                size_t c2 = item.rfind(':', colon - 1);
+                if (c2 != std::string::npos && colon > 0) {
+                    margin = std::stoi(item.substr(colon + 1));
+                    item = item.substr(0, colon);
+                    colon = c2;
+                }
+            }
             if (colon == std::string::npos || colon == 0 || colon + 1 == item.size())
-                log_error("macro-region: '%s' is not <prefix>:<buffer cell>\n", item.c_str());
+                log_error("macro-region: '%s' is not <prefix>:<buffer cell>[:<rows>]\n", item.c_str());
             std::string prefix = item.substr(0, colon);
             IdString buf = ctx->id(item.substr(colon + 1));
             IdString rname = ctx->id("clkregion_" + buf.str(ctx));
@@ -1799,6 +1812,19 @@ void XilinxImpl::pack()
                 log_error("macro-region: '%s' has no clock region (is it a placed BUFHCE/BUFR/BUFIO with sinks?)\n",
                           buf.c_str(ctx));
             auto has_prefix = [&](const CellInfo *c) { return c->name.str(ctx).compare(0, prefix.size(), prefix) == 0; };
+            IdString target = rname;
+            if (margin > 0) {
+                int x0 = std::numeric_limits<int>::max(), y0 = x0, x1 = -1, y1 = -1;
+                for (BelId b : ctx->region.at(rname)->bels) {
+                    Loc l = ctx->getBelLocation(b);
+                    x0 = std::min(x0, l.x);
+                    x1 = std::max(x1, l.x);
+                    y0 = std::min(y0, l.y);
+                    y1 = std::max(y1, l.y);
+                }
+                target = ctx->id("macroregion_" + buf.str(ctx));
+                ctx->createRectangularRegion(target, x0, std::max(0, y0 - margin), x1, y1 + margin);
+            }
             int n = 0, matched = 0, outside = 0;
             for (auto &cell : ctx->cells) {
                 CellInfo *ci = cell.second.get();
@@ -1813,13 +1839,13 @@ void XilinxImpl::pack()
                 }
                 if (tgt->bel != BelId() || tgt->region != nullptr)
                     continue;
-                ctx->constrainCellToRegion(tgt->name, rname);
+                ctx->constrainCellToRegion(tgt->name, target);
                 ++n;
             }
             if (matched == 0)
                 log_error("macro-region: no cell name begins with '%s'\n", prefix.c_str());
-            log_info("    macro-region: %d cell(s) under '%s' constrained to the clock region of '%s'%s\n", n,
-                     prefix.c_str(), buf.c_str(ctx),
+            log_info("    macro-region: %d cell(s) under '%s' constrained to the clock region of '%s'%s%s\n", n,
+                     prefix.c_str(), buf.c_str(ctx), margin ? stringf(" +/- %d rows", margin).c_str() : "",
                      outside ? stringf(" (%d in clusters rooted outside it)", outside).c_str() : "");
         }
     }
