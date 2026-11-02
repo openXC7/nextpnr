@@ -324,6 +324,7 @@ struct XilinxImpl : HimbaechelAPI
     bool place_brams_by_group();
     void replace_around_brams();
     void refine_sparse_bels(); // sparse_refine.cc
+    void replicate_merged_ffs(); // replicate.cc
 
     delay_t predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const override;
     delay_t estimateDelay(WireId src, WireId dst) const override;

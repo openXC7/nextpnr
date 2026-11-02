@@ -82,6 +82,10 @@ po::options_description XilinxImpl::getUArchOptions()
     specific.add_options()("hold-fix", po::value<std::string>()->implicit_value(""),
                            "after routing, fix hold-time (min-delay) violations: small deficits by a routing "
                            "detour, larger ones by a feedthrough LUT; optional value sets the max passes (default 8)");
+    specific.add_options()("replicate", po::value<std::string>(),
+                           "off: never split a flip-flop whose sinks the placement spread apart (replicate.cc)");
+    specific.add_options()("sparse-refine", po::value<std::string>(),
+                           "off: leave DSP and block RAM sites where the placer put them");
     specific.add_options()("carry-di-bypass", po::value<std::string>(),
                            "off: buffer every carry DI input through the 5LUT instead of using the bypass pin");
     specific.add_options()("ff-routethru", po::value<std::string>(),
@@ -967,6 +971,7 @@ void XilinxImpl::postPlace()
         timing_opt(ctx, cfg);
     }
     refine_sparse_bels();
+    replicate_merged_ffs();
     fixup_placement();
     ctx->assignArchInfo();
 }
