@@ -82,6 +82,10 @@ po::options_description XilinxImpl::getUArchOptions()
     specific.add_options()("hold-fix", po::value<std::string>()->implicit_value(""),
                            "after routing, fix hold-time (min-delay) violations: small deficits by a routing "
                            "detour, larger ones by a feedthrough LUT; optional value sets the max passes (default 8)");
+    specific.add_options()("carry-di-bypass", po::value<std::string>(),
+                           "off: buffer every carry DI input through the 5LUT instead of using the bypass pin");
+    specific.add_options()("ff-routethru", po::value<std::string>(),
+                           "off: never feed a main flip-flop through an idle LUT beside a bypass-fed 5FF");
     specific.add_options()("preplaced", po::value<std::string>(),
                            "before placing, pin the cells named in this file to the bels they had in a reference "
                            "build (scripts/routing_dump.py from that build's --write JSON), packer-made cells included");
@@ -208,6 +212,10 @@ void XilinxImpl::init(Context *ctx)
         tile_status.at(i).site_variant.resize(extra_data->sites.ssize());
     }
     init_pip_avail_tables();
+    // -o ff-routethru=off: never feed a main flip-flop through an idle LUT
+    // (the route-through pips stay in the graph for fabric buffering)
+    if (ctx->args.options.count("ff-routethru") && ctx->args.options.at("ff-routethru").as<std::string>() == "off")
+        ff_routethru_pips = false;
 }
 
 void XilinxImpl::init_pip_avail_tables()
@@ -227,14 +235,14 @@ void XilinxImpl::init_pip_avail_tables()
             wb[w] = d.find("CK_BUFRCLK") != std::string::npos || d.find("RCLK_BEFORE_DIV") != std::string::npos ||
                     d.find("RCLK_OUT") != std::string::npos || d.find("RCLK2RCLK") != std::string::npos;
         }
-        if (!tt_is_clk_bufg_r[t])
-            continue;
         for (int p = 0; p < tt.pips.ssize() && !ff_routethru_pips; p++) {
             const auto &pd = tt.pips[p];
             const auto &xd = *reinterpret_cast<const XlnxPipExtraDataPOD *>(pd.extra_data.get());
             if (pd.flags == PIP_LUT_ROUTETHRU && (xd.pip_config & 1))
                 ff_routethru_pips = true;
         }
+        if (!tt_is_clk_bufg_r[t])
+            continue;
         auto &pb = tt_pip_through_bufgctrl[t];
         pb.assign(tt.pips.size(), 0);
         for (int p = 0; p < tt.pips.ssize(); p++) {
