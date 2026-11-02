@@ -229,6 +229,12 @@ void XilinxImpl::init_pip_avail_tables()
         }
         if (!tt_is_clk_bufg_r[t])
             continue;
+        for (int p = 0; p < tt.pips.ssize() && !ff_routethru_pips; p++) {
+            const auto &pd = tt.pips[p];
+            const auto &xd = *reinterpret_cast<const XlnxPipExtraDataPOD *>(pd.extra_data.get());
+            if (pd.flags == PIP_LUT_ROUTETHRU && (xd.pip_config & 1))
+                ff_routethru_pips = true;
+        }
         auto &pb = tt_pip_through_bufgctrl[t];
         pb.assign(tt.pips.size(), 0);
         for (int p = 0; p < tt.pips.ssize(); p++) {
@@ -579,8 +585,7 @@ if (cell.second->type.in(id_BUFR, id_BUFR_BUFR)) {
         int dest = (extra_data.pip_config & 0x1);
         if (eight == 0)
             return true; // FIXME: conflict with ground
-        if (dest & 0x1)
-            return true; // FIXME: routethru to MUX
+        (void)dest; // bit 0: the pip ends at the flip-flop mux rather than the slice output pin; same LUT either way
         const auto &lts = tile_status[pip.tile].lts;
         if (!lts)
             return false;
@@ -1527,6 +1532,12 @@ void XilinxImpl::assign_cell_tags()
                 ct.carry.x_sigs[i] = nullptr;
             }
             ct.carry.x_sigs[0] = ci->getPort(id_CYINIT);
+            // DI inputs on the bypass pin (pack_carry): the pin is then this
+            // net's for the whole position
+            const int di_bypass = int_or_default(ci->params, id_DI_BYPASS, 0);
+            for (int i = 0; i < 4; i++)
+                if (di_bypass & (1 << i))
+                    ct.carry.x_sigs[i] = ci->getPort(ctx->idf("DI%d", i)); // the bel pin name by now
         } else if (ci->type == id_RAMB18E1_RAMB18E1 || ci->type == id_RAMB36E1_RAMB36E1) {
             bool read_sdp = ((ci->type == id_RAMB18E1_RAMB18E1 &&
                               int_or_default(ci->params, ctx->id("READ_WIDTH_B"), 0) == 36) ||

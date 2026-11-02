@@ -213,7 +213,19 @@ void XC7Packer::pack_carries()
     pool<IdString> lut_types{id_LUT1, id_LUT2, id_LUT3, id_LUT4, id_LUT5};
 
     pool<IdString> folded_nets;
-    int moved = 0, duplicated = 0;
+    int moved = 0, duplicated = 0, bypassed = 0;
+    // A DI input's mux has two legs: the position's O5, or the AX/BX/CX/DX
+    // bypass pin straight from the fabric.  A net that is not a LUT output
+    // fitting beside the S LUT used to get a buffer LUT in the 5LUT (9,000
+    // of them on a 4-lane miner, each spending the position's 5LUT and a
+    // LUT input); Vivado routes it to the bypass pin.  The bypass pin is
+    // shared with the flip-flop's own bypass and the F7/F8 select, which
+    // the legality model already arbitrates through x_sigs, so the choice is
+    // recorded on the CARRY4 for the tag builder.  -o carry-di-bypass=off
+    // restores the buffers.
+    const bool di_bypass_allowed = !(ctx->args.options.count("carry-di-bypass") &&
+                                     ctx->args.options.at("carry-di-bypass").as<std::string>() == "off");
+    const IdString gnd_net = ctx->id("$PACKER_GND_NET"), vcc_net = ctx->id("$PACKER_VCC_NET");
 
     for (auto &grp : groups) {
         std::vector<CellInfo *> carry4s;
@@ -386,11 +398,23 @@ void XC7Packer::pack_carries()
                 s_lut = s_feed;
             }
             if (!di_lut && c4_di) {
-                PortRef pr;
-                pr.cell = c4;
-                pr.port = ctx->idf("DI[%d]", z);
-                auto di_feed = feed_through_lut(c4_di, {pr});
-                di_lut = di_feed;
+                // A constant keeps its LUT: the bit is a LUT INIT, not a route.
+                // Position 0's bypass pin may already carry CYINIT.
+                const bool di_is_constant = c4_di->name == gnd_net || c4_di->name == vcc_net;
+                NetInfo *cyinit = (z == 0) ? c4->getPort(id_CYINIT) : nullptr;
+                const bool bypass_pin_is_cyinit =
+                        cyinit != nullptr && cyinit->name != gnd_net && cyinit->name != vcc_net && cyinit != c4_di;
+                if (di_bypass_allowed && !di_is_constant && !bypass_pin_is_cyinit) {
+                    int mask = int_or_default(c4->params, id_DI_BYPASS, 0) | (1 << z);
+                    c4->params[id_DI_BYPASS] = Property(mask, 4);
+                    ++bypassed;
+                } else {
+                    PortRef pr;
+                    pr.cell = c4;
+                    pr.port = ctx->idf("DI[%d]", z);
+                    auto di_feed = feed_through_lut(c4_di, {pr});
+                    di_lut = di_feed;
+                }
             }
             // Constrain LUTs relative to root CARRY4
             if (s_lut) {
@@ -416,6 +440,8 @@ void XC7Packer::pack_carries()
         log_info("   Moved %d shared LUTs driving carry S inputs into the carry site.\n", moved);
     if (duplicated > 0)
         log_info("   Duplicated %d shared LUTs driving carry S inputs.\n", duplicated);
+    if (bypassed > 0)
+        log_info("   %d carry DI inputs take the bypass pin instead of a buffer LUT.\n", bypassed);
 
     for (auto net : folded_nets)
         ctx->nets.erase(net);

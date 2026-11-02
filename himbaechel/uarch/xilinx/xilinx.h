@@ -134,6 +134,7 @@ struct XilinxImpl : HimbaechelAPI
     void init_database(Arch *arch) override;
 
     void init(Context *ctx) override;
+    void assign_cell_tags(); // the legality tags of every cell (tests call it directly)
 
     // Chipdb bel types that repeat their primitive name (RAMB18E1_RAMB18E1,
     // from prjxray's "<site type>_<bel name>" naming) bucket as the primitive,
@@ -176,6 +177,10 @@ struct XilinxImpl : HimbaechelAPI
     // tt_is_clk_bufg_r[type]; tt_wire_bufr_path[type][wire] (the wire is on the
     // BUFR datapath); tt_pip_through_bufgctrl[type][pip] (I0/I1 -> O of a BUFGCTRL).
     std::vector<uint8_t> tt_is_clk_bufg_r;
+    // The chipdb has LUT route-through pips into the flip-flop mux (bit 0 of
+    // pip_config), so a main FF can be fed through an idle LUT; older
+    // databases only route through to the slice output pin.
+    bool ff_routethru_pips = false;
     std::vector<std::vector<uint8_t>> tt_wire_bufr_path, tt_pip_through_bufgctrl;
     void init_pip_avail_tables();
     bool checkPipAvail(PipId pip) const override { return !is_pip_unavail(pip); }
@@ -329,7 +334,6 @@ struct XilinxImpl : HimbaechelAPI
     // Bel types (bel_type -> primitive name) whose chipdb name repeats the
     // primitive; lookups happen per cell on the placer's hot path.
     dict<IdString, IdString> primitive_bucket_for_bel_type;
-    void assign_cell_tags();
     void index_control_sets();
 };
 

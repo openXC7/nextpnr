@@ -319,7 +319,7 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
             // FF1 might use X, if it isn't driven directly
             CellInfo *ff1_cell = lts.cells[i << 4 | BEL_FF];
             auto ff1 = get_tags(ff1_cell);
-            bool ff1_uses_x = false;
+            bool ff1_uses_x = false, ff1_indirect = false;
             if (ff1 != nullptr && ff1->ff.d != nullptr && ff1->ff.d->driver.cell != nullptr) {
                 auto &drv = ff1->ff.d->driver;
                 CellInfo *carry4_cell = lts.cells[((i / 4) << 6) | BEL_CARRY4];
@@ -351,19 +351,15 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                         DBG();
                         return false;
                     }
-                    // Indirect, must use X input
-                    ff1_uses_x = true;
-                    if (x_net == nullptr)
-                        x_net = ff1->ff.d;
-                    else if (x_net != ff1->ff.d) {
-                        DBG();
-                        return false;
-                    }
+                    // Indirect: the X input, or the position's idle LUT as a
+                    // route-through (see below)
+                    ff1_indirect = true;
                 }
             }
 
             // FF2 might use X, if it isn't driven directly
             auto ff2 = get_tags(lts.cells[i << 4 | BEL_FF2]);
+            bool ff2_indirect = false;
             if (ff2 != nullptr && ff2->ff.d != nullptr && ff2->ff.d->driver.cell != nullptr) {
                 auto &drv = ff2->ff.d->driver;
                 CellInfo *carry4_cell = lts.cells[((i / 4) << 6) | BEL_CARRY4];
@@ -381,13 +377,34 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                         DBG();
                         return false;
                     }
-                    // Indirect, must use X input
-                    if (x_net == nullptr)
-                        x_net = ff2->ff.d;
-                    else if (x_net != ff2->ff.d) {
-                        DBG();
-                        return false;
-                    }
+                    ff2_indirect = true;
+                }
+            }
+
+            // The bypass pin and the route-through.  A fabric signal reaches
+            // the 5FF only through the X pin.  The main FF can take X too,
+            // or, when the position's two LUT bels are idle, come in through
+            // the 6LUT programmed as a buffer (the router's LUT route-through
+            // pip, which the FASM writer turns into an INIT): that is how
+            // Vivado packs two fabric-fed flip-flops into one position.
+            // Position A of the lower slice has no route-through (its LUT
+            // serves the ground driver, see is_pip_unavail).
+            const bool route_through_available = ff_routethru_pips && lut6 == nullptr && lut5 == nullptr && i != 0;
+            if (ff2_indirect) {
+                if (x_net == nullptr)
+                    x_net = ff2->ff.d;
+                else if (x_net != ff2->ff.d) {
+                    DBG();
+                    return false;
+                }
+            }
+            if (ff1_indirect) {
+                if (x_net == nullptr || x_net == ff1->ff.d) {
+                    x_net = ff1->ff.d;
+                    ff1_uses_x = true;
+                } else if (!route_through_available) {
+                    DBG();
+                    return false;
                 }
             }
 
