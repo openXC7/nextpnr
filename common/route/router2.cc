@@ -1883,7 +1883,116 @@ struct Router2
                              pl.second.second);
             }
         }
+        // The halves hold the nets that cross one midline but not the other:
+        // a net in the top half crossing x=mid_x still fits a slice of that
+        // half cut along y, so each half is bisected recursively along its
+        // free axis, and the slices of one level route in parallel.  What
+        // crosses those cuts stays with the half.
+        std::vector<SubRegion> strips_v, strips_h;
+        if (depth > 1) {
+            std::function<void(BoundingBox, std::vector<NetInfo *> &, bool, int, std::vector<SubRegion> &)> cut1 =
+                    [&](BoundingBox bb, std::vector<NetInfo *> &in, bool along_y, int level,
+                        std::vector<SubRegion> &out) {
+                        if (level > depth || in.size() < 400)
+                            return;
+                        std::map<int, int> h;
+                        for (auto ni : in) {
+                            auto &nd = nets.at(ni->udata);
+                            int w = int(ni->users.entries()) + 1;
+                            h[along_y ? nd.bb.y0 : nd.bb.x0] += w;
+                            h[along_y ? nd.bb.y1 : nd.bb.x1] += w;
+                        }
+                        int64_t tot = 0, acc = 0, m = -1;
+                        for (auto &p : h)
+                            tot += p.second;
+                        for (auto &p : h) {
+                            acc += p.second;
+                            if (acc * 2 >= tot) {
+                                m = p.first;
+                                break;
+                            }
+                        }
+                        int lo = along_y ? bb.y0 : bb.x0, hi = along_y ? bb.y1 : bb.x1;
+                        if (m <= lo || m >= hi)
+                            return;
+                        BoundingBox a = bb, b = bb;
+                        if (along_y) {
+                            a.y1 = int(m);
+                            b.y0 = int(m) + 1;
+                        } else {
+                            a.x1 = int(m);
+                            b.x0 = int(m) + 1;
+                        }
+                        std::vector<NetInfo *> keep, ca, cb;
+                        for (auto ni : in) {
+                            auto &nd = nets.at(ni->udata);
+                            bool in_a = along_y ? nd.bb.y1 <= a.y1 : nd.bb.x1 <= a.x1;
+                            bool in_b = along_y ? nd.bb.y0 >= b.y0 : nd.bb.x0 >= b.x0;
+                            if (in_a)
+                                ca.push_back(ni);
+                            else if (in_b)
+                                cb.push_back(ni);
+                            else
+                                keep.push_back(ni);
+                        }
+                        in.swap(keep);
+                        std::pair<BoundingBox, std::vector<NetInfo *> *> sides[2] = {{a, &ca}, {b, &cb}};
+                        for (auto &side : sides) {
+                            if (side.second->empty())
+                                continue;
+                            out.push_back(SubRegion{side.first, std::vector<NetInfo *>(), level});
+                            size_t idx = out.size() - 1;
+                            std::vector<NetInfo *> own;
+                            own.swap(*side.second);
+                            cut1(side.first, own, along_y, level + 1, out);
+                            out[idx].nets.swap(own);
+                        }
+                    };
+            for (int i = Nq; i < Nq + Nv; i++)
+                cut1(tcs.at(i).bb, tcs.at(i).route_nets, /*along_y=*/true, 2, strips_v);
+            for (int i = Nq + Nv; i < Nq + Nv + Nh; i++)
+                cut1(tcs.at(i).bb, tcs.at(i).route_nets, /*along_y=*/false, 2, strips_h);
+            if (ctx->verbose)
+                log_info("    halves cut into %zu + %zu strips\n", strips_v.size(), strips_h.size());
+        }
         std::vector<NetInfo *> sub_failed;
+        // route one level of a set of disjoint regions per thread
+        auto route_regions = [&](std::vector<SubRegion> &regions, int level, const char *label) {
+#ifdef NPNR_DISABLE_THREADS
+            for (auto &sr : regions) {
+                if (sr.level != level)
+                    continue;
+                ThreadContext st;
+                st.rng.rngseed(ctx->rng64());
+                st.bb = sr.bb;
+                st.route_nets = sr.nets;
+                router_thread(st, /*is_mt=*/false);
+                sub_failed.insert(sub_failed.end(), st.failed_nets.begin(), st.failed_nets.end());
+            }
+#else
+            std::vector<std::unique_ptr<ThreadContext>> stcs;
+            for (auto &sr : regions) {
+                if (sr.level != level)
+                    continue;
+                stcs.emplace_back(new ThreadContext());
+                auto &st = *stcs.back();
+                st.rng.rngseed(ctx->rng64());
+                st.bb = sr.bb;
+                st.route_nets = sr.nets;
+            }
+            if (stcs.empty())
+                return;
+            std::vector<boost::thread> ths;
+            for (size_t i = 0; i < stcs.size(); i++) {
+                ThreadContext *st = stcs[i].get();
+                ths.emplace_back([this, st, label]() { router_thread(*st, /*is_mt=*/true, label); });
+            }
+            for (auto &t : ths)
+                t.join();
+            for (auto &st : stcs)
+                sub_failed.insert(sub_failed.end(), st->failed_nets.begin(), st->failed_nets.end());
+#endif
+        };
 #ifdef NPNR_DISABLE_THREADS
         for (auto &sr : subs) {
             ThreadContext st;
@@ -1898,10 +2007,14 @@ struct Router2
             router_thread(tcs.at(i), /*is_mt=*/false);
         }
         // Vertical splits
+        for (int level = depth; level >= 2; level--)
+            route_regions(strips_v, level, "strips");
         for (int i = Nq; i < Nq + Nv; i++) {
             router_thread(tcs.at(i), /*is_mt=*/false);
         }
         // Horizontal splits
+        for (int level = depth; level >= 2; level--)
+            route_regions(strips_h, level, "strips");
         for (int i = Nq + Nv; i < Nq + Nv + Nh; i++) {
             router_thread(tcs.at(i), /*is_mt=*/false);
         }
@@ -1938,14 +2051,18 @@ struct Router2
         for (auto &t : threads)
             t.join();
         threads.clear();
-        // Vertical splits
+        // Vertical splits, their strips first
+        for (int level = depth; level >= 2; level--)
+            route_regions(strips_v, level, "strips");
         for (int i = Nq; i < Nq + Nv; i++) {
             threads.emplace_back([this, &tcs, i]() { router_thread(tcs.at(i), /*is_mt=*/true, "halves"); });
         }
         for (auto &t : threads)
             t.join();
         threads.clear();
-        // Horizontal splits
+        // Horizontal splits, their strips first
+        for (int level = depth; level >= 2; level--)
+            route_regions(strips_h, level, "strips");
         for (int i = Nq + Nv; i < Nq + Nv + Nh; i++) {
             threads.emplace_back([this, &tcs, i]() { router_thread(tcs.at(i), /*is_mt=*/true, "halves"); });
         }
