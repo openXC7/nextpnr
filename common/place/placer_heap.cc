@@ -1186,7 +1186,30 @@ class HeAPPlacer
                 ripup_radius = std::min(std::max(p->max_x, p->max_y), ripup_radius * 2);
             }
 
-            if (total_iters_noreset > std::max(5000, 8 * int(ctx->cells.size()))) {
+            const int64_t budget = std::max<int64_t>(5000, int64_t(p->cfg.legaliseEffort) * int64_t(ctx->cells.size()));
+            ++legalise_count[ci->name];
+            if (total_iters_noreset > budget) {
+                // Say what would not settle: the unplaced cells by type and
+                // region, and the cells ripped up and re-legalised most often.
+                dict<std::pair<IdString, IdString>, int> unplaced;
+                for (auto cell : p->solve_cells)
+                    if (cell->bel == BelId())
+                        ++unplaced[{cell->type, cell->region ? cell->region->name : IdString()}];
+                log_info("Legaliser gave up after %lld legalisations, on '%s' (%s%s%s); unplaced:\n",
+                         (long long)total_iters_noreset, ctx->nameOf(ci), ci->type.c_str(ctx),
+                         ci->region ? ", region " : "", ci->region ? ci->region->name.c_str(ctx) : "");
+                for (auto &u : unplaced)
+                    log_info("    %6d %s%s%s\n", u.second, u.first.first.c_str(ctx), u.first.second != IdString() ? " in " : "",
+                             u.first.second != IdString() ? u.first.second.c_str(ctx) : "");
+                std::vector<std::pair<int, IdString>> churn;
+                for (auto &lc : legalise_count)
+                    churn.emplace_back(lc.second, lc.first);
+                std::sort(churn.rbegin(), churn.rend());
+                for (size_t i = 0; i < std::min<size_t>(10, churn.size()); ++i) {
+                    const CellInfo *cc = ctx->cells.at(churn[i].second).get();
+                    log_info("    legalised %d times: %s (%s%s%s)\n", churn[i].first, ctx->nameOf(cc), cc->type.c_str(ctx),
+                             cc->region ? ", region " : "", cc->region ? cc->region->name.c_str(ctx) : "");
+                }
                 log_error("Unable to find legal placement for all cells, design is probably at utilisation limit.\n");
             }
 
@@ -1310,6 +1333,7 @@ class HeAPPlacer
         Context *ctx;
 
         int ripup_radius, chain_ripup_radius, total_iters, total_iters_noreset;
+        dict<IdString, int> legalise_count; // per cell, for the give-up report
 
         FastBels::FastBelsData *fb;
 
@@ -2323,6 +2347,7 @@ PlacerHeapCfg::PlacerHeapCfg(Context *ctx)
     criticalityExponent = ctx->setting<int>("placerHeap/criticalityExponent");
     timingWeight = ctx->setting<int>("placerHeap/timingWeight");
     congestionSpread = ctx->setting<bool>("placerHeap/congestionSpread", false);
+    legaliseEffort = ctx->setting<int>("placerHeap/legaliseEffort", 8);
     congestionWeight = ctx->setting<float>("placerHeap/congestionWeight", 0.5f);
     parallelRefine = ctx->setting<bool>("placerHeap/parallelRefine", false);
     netShareWeight = ctx->setting<float>("placerHeap/netShareWeight", 0);
