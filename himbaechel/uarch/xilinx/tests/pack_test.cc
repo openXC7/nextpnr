@@ -753,3 +753,75 @@ TEST_F(XilinxRouteThruTest, chipdb_has_ff_mux_route_throughs)
     log_info("    ff_routethru_pips = %d\n", int(xil->ff_routethru_pips));
     EXPECT_TRUE(xil->ff_routethru_pips);
 }
+
+// ---------------------------------------------------------------------------
+// Replication of a flip-flop whose sinks the placement spread apart (replicate.cc)
+
+TEST_F(XilinxRouteThruTest, spread_flip_flop_is_split_towards_its_far_sinks)
+{
+    setup_nets();
+    // the flip-flop, flagged as a merge of three
+    CellInfo *ff = packed_ff("ff", n1);
+    ff->attrs[id_MERGED_EQUIV] = Property("ffb;ffc");
+    NetInfo *q = ff->getPort(id_Q);
+    // eight LUT sinks: four beside the flip-flop, four 120 tiles away
+    BelId home = logic_bel("SLICE_X0Y0.AFF");
+    ASSERT_NE(home, BelId());
+    Loc hl = ctx->getBelLocation(home);
+    std::vector<CellInfo *> sinks;
+    for (int i = 0; i < 8; i++) {
+        CellInfo *lut = ctx->createCell(ctx->idf("sink%d", i), id_SLICE_LUTX);
+        lut->addInput(id_A1);
+        lut->addOutput(id_O6);
+        lut->connectPort(id_A1, q);
+        lut->connectPort(id_O6, ctx->createNet(ctx->idf("sink%d_o", i)));
+        sinks.push_back(lut);
+    }
+    ctx->assignArchInfo();
+    xil->assign_cell_tags();
+    xil->cell_tags_set = true;
+    ctx->bindBel(home, ff, STRENGTH_WEAK);
+    // a free LUT bel in a logic tile at or after (x, y)
+    auto lut_bel_near = [&](int x, int y) {
+        for (int dy = 0; dy < 40; dy++)
+            for (int dx = 0; dx < 40; dx++) {
+                for (BelId bel : ctx->getBelsByTile(x + dx, y + dy)) {
+                    if (ctx->getBelType(bel) == id_SLICE_LUTX && ctx->checkBelAvail(bel) && xil->is_logic_tile(bel))
+                        return bel;
+                }
+            }
+        return BelId();
+    };
+    // the far group as far right as this (small) die allows
+    const int far_x = std::min(hl.x + 120, ctx->getGridDimX() - 45);
+    ASSERT_GT(far_x, hl.x + 40);
+    for (int i = 0; i < 8; i++) {
+        BelId b = lut_bel_near(i < 4 ? hl.x : far_x, hl.y + 2 * i);
+        ASSERT_NE(b, BelId()) << i;
+        ctx->bindBel(b, sinks[i], STRENGTH_WEAK);
+    }
+
+    xil->replicate_merged_ffs();
+
+    CellInfo *copy = ctx->cells.count(ctx->id("ff$dup1")) ? ctx->cells.at(ctx->id("ff$dup1")).get() : nullptr;
+    ASSERT_NE(copy, nullptr);
+    EXPECT_EQ(copy->type, id_SLICE_FFX);
+    EXPECT_EQ(copy->getPort(id_D), n1);
+    EXPECT_EQ(copy->getPort(id_CK), clk);
+    EXPECT_EQ(copy->attrs.count(id_MERGED_EQUIV), size_t(0));
+    ASSERT_NE(copy->bel, BelId());
+    Loc cl = ctx->getBelLocation(copy->bel);
+    EXPECT_GT(cl.x, (hl.x + far_x) / 2); // placed by the far group
+    // the far sinks read the copy, the near ones the original
+    int far_on_copy = 0, near_on_orig = 0;
+    for (int i = 0; i < 8; i++) {
+        NetInfo *d = sinks[i]->getPort(id_A1);
+        if (i >= 4 && d == copy->getPort(id_Q))
+            far_on_copy++;
+        if (i < 4 && d == q)
+            near_on_orig++;
+    }
+    EXPECT_EQ(far_on_copy, 4);
+    EXPECT_EQ(near_on_orig, 4);
+    EXPECT_TRUE(ctx->isBelLocationValid(copy->bel));
+}
