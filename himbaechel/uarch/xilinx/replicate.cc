@@ -173,8 +173,11 @@ void XilinxImpl::replicate_merged_ffs()
         std::vector<Pt> all = pts;
         all.push_back(Pt{here.x, here.y});
         const int64_t single = hpwl(all);
+        // A split has to buy a quarter of the net's wirelength, not just beat
+        // it: clustering always finds something marginally shorter, and a
+        // copy is a flip-flop, a site and a net.
         int best_k = 1;
-        int64_t best_cost = single;
+        int64_t best_cost = single * 3 / 4;
         std::vector<int> best_assign;
         std::vector<Pt> best_centres;
         const int kmax = std::min(absorbed + 1, std::min(4, int(sinks.size())));
@@ -201,6 +204,7 @@ void XilinxImpl::replicate_merged_ffs()
         }
         if (best_k == 1)
             continue;
+        best_cost = std::min(best_cost, single); // the saving below is against the whole net
         // the biggest cluster keeps the original
         std::vector<int> size(best_k, 0);
         for (int a : best_assign)
