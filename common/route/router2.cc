@@ -29,6 +29,11 @@
 #include "router2.h"
 
 #include <algorithm>
+#include <atomic>
+#include <thread>
+#include <memory>
+#include <map>
+#include <functional>
 #include <boost/container/flat_map.hpp>
 #include <chrono>
 #include <deque>
@@ -110,6 +115,8 @@ struct Router2
         bool unavailable = false;
         // This wire has to be used for this net
         int reserved_net = -1;
+        // Index into flat_resources of the resource this wire belongs to, or -1
+        int32_t resource = -1;
         // The notional location of the wire, to guarantee thread safety
         int16_t x = 0, y = 0;
         // Visit data
@@ -128,6 +135,39 @@ struct Router2
 
     Context *ctx;
     Router2Cfg cfg;
+
+    // Search statistics for the running iteration, for the progress log: a
+    // pass that takes hours otherwise says nothing about how far it is or
+    // how much of the box each arc's search is visiting.
+    std::atomic<int64_t> stat_nets{0}, stat_arcs{0}, stat_explored{0}, stat_unbounded{0};
+    size_t stat_nets_total = 0;
+    std::chrono::steady_clock::time_point stat_last_log;
+    void log_progress(const char *phase)
+    {
+        int64_t arcs = stat_arcs.load();
+        log_info("    routing %s: %lld/%zu nets, %lld arcs, %.0f wires explored per arc, %lld unbounded retries\n",
+                 phase, (long long)stat_nets.load(), stat_nets_total, (long long)arcs,
+                 arcs ? double(stat_explored.load()) / double(arcs) : 0.0, (long long)stat_unbounded.load());
+        stat_last_log = std::chrono::steady_clock::now();
+    }
+    std::mutex progress_mutex;
+    // Any thread may report, one at a time: the first thread of a phase can
+    // finish its share long before the others, so it must not be the only
+    // one that can speak.
+    void report_progress(const char *phase)
+    {
+        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - stat_last_log).count() <= 120.0)
+            return;
+        std::unique_lock<std::mutex> lock(progress_mutex, std::try_to_lock);
+        if (!lock.owns_lock())
+            return;
+        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - stat_last_log).count() > 120.0)
+            log_progress(phase);
+    }
+    bool progress_due()
+    {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - stat_last_log).count() > 120.0;
+    }
 
     Router2(Context *ctx, const Router2Cfg &cfg) : ctx(ctx), cfg(cfg), tmg(ctx)
     {
@@ -217,15 +257,24 @@ struct Router2
         }
     }
 
-    dict<WireId, int> wire_to_idx;
+    dict<WireId, int> wire_to_idx;      // archs without a dense wire index
+    std::vector<int32_t> dense_to_flat; // dense wire index -> flat_wires index
+    bool have_dense_wires = false;
     std::vector<PerWireData> flat_wires;
 
-    PerWireData &wire_data(WireId w) { return flat_wires[wire_to_idx.at(w)]; }
+    inline int widx(WireId w) const
+    {
+        return have_dense_wires ? dense_to_flat[ctx->getWireDenseIndex(w)] : widx(w);
+    }
+    PerWireData &wire_data(WireId w) { return flat_wires[widx(w)]; }
 
     void setup_wires()
     {
         // Set up per-wire structures, so that MT parts don't have to do any memory allocation
         // This is possibly quite wasteful and not cache-optimal; further consideration necessary
+        have_dense_wires = ctx->getWireDenseCount() > 0;
+        if (have_dense_wires)
+            dense_to_flat.assign(ctx->getWireDenseCount(), -1);
         for (auto wire : ctx->getWires()) {
             PerWireData pwd;
             pwd.w = wire;
@@ -254,7 +303,10 @@ struct Router2
             pwd.x = (wire_loc.x0 + wire_loc.x1) / 2;
             pwd.y = (wire_loc.y0 + wire_loc.y1) / 2;
 
-            wire_to_idx[wire] = int(flat_wires.size());
+            if (have_dense_wires)
+                dense_to_flat[ctx->getWireDenseIndex(wire)] = int(flat_wires.size());
+            else
+                wire_to_idx[wire] = int(flat_wires.size());
             flat_wires.push_back(pwd);
         }
 
@@ -273,7 +325,6 @@ struct Router2
     }
 
     dict<GroupId, int> resource_to_idx;
-    dict<WireId, int> wire_to_resource;
     std::vector<PerResourceData> flat_resources;
 
     PerResourceData &resource_data(GroupId r) { return flat_resources[resource_to_idx.at(r)]; }
@@ -295,9 +346,9 @@ struct Router2
                 entry = resource_to_idx.find(resource_key);
             }
             for (auto pip : ctx->getGroupPips(resource_key)) {
-                auto dest_wire = ctx->getPipDstWire(pip);
-                if (wire_to_resource.count(dest_wire) == 0)
-                    wire_to_resource.insert({dest_wire, entry->second});
+                auto &dest = wire_data(ctx->getPipDstWire(pip));
+                if (dest.resource < 0)
+                    dest.resource = entry->second;
             }
         }
     }
@@ -501,9 +552,8 @@ struct Router2
                         ((std::abs(pl.x - nd.cx) + std::abs(pl.y - nd.cy)) / float(nd.hpwl));
         }
 
-        auto resource_key = wire_to_resource.find(wire);
-        if (resource_key != wire_to_resource.end()) {
-            auto &rd = flat_resources.at(resource_key->second);
+        if (wd.resource >= 0) {
+            auto &rd = flat_resources[wd.resource];
             resource_hist_cost = 1.0f + crit_weight * (rd.hist_cong_cost - 1.0f);
             resource_present_cost = 1.0f + rd.value_count.size() * curr_cong_weight * crit_weight;
         }
@@ -591,7 +641,7 @@ struct Router2
             PipId pip = nd.wires.at(cursor).first;
             if (pip == PipId())
                 break;
-            size_t wire_idx = wire_to_idx.at(cursor);
+            size_t wire_idx = widx(cursor);
             bind_pip_internal(nd, usr, wire_idx, pip);
             cursor = ctx->getPipSrcWire(pip);
         }
@@ -863,8 +913,8 @@ struct Router2
         if (dst_wire == WireId())
             ARC_LOG_ERR("No wire found for port %s on destination cell %s.\n", ctx->nameOf(usr.port),
                         ctx->nameOf(usr.cell));
-        int src_wire_idx = const_mode ? -1 : wire_to_idx.at(src_wire);
-        int dst_wire_idx = wire_to_idx.at(dst_wire);
+        int src_wire_idx = const_mode ? -1 : widx(src_wire);
+        int dst_wire_idx = widx(dst_wire);
         // Calculate a timing weight based on criticality
         float crit = get_arc_crit(net, i);
         float crit_weight = std::max<float>(0.05f, (1.0f - std::pow(crit, 2)));
@@ -905,7 +955,7 @@ struct Router2
                 WireScore base_score;
                 base_score.delay = 0;
                 base_score.cost = 0;
-                int wire_idx = wire_to_idx.at(wire);
+                int wire_idx = widx(wire);
                 base_score.togo_cost = get_togo_cost(net, i, wire_idx, dst_wire, false, crit_weight);
                 t.fwd_queue.push(QueuedWire(wire_idx, base_score));
                 set_visited_fwd(t, wire_idx, PipId(), 0.0);
@@ -937,7 +987,7 @@ struct Router2
                 WireScore base_score;
                 base_score.delay = 0;
                 base_score.cost = 0;
-                int wire_idx = wire_to_idx.at(wire);
+                int wire_idx = widx(wire);
                 base_score.togo_cost = get_togo_cost(net, i, wire_idx, src_wire, true, crit_weight);
                 t.bwd_queue.push(QueuedWire(wire_idx, base_score));
                 set_visited_bwd(t, wire_idx, PipId(), 0.0);
@@ -977,7 +1027,7 @@ struct Router2
                         if (!ctx->checkPipAvailForNet(dh, net))
                             continue;
                         WireId next = ctx->getPipDstWire(dh);
-                        int next_idx = wire_to_idx.at(next);
+                        int next_idx = widx(next);
                         WireScore next_score;
                         next_score.delay = curr.score.delay + cfg.get_base_cost(ctx, next, dh, crit_weight);
                         next_score.cost = curr.score.cost + score_wire_for_arc(net, i, phys_pin, next, dh, crit_weight);
@@ -1052,7 +1102,7 @@ struct Router2
                         if (!ctx->checkPipAvailForNet(uh, net))
                             continue;
                         WireId next = ctx->getPipSrcWire(uh);
-                        int next_idx = wire_to_idx.at(next);
+                        int next_idx = widx(next);
                         WireScore next_score;
                         next_score.delay = curr.score.delay + cfg.get_base_cost(ctx, next, uh, crit_weight);
                         next_score.cost = curr.score.cost + score_wire_for_arc(net, i, phys_pin, next, uh, crit_weight);
@@ -1117,7 +1167,7 @@ struct Router2
                         ROUTE_LOG_DBG("         fwd pip: %s (%d, %d)\n", ctx->nameOfPip(pip),
                                       ctx->getPipLocation(pip).x, ctx->getPipLocation(pip).y);
                     }
-                    cursor_bwd = wire_to_idx.at(ctx->getPipSrcWire(pip));
+                    cursor_bwd = widx(ctx->getPipSrcWire(pip));
                 }
 
                 while (cursor_bwd != src_wire_idx) {
@@ -1135,7 +1185,7 @@ struct Router2
                     bind_pip_internal(nd, i, cursor_bwd, pip);
                     if (pip == PipId())
                         break;
-                    cursor_bwd = wire_to_idx.at(ctx->getPipSrcWire(pip));
+                    cursor_bwd = widx(ctx->getPipSrcWire(pip));
                 }
 
                 NPNR_ASSERT(cursor_bwd == src_wire_idx);
@@ -1157,7 +1207,7 @@ struct Router2
                                   ctx->getPipLocation(pip).y);
                 }
 
-                cursor_fwd = wire_to_idx.at(ctx->getPipDstWire(pip));
+                cursor_fwd = widx(ctx->getPipDstWire(pip));
                 bind_pip_internal(nd, i, cursor_fwd, pip);
                 if (ctx->debug && !is_mt) {
                     auto &wd = flat_wires.at(cursor_fwd);
@@ -1179,6 +1229,10 @@ struct Router2
                           is_bb, std::chrono::duration<float>(arc_end - arc_start).count());
             result = ARC_RETRY_WITHOUT_BB;
         }
+        stat_explored += explored;
+        ++stat_arcs;
+        if (!is_bb)
+            ++stat_unbounded;
         reset_wires(t);
         return result;
     }
@@ -1606,7 +1660,7 @@ struct Router2
         for (size_t i = 0; i < nets_by_udata.size(); i++) {
             IdString name = nets_by_udata.at(i)->name;
             for (const auto &wire : nets.at(i).wires) {
-                const auto &wd = flat_wires.at(wire_to_idx.at(wire.first));
+                const auto &wd = flat_wires.at(widx(wire.first));
                 if (wd.curr_cong > 1)
                     congestion_by_net[name] += (wd.curr_cong - 1);
             }
@@ -1663,12 +1717,15 @@ struct Router2
                 log_info("        bin %d N=%d\n", i, bins[i]);
     }
 
-    void router_thread(ThreadContext &t, bool is_mt)
+    void router_thread(ThreadContext &t, bool is_mt, const char *report_as = nullptr)
     {
         for (auto n : t.route_nets) {
             bool result = route_net(t, n, is_mt);
             if (!result)
                 t.failed_nets.push_back(n);
+            ++stat_nets;
+            if (report_as != nullptr)
+                report_progress(report_as);
         }
     }
 
@@ -1681,6 +1738,7 @@ struct Router2
             st.bb = BoundingBox(0, 0, std::numeric_limits<int>::max(), std::numeric_limits<int>::max());
             for (size_t j = 0; j < route_queue.size(); j++) {
                 route_net(st, nets_by_udata[route_queue[j]], false);
+                ++stat_nets;
             }
             return;
         }
@@ -1736,7 +1794,105 @@ struct Router2
         }
         if (ctx->verbose)
             log_info("%d/%d nets not multi-threadable\n", int(tcs.at(N).route_nets.size()), int(route_queue.size()));
+
+        // Finer partitions inside each quadrant.  Four quadrant threads leave
+        // a 24-thread machine mostly idle, and the quadrant nets are the
+        // short ones: each quadrant is cut again into four by its own pin
+        // medians, recursively, and a net goes to the deepest region that
+        // holds its box.  The deepest level routes first, with one thread
+        // per region (disjoint boxes, so the same thread-safety argument as
+        // the quadrants), then each shallower level, then the quadrants
+        // with what did not fit, then the halves and the serial part as before.
+        struct SubRegion
+        {
+            BoundingBox bb;
+            std::vector<NetInfo *> nets;
+            int level;
+        };
+        std::vector<SubRegion> subs;
+        const int depth = partition_depth();
+        if (depth > 1) {
+            // split a region's nets four ways about their pin medians
+            std::function<void(BoundingBox, std::vector<NetInfo *> &, int)> cut = [&](BoundingBox bb,
+                                                                                        std::vector<NetInfo *> &in,
+                                                                                        int level) {
+                if (level > depth || in.size() < 400)
+                    return;
+                std::map<int, int> xs, ys;
+                for (auto ni : in) {
+                    auto &nd = nets.at(ni->udata);
+                    int w = int(ni->users.entries()) + 1;
+                    xs[nd.bb.x0] += w;
+                    xs[nd.bb.x1] += w;
+                    ys[nd.bb.y0] += w;
+                    ys[nd.bb.y1] += w;
+                }
+                auto median = [](std::map<int, int> &h) {
+                    int64_t tot = 0, acc = 0;
+                    for (auto &p : h)
+                        tot += p.second;
+                    for (auto &p : h) {
+                        acc += p.second;
+                        if (acc * 2 >= tot)
+                            return p.first;
+                    }
+                    return h.rbegin()->first;
+                };
+                int mx = median(xs), my = median(ys);
+                // a cut that leaves nothing on one side would just recurse into itself
+                if (mx <= bb.x0 || mx >= bb.x1 || my <= bb.y0 || my >= bb.y1)
+                    return;
+                BoundingBox q[4] = {BoundingBox(bb.x0, bb.y0, mx, my), BoundingBox(mx + 1, bb.y0, bb.x1, my),
+                                    BoundingBox(bb.x0, my + 1, mx, bb.y1), BoundingBox(mx + 1, my + 1, bb.x1, bb.y1)};
+                std::vector<NetInfo *> keep, child[4];
+                for (auto ni : in) {
+                    auto &nd = nets.at(ni->udata);
+                    int k = -1;
+                    for (int i = 0; i < 4; i++)
+                        if (nd.bb.x0 >= q[i].x0 && nd.bb.x1 <= q[i].x1 && nd.bb.y0 >= q[i].y0 && nd.bb.y1 <= q[i].y1) {
+                            k = i;
+                            break;
+                        }
+                    if (k < 0)
+                        keep.push_back(ni);
+                    else
+                        child[k].push_back(ni);
+                }
+                in.swap(keep);
+                for (int i = 0; i < 4; i++) {
+                    if (child[i].empty())
+                        continue;
+                    subs.push_back(SubRegion{q[i], std::move(child[i]), level});
+                    size_t idx = subs.size() - 1;
+                    std::vector<NetInfo *> own;
+                    own.swap(subs[idx].nets);
+                    cut(q[i], own, level + 1);
+                    subs[idx].nets.swap(own); // what the deeper cuts left behind
+                }
+            };
+            for (int i = 0; i < Nq; i++)
+                cut(tcs.at(i).bb, tcs.at(i).route_nets, 2);
+            if (ctx->verbose) {
+                std::map<int, std::pair<int, size_t>> per_level;
+                for (auto &sr : subs) {
+                    per_level[sr.level].first++;
+                    per_level[sr.level].second += sr.nets.size();
+                }
+                for (auto &pl : per_level)
+                    log_info("    partition level %d: %d regions, %zu nets\n", pl.first, pl.second.first,
+                             pl.second.second);
+            }
+        }
+        std::vector<NetInfo *> sub_failed;
 #ifdef NPNR_DISABLE_THREADS
+        for (auto &sr : subs) {
+            ThreadContext st;
+            st.rng.rngseed(ctx->rng64());
+            st.bb = sr.bb;
+            st.route_nets = sr.nets;
+            router_thread(st, /*is_mt=*/false);
+            sub_failed.insert(sub_failed.end(), st.failed_nets.begin(), st.failed_nets.end());
+        }
         // Singlethreaded routing - quadrants
         for (int i = 0; i < Nq; i++) {
             router_thread(tcs.at(i), /*is_mt=*/false);
@@ -1750,24 +1906,48 @@ struct Router2
             router_thread(tcs.at(i), /*is_mt=*/false);
         }
 #else
-        // Multithreaded part of routing - quadrants
         std::vector<boost::thread> threads;
+        // Deepest sub-regions first; each level's regions are disjoint
+        for (int level = depth; level >= 2; level--) {
+            std::vector<std::unique_ptr<ThreadContext>> stcs;
+            for (auto &sr : subs) {
+                if (sr.level != level)
+                    continue;
+                stcs.emplace_back(new ThreadContext());
+                auto &st = *stcs.back();
+                st.rng.rngseed(ctx->rng64());
+                st.bb = sr.bb;
+                st.route_nets = sr.nets;
+            }
+            if (stcs.empty())
+                continue;
+            for (size_t i = 0; i < stcs.size(); i++) {
+                ThreadContext *st = stcs[i].get();
+                threads.emplace_back([this, st]() { router_thread(*st, /*is_mt=*/true, "sub-regions"); });
+            }
+            for (auto &t : threads)
+                t.join();
+            threads.clear();
+            for (auto &st : stcs)
+                sub_failed.insert(sub_failed.end(), st->failed_nets.begin(), st->failed_nets.end());
+        }
+        // Multithreaded part of routing - quadrants
         for (int i = 0; i < Nq; i++) {
-            threads.emplace_back([this, &tcs, i]() { router_thread(tcs.at(i), /*is_mt=*/true); });
+            threads.emplace_back([this, &tcs, i]() { router_thread(tcs.at(i), /*is_mt=*/true, "quadrants"); });
         }
         for (auto &t : threads)
             t.join();
         threads.clear();
         // Vertical splits
         for (int i = Nq; i < Nq + Nv; i++) {
-            threads.emplace_back([this, &tcs, i]() { router_thread(tcs.at(i), /*is_mt=*/true); });
+            threads.emplace_back([this, &tcs, i]() { router_thread(tcs.at(i), /*is_mt=*/true, "halves"); });
         }
         for (auto &t : threads)
             t.join();
         threads.clear();
         // Horizontal splits
         for (int i = Nq + Nv; i < Nq + Nv + Nh; i++) {
-            threads.emplace_back([this, &tcs, i]() { router_thread(tcs.at(i), /*is_mt=*/true); });
+            threads.emplace_back([this, &tcs, i]() { router_thread(tcs.at(i), /*is_mt=*/true, "halves"); });
         }
         for (auto &t : threads)
             t.join();
@@ -1775,12 +1955,41 @@ struct Router2
 #endif
         // Singlethreaded part of routing - nets that cross partitions
         // or don't fit within bounding box
-        for (auto st_net : tcs.at(N).route_nets)
+        log_progress("partitions done; serial part");
+        for (auto st_net : tcs.at(N).route_nets) {
             route_net(tcs.at(N), st_net, false);
+            ++stat_nets;
+            if (progress_due())
+                log_progress("serial");
+        }
         // Failed nets
+        for (auto fail : sub_failed) {
+            route_net(tcs.at(N), fail, false);
+            if (progress_due())
+                log_progress("retrying failed");
+        }
         for (int i = 0; i < N; i++)
-            for (auto fail : tcs.at(i).failed_nets)
+            for (auto fail : tcs.at(i).failed_nets) {
                 route_net(tcs.at(N), fail, false);
+                if (progress_due())
+                    log_progress("retrying failed");
+            }
+    }
+
+    // How many quadtree levels to cut the quadrants into: 4^depth regions at
+    // the deepest level, matched to the threads available (the setting from
+    // --threads, else the hardware), overridable with --router2-partition-depth.
+    int partition_depth()
+    {
+        if (ctx->settings.count(ctx->id("router2/partitionDepth")))
+            return std::max(1, ctx->setting<int>("router2/partitionDepth"));
+        int threads = ctx->settings.count(ctx->id("threads")) ? ctx->setting<int>("threads")
+                                                              : int(std::thread::hardware_concurrency());
+        if (threads >= 64)
+            return 3;
+        if (threads >= 12)
+            return 2;
+        return 1;
     }
 
     delay_t get_route_delay(int net, store_index<PortRef> usr_idx, int phys_idx)
@@ -1917,7 +2126,7 @@ struct Router2
         // to the values the snapshot was taken at.
         for (auto &w : s.wires)
             for (int k = 0; k < w.second.second; k++)
-                bind_pip_internal(nd, store_index<PortRef>(), wire_to_idx.at(w.first), w.second.first);
+                bind_pip_internal(nd, store_index<PortRef>(), widx(w.first), w.second.first);
         for (size_t u = 0; u < nd.arcs.size(); u++)
             for (size_t j = 0; j < nd.arcs.at(u).size(); j++) {
                 nd.arcs.at(u).at(j).routed = s.arcs.at(u).at(j).first;
@@ -2275,9 +2484,9 @@ struct Router2
         log_info("Running router2...\n");
         log_info("Setting up routing resources...\n");
         auto rstart = std::chrono::high_resolution_clock::now();
-        setup_resources();
         setup_nets();
         setup_wires();
+        setup_resources(); // after the wires: it tags their resource index
         find_all_reserved_wires();
         partition_nets();
         curr_cong_weight = cfg.init_curr_cong_weight;
@@ -2340,6 +2549,9 @@ struct Router2
                 }
             }
 
+            stat_nets = 0; stat_arcs = 0; stat_explored = 0; stat_unbounded = 0;
+            stat_nets_total = route_queue.size();
+            stat_last_log = std::chrono::steady_clock::now();
             do_route();
             update_route_delays();
             route_queue.clear();
@@ -2404,6 +2616,10 @@ struct Router2
                 log_info("    iter=%d wires=%d overused=%d overuse=%d %sarchfail=%s\n", iter, total_wire_use,
                          overused_wires, total_wire_overuse, resource_str.c_str(),
                          (overused_wires > 0 || tmgfail > 0) ? "NA" : std::to_string(arch_fail).c_str());
+            log_info("          search: %lld arcs, %.0f wires explored per arc, %lld unbounded retries\n",
+                     (long long)stat_arcs.load(),
+                     stat_arcs ? double(stat_explored.load()) / double(stat_arcs.load()) : 0.0,
+                     (long long)stat_unbounded.load());
             ++iter;
             if (curr_cong_weight < 1e9)
                 curr_cong_weight += cfg.curr_cong_mult;
