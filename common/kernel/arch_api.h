@@ -76,6 +76,12 @@ template <typename R> struct ArchAPI : BaseCtx
     virtual typename R::UphillPipRangeT getPipsUphill(WireId wire) const = 0;
     virtual typename R::WireBelPinRangeT getWireBelPins(WireId wire) const = 0;
     virtual uint32_t getWireChecksum(WireId wire) const = 0;
+    // Dense numbering of wires, 0..getWireDenseCount()-1, for routers that
+    // keep per-wire tables: a flat array beats a hash map with tens of
+    // millions of entries.  Count 0 means the arch has none and callers must
+    // fall back to a map.
+    virtual int32_t getWireDenseIndex(WireId wire) const = 0;
+    virtual int32_t getWireDenseCount() const = 0;
     virtual void bindWire(WireId wire, NetInfo *net, PlaceStrength strength) = 0;
     virtual void unbindWire(WireId wire) = 0;
     virtual bool checkWireAvail(WireId wire) const = 0;

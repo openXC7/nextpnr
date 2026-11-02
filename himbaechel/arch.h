@@ -548,6 +548,10 @@ struct Arch : BaseArch<ArchRanges>
         return IdString(chip_wire_info(chip_info, wire).const_value);
     }
     WireRange getWires() const override { return WireRange(chip_info); }
+    // tile_wire_base[t] + index numbers every (tile, index) pair, root or not;
+    // the non-root ones that normalise_wire() folds away simply go unused.
+    int32_t getWireDenseIndex(WireId wire) const override { return wire_dense_base[wire.tile] + wire.index; }
+    int32_t getWireDenseCount() const override { return wire_dense_base.back(); }
     bool checkWireAvail(WireId wire) const override
     {
         if (!uarch->checkWireAvail(wire))
@@ -902,6 +906,7 @@ struct Arch : BaseArch<ArchRanges>
     void init_tiles();
     void set_fast_pip_delays(bool fast_mode);
     std::vector<IdString> tile_name;
+    std::vector<int32_t> wire_dense_base; // tiles + 1 entries, see getWireDenseIndex
     dict<IdString, int> tile_name2idx;
 
     // -------------------------------------------------
