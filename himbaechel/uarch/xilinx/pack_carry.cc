@@ -399,11 +399,13 @@ void XC7Packer::pack_carries()
             }
             if (!di_lut && c4_di) {
                 // A constant keeps its LUT: the bit is a LUT INIT, not a route.
-                // Position 0's bypass pin may already carry CYINIT.
+                // Position 0's bypass pin carries CYINIT when there is one --
+                // a constant too, since PRECYINIT's hard 0/1 legs are only
+                // usable while position A's LUTs are free, which the S LUT
+                // rules out, so the router brings the constant in on AX.
                 const bool di_is_constant = c4_di->name == gnd_net || c4_di->name == vcc_net;
                 NetInfo *cyinit = (z == 0) ? c4->getPort(id_CYINIT) : nullptr;
-                const bool bypass_pin_is_cyinit =
-                        cyinit != nullptr && cyinit->name != gnd_net && cyinit->name != vcc_net && cyinit != c4_di;
+                const bool bypass_pin_is_cyinit = cyinit != nullptr && cyinit != c4_di;
                 if (di_bypass_allowed && !di_is_constant && !bypass_pin_is_cyinit) {
                     int mask = int_or_default(c4->params, id_DI_BYPASS, 0) | (1 << z);
                     c4->params[id_DI_BYPASS] = Property(mask, 4);

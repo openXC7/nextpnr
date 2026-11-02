@@ -679,3 +679,77 @@ TEST_F(XilinxRouteThruTest, carry_di_bypass_pips_stay_available_with_the_carry_p
     }
     EXPECT_GT(n, 0);
 }
+
+TEST_F(XilinxRouteThruTest, carry_di_bypass_pips_in_a_slicem)
+{
+    // The same legs in the SLICEM of a CLBLM tile, where the quick-set
+    // designs saw the DI-mux sink unreachable
+    setup_nets();
+    CellInfo *c4 = ctx->createCell(ctx->id("c4"), id_CARRY4);
+    for (int i = 0; i < 4; i++) {
+        c4->addInput(ctx->idf("S%d", i));
+        c4->addInput(ctx->idf("DI%d", i));
+        c4->addOutput(ctx->idf("O%d", i));
+        c4->addOutput(ctx->idf("CO%d", i));
+    }
+    c4->addInput(id_CYINIT);
+    c4->addInput(id_CIN);
+    c4->connectPort(ctx->id("DI2"), n2);
+    c4->params[id_DI_BYPASS] = Property(4, 4);
+    ctx->assignArchInfo();
+    xil->assign_cell_tags();
+    xil->cell_tags_set = true;
+    BelId cy;
+    for (BelId bel : ctx->getBels()) {
+        if (!xil->is_logic_tile(bel) || ctx->getBelName(bel)[1] != ctx->id("SLICE_X0Y0.CARRY4"))
+            continue;
+        IdString tt = xil->bel_tile_type(bel);
+        if (tt == id_CLBLM_L || tt == id_CLBLM_R) {
+            cy = bel;
+            break;
+        }
+    }
+    ASSERT_NE(cy, BelId());
+    ctx->bindBel(cy, c4, STRENGTH_USER);
+    EXPECT_TRUE(ctx->isBelLocationValid(cy));
+    WireId w = ctx->getBelPinWire(cy, ctx->id("DI2"));
+    ASSERT_NE(w, WireId());
+    int avail = 0;
+    for (PipId pip : ctx->getPipsUphill(w)) {
+        bool ok = ctx->checkPipAvailForNet(pip, nullptr);
+        log_info("    %s <- %s%s\n", ctx->nameOfWire(w), ctx->nameOfWire(ctx->getPipSrcWire(pip)), ok ? "" : " (unavailable)");
+        avail += ok;
+    }
+    EXPECT_GE(avail, 2);
+    // and from the X pin back to the interconnect
+    WireId cursor = ctx->getWireByName(IdStringList::concat(ctx->getBelName(cy)[0], ctx->id("SLICE_X0Y0.CX")));
+    for (int hop = 0; hop < 4 && cursor != WireId(); hop++) {
+        PipId up;
+        int n = 0;
+        for (PipId pip : ctx->getPipsUphill(cursor)) {
+            if (ctx->checkPipAvailForNet(pip, nullptr)) {
+                up = pip;
+                n++;
+            }
+        }
+        log_info("    %s has %d available uphill pips\n", ctx->nameOfWire(cursor), n);
+        cursor = (n >= 1) ? ctx->getPipSrcWire(up) : WireId();
+    }
+}
+
+TEST_F(XilinxRouteThruTest, precyinit_legs)
+{
+    // What feeds a carry's CYINIT: the constant legs, CIN, and the AX pin
+    BelId cy = logic_bel("SLICE_X0Y0.CARRY4");
+    ASSERT_NE(cy, BelId());
+    WireId w = ctx->getBelPinWire(cy, id_CYINIT);
+    ASSERT_NE(w, WireId());
+    for (PipId pip : ctx->getPipsUphill(w))
+        log_info("    %s <- %s\n", ctx->nameOfWire(w), ctx->nameOfWire(ctx->getPipSrcWire(pip)));
+}
+
+TEST_F(XilinxRouteThruTest, chipdb_has_ff_mux_route_throughs)
+{
+    log_info("    ff_routethru_pips = %d\n", int(xil->ff_routethru_pips));
+    EXPECT_TRUE(xil->ff_routethru_pips);
+}
