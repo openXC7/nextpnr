@@ -17,6 +17,7 @@
  *
  */
 
+#include <limits>
 #include "arch.h"
 #include "archdefs.h"
 #include "chipdb.h"
@@ -198,6 +199,15 @@ void Arch::init_tiles()
             tile_name2idx[name] = tile;
         }
     }
+    int64_t base = 0;
+    wire_dense_base.reserve(chip_info->tile_insts.size() + 1);
+    for (int tile = 0; tile < chip_info->tile_insts.ssize(); tile++) {
+        wire_dense_base.push_back(int32_t(base));
+        base += chip_tile_info(chip_info, tile).wires.ssize();
+    }
+    if (base >= std::numeric_limits<int32_t>::max())
+        log_error("too many tile wires (%lld) for the dense wire index\n", (long long)base);
+    wire_dense_base.push_back(int32_t(base));
 }
 
 void Arch::late_init()
