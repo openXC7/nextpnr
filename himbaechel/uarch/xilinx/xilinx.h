@@ -172,6 +172,12 @@ struct XilinxImpl : HimbaechelAPI
     // Cached: is_pip_unavail is on the router's hot path.
     mutable bool design_has_bufr = false;
     mutable bool design_has_bufr_valid = false;
+    // is_pip_unavail's name tests, resolved once per tile type in init():
+    // tt_is_clk_bufg_r[type]; tt_wire_bufr_path[type][wire] (the wire is on the
+    // BUFR datapath); tt_pip_through_bufgctrl[type][pip] (I0/I1 -> O of a BUFGCTRL).
+    std::vector<uint8_t> tt_is_clk_bufg_r;
+    std::vector<std::vector<uint8_t>> tt_wire_bufr_path, tt_pip_through_bufgctrl;
+    void init_pip_avail_tables();
     bool checkPipAvail(PipId pip) const override { return !is_pip_unavail(pip); }
     bool checkPipAvailForNet(PipId pip, const NetInfo *net) const override { return !is_pip_unavail(pip); }
 
@@ -236,7 +242,31 @@ struct XilinxImpl : HimbaechelAPI
     bool cell_tags_set = false;
 
     // Improved delay predictions where sites are located far from their associated interconnect
-    dict<WireId, Loc> source_locs, sink_locs;
+    // Where a pin's net enters or leaves the general routing, for pins off
+    // the INT tiles.  Keyed by the arch's dense wire index into pin_loc_idx
+    // (-1: none), which selects a PinLoc; one PinLoc is shared by every wire
+    // of a search's backtrace.
+    struct PinLoc
+    {
+        Loc source, sink;
+        bool has_source = false, has_sink = false;
+    };
+    std::vector<int32_t> pin_loc_idx;
+    std::vector<PinLoc> pin_locs;
+    const PinLoc *pin_loc(WireId w) const
+    {
+        int32_t i = pin_loc_idx[ctx->getWireDenseIndex(w)];
+        return i < 0 ? nullptr : &pin_locs[i];
+    }
+    PinLoc &pin_loc_for(WireId w)
+    {
+        int32_t &i = pin_loc_idx[ctx->getWireDenseIndex(w)];
+        if (i < 0) {
+            i = int32_t(pin_locs.size());
+            pin_locs.emplace_back();
+        }
+        return pin_locs[i];
+    }
     bool is_general_routing(WireId wire) const;
     void find_source_sink_locs();
 
@@ -288,6 +318,7 @@ struct XilinxImpl : HimbaechelAPI
     bool is_movable_bram(const CellInfo *ci) const;
     bool place_brams_by_group();
     void replace_around_brams();
+    void refine_sparse_bels(); // sparse_refine.cc
 
     delay_t predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const override;
     delay_t estimateDelay(WireId src, WireId dst) const override;
