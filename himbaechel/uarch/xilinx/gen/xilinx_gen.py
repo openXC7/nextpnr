@@ -301,6 +301,25 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
                             site_key=(s.index << 8),
                             timing="SITE_NULL"
                         )
+                    # ... and its twin into the site, ending at the 6LUT's O6
+                    # site wire, which feeds the flip-flop mux: how a fabric
+                    # signal reaches the main FF of a position whose bypass
+                    # pin the 5FF already uses (Vivado's route-through).  Bit
+                    # 0 of the config tells the two apart; the LUT INIT the
+                    # FASM writer emits is the same.
+                    o6 = None
+                    for b in s.bels():
+                        if b.name() == f"{swn[0]}6LUT":
+                            for bp in b.pins():
+                                if bp.name == "O6":
+                                    o6 = bp.site_wire()
+                    if o6 is not None:
+                        add_pip(pin.tile_wire().name(), lookup_site_wire(o6),
+                                pip_class=PipClass.LUT_ROUTETHRU,
+                                pip_config=rt_config | 1,
+                                site_key=(s.index << 8),
+                                timing="SITE_NULL"
+                            )
 
                     return
 

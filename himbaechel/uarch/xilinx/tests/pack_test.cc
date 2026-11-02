@@ -349,3 +349,333 @@ TEST_F(XilinxPackTest, pack_bram_ramb36_width18_parity_untouched)
     EXPECT_EQ(ci->getPort(id_DIPADIP0), p0);
     EXPECT_EQ(ci->getPort(id_DIPADIP1), p1);
 }
+
+// ---------------------------------------------------------------------------
+// Carry DI inputs: the bypass pin instead of a buffer LUT (pack_carry.cc)
+
+// A flip-flop whose Q drives the given net: a fabric source as the packer
+// sees one (anything that is not a LUT).
+static NetInfo *fabric_net(Context *ctx, const char *name)
+{
+    CellInfo *ff = ctx->createCell(ctx->idf("%s_src", name), id_FDRE);
+    for (auto p : {id_C, id_CE, id_D, id_R})
+        ff->addInput(p);
+    ff->addOutput(id_Q);
+    NetInfo *net = ctx->createNet(ctx->id(name));
+    ff->connectPort(id_Q, net);
+    return net;
+}
+
+// A CARRY4 with the ports a mapped netlist carries: every S from its own
+// two-input LUT, DI[i] from di[i] (nullptr: unconnected), CYINIT as given.
+static CellInfo *create_carry4(Context *ctx, const char *name, NetInfo *di[4], NetInfo *cyinit)
+{
+    CellInfo *c4 = ctx->createCell(ctx->id(name), id_CARRY4);
+    c4->addInput(id_CYINIT);
+    c4->addInput(id_CI);
+    for (int i = 0; i < 4; i++) {
+        c4->addInput(ctx->idf("S[%d]", i));
+        c4->addInput(ctx->idf("DI[%d]", i));
+        c4->addOutput(ctx->idf("O[%d]", i));
+        c4->addOutput(ctx->idf("CO[%d]", i));
+        CellInfo *lut = ctx->createCell(ctx->idf("%s_s%d", name, i), id_LUT2);
+        lut->addInput(id_I0);
+        lut->addInput(id_I1);
+        lut->addOutput(id_O);
+        lut->params[id_INIT] = Property(6, 4);
+        lut->connectPort(id_I0, fabric_net(ctx, stringf("%s_a%d", name, i).c_str()));
+        lut->connectPort(id_I1, fabric_net(ctx, stringf("%s_b%d", name, i).c_str()));
+        NetInfo *s = ctx->createNet(ctx->idf("%s_sum%d", name, i));
+        lut->connectPort(id_O, s);
+        c4->connectPort(ctx->idf("S[%d]", i), s);
+        if (di[i] != nullptr)
+            c4->connectPort(ctx->idf("DI[%d]", i), di[i]);
+        NetInfo *o = ctx->createNet(ctx->idf("%s_o%d", name, i));
+        c4->connectPort(ctx->idf("O[%d]", i), o);
+        CellInfo *sink = ctx->createCell(ctx->idf("%s_q%d", name, i), id_FDRE);
+        for (auto p : {id_C, id_CE, id_D, id_R})
+            sink->addInput(p);
+        sink->addOutput(id_Q);
+        sink->connectPort(id_D, o);
+    }
+    if (cyinit != nullptr)
+        c4->connectPort(id_CYINIT, cyinit);
+    return c4;
+}
+
+// The CARRY4 pack_carries made from the chain
+static CellInfo *packed_carry4(Context *ctx)
+{
+    CellInfo *found = nullptr;
+    for (auto &cell : ctx->cells)
+        if (cell.second->type == id_CARRY4) {
+            if (found == nullptr)
+                found = cell.second.get();
+        }
+    return found;
+}
+
+static int di_lut_count(Context *ctx)
+{
+    int n = 0;
+    for (auto &cell : ctx->cells)
+        if (cell.second->name.str(ctx).find("$DI[") != std::string::npos)
+            n++;
+    return n;
+}
+
+TEST_F(XilinxPackTest, carry_di_from_fabric_takes_the_bypass_pin)
+{
+    XC7Packer p(ctx, xil);
+    p.pack_constants();
+    NetInfo *gnd = ctx->nets.at(ctx->id("$PACKER_GND_NET")).get();
+    NetInfo *di[4] = {gnd, fabric_net(ctx, "x1"), fabric_net(ctx, "x2"), gnd};
+    create_carry4(ctx, "add", di, gnd);
+
+    p.pack_carries();
+    ctx->assignArchInfo();
+    xil->assign_cell_tags();
+    xil->cell_tags_set = true; // bel changes update the tile status only once the tags exist
+
+    CellInfo *c4 = packed_carry4(ctx);
+    ASSERT_NE(c4, nullptr);
+    // positions 1 and 2 bypass; the constant positions keep a LUT (an INIT, not a route)
+    EXPECT_EQ(int_or_default(c4->params, id_DI_BYPASS, 0), (1 << 1) | (1 << 2));
+    EXPECT_EQ(c4->getPort(ctx->id("DI1")), di[1]); // ports carry the bel pin names once packed
+    EXPECT_EQ(c4->getPort(ctx->id("DI2")), di[2]);
+    EXPECT_EQ(di_lut_count(ctx), 2);
+    // the legality model sees the bypassed nets on the position's X pin
+    auto tags = xil->get_tags(c4);
+    ASSERT_NE(tags, nullptr);
+    EXPECT_EQ(tags->carry.x_sigs[1], di[1]);
+    EXPECT_EQ(tags->carry.x_sigs[2], di[2]);
+    EXPECT_EQ(tags->carry.x_sigs[3], nullptr);
+}
+
+TEST_F(XilinxPackTest, carry_di_from_a_single_load_lut_packs_the_lut)
+{
+    // A LUT whose only load is DI goes into the position's 5LUT as before
+    XC7Packer p(ctx, xil);
+    p.pack_constants();
+    NetInfo *gnd = ctx->nets.at(ctx->id("$PACKER_GND_NET")).get();
+    CellInfo *lut = ctx->createCell(ctx->id("dilut"), id_LUT1);
+    lut->addInput(id_I0);
+    lut->addOutput(id_O);
+    lut->params[id_INIT] = Property(2, 2);
+    lut->connectPort(id_I0, fabric_net(ctx, "y"));
+    NetInfo *dinet = ctx->createNet(ctx->id("dinet"));
+    lut->connectPort(id_O, dinet);
+    NetInfo *di[4] = {gnd, dinet, gnd, gnd};
+    create_carry4(ctx, "add", di, gnd);
+
+    p.pack_carries();
+
+    CellInfo *c4 = packed_carry4(ctx);
+    ASSERT_NE(c4, nullptr);
+    EXPECT_EQ(int_or_default(c4->params, id_DI_BYPASS, 0), 0);
+    EXPECT_EQ(lut->cluster, c4->cluster);
+    EXPECT_TRUE(lut->constr_abs_z);
+    EXPECT_EQ(lut->constr_z, (1 << 4) | BEL_5LUT);
+}
+
+TEST_F(XilinxPackTest, carry_di0_keeps_a_lut_when_cyinit_has_the_pin)
+{
+    // CYINIT from the fabric takes position 0's bypass pin, so DI[0] cannot
+    XC7Packer p(ctx, xil);
+    p.pack_constants();
+    NetInfo *gnd = ctx->nets.at(ctx->id("$PACKER_GND_NET")).get();
+    NetInfo *di[4] = {fabric_net(ctx, "x0"), gnd, gnd, gnd};
+    create_carry4(ctx, "add", di, fabric_net(ctx, "cin"));
+
+    p.pack_carries();
+
+    CellInfo *c4 = packed_carry4(ctx);
+    ASSERT_NE(c4, nullptr);
+    EXPECT_EQ(int_or_default(c4->params, id_DI_BYPASS, 0), 0);
+    EXPECT_EQ(di_lut_count(ctx), 4);
+}
+
+TEST_F(XilinxPackTest, carry_di_bypass_can_be_switched_off)
+{
+    ctx->args.options.insert(std::make_pair(std::string("carry-di-bypass"),
+                                            po::variable_value(boost::any(std::string("off")), false)));
+    XC7Packer p(ctx, xil);
+    p.pack_constants();
+    NetInfo *gnd = ctx->nets.at(ctx->id("$PACKER_GND_NET")).get();
+    NetInfo *di[4] = {gnd, fabric_net(ctx, "x1"), fabric_net(ctx, "x2"), gnd};
+    create_carry4(ctx, "add", di, gnd);
+
+    p.pack_carries();
+
+    CellInfo *c4 = packed_carry4(ctx);
+    ASSERT_NE(c4, nullptr);
+    EXPECT_EQ(int_or_default(c4->params, id_DI_BYPASS, 0), 0);
+    EXPECT_EQ(di_lut_count(ctx), 4);
+}
+
+// ---------------------------------------------------------------------------
+// Two fabric-fed flip-flops in one position: the 5FF on the bypass pin, the
+// main FF through the idle LUT as a route-through (xilinx_place.cc)
+
+class XilinxRouteThruTest : public XilinxPackTest
+{
+  protected:
+    // A packed flip-flop fed by a fabric net
+    CellInfo *packed_ff(const char *name, NetInfo *d)
+    {
+        CellInfo *ff = ctx->createCell(ctx->id(name), id_SLICE_FFX);
+        for (auto p : {id_D, id_CK, id_CE, id_SR})
+            ff->addInput(p);
+        ff->addOutput(id_Q);
+        ff->attrs[id_X_ORIG_TYPE] = Property("FDRE");
+        ff->connectPort(id_D, d);
+        ff->connectPort(id_CK, clk);
+        ff->connectPort(id_Q, ctx->createNet(ctx->idf("%s_q", name)));
+        return ff;
+    }
+    CellInfo *packed_lut(const char *name)
+    {
+        CellInfo *lut = ctx->createCell(ctx->id(name), id_SLICE_LUTX);
+        lut->addInput(id_A1);
+        lut->addOutput(id_O6);
+        lut->connectPort(id_A1, fabric_net(ctx, stringf("%s_in", name).c_str()));
+        lut->connectPort(id_O6, ctx->createNet(ctx->idf("%s_o", name)));
+        return lut;
+    }
+    // The bel of the given name in the first logic tile
+    BelId logic_bel(const char *name)
+    {
+        IdString want = ctx->id(name);
+        for (BelId bel : ctx->getBels())
+            if (xil->is_logic_tile(bel) && ctx->getBelName(bel)[1] == want)
+                return bel;
+        return BelId();
+    }
+    void setup_nets()
+    {
+        clk = ctx->createNet(ctx->id("clk"));
+        n1 = fabric_net(ctx, "n1");
+        n2 = fabric_net(ctx, "n2");
+    }
+    NetInfo *clk = nullptr, *n1 = nullptr, *n2 = nullptr;
+};
+
+TEST_F(XilinxRouteThruTest, main_ff_routes_through_the_idle_lut_beside_a_bypass_fed_5ff)
+{
+    setup_nets();
+    CellInfo *ff1 = packed_ff("ff1", n1);
+    CellInfo *ff2 = packed_ff("ff2", n2);
+    ctx->assignArchInfo();
+    xil->assign_cell_tags();
+    xil->cell_tags_set = true; // bel changes update the tile status only once the tags exist
+    BelId bff = logic_bel("SLICE_X0Y0.BFF"), b5ff = logic_bel("SLICE_X0Y0.B5FF");
+    ASSERT_NE(bff, BelId());
+    ASSERT_NE(b5ff, BelId());
+    ctx->bindBel(bff, ff1, STRENGTH_USER);
+    ctx->bindBel(b5ff, ff2, STRENGTH_USER);
+    // legal exactly when the chipdb can route into the FF mux through the LUT
+    EXPECT_EQ(ctx->isBelLocationValid(bff), xil->ff_routethru_pips);
+
+    // a LUT in the position takes the route-through away
+    CellInfo *lut = packed_lut("lut");
+    ctx->assignArchInfo();
+    xil->assign_cell_tags();
+    xil->cell_tags_set = true; // bel changes update the tile status only once the tags exist
+    ctx->bindBel(logic_bel("SLICE_X0Y0.B6LUT"), lut, STRENGTH_USER);
+    EXPECT_FALSE(ctx->isBelLocationValid(bff));
+}
+
+TEST_F(XilinxRouteThruTest, position_a_has_no_route_through)
+{
+    // Its LUT serves the ground driver (is_pip_unavail)
+    setup_nets();
+    CellInfo *ff1 = packed_ff("ff1", n1);
+    CellInfo *ff2 = packed_ff("ff2", n2);
+    ctx->assignArchInfo();
+    xil->assign_cell_tags();
+    xil->cell_tags_set = true; // bel changes update the tile status only once the tags exist
+    BelId aff = logic_bel("SLICE_X0Y0.AFF");
+    ASSERT_NE(aff, BelId());
+    ctx->bindBel(aff, ff1, STRENGTH_USER);
+    ctx->bindBel(logic_bel("SLICE_X0Y0.A5FF"), ff2, STRENGTH_USER);
+    EXPECT_FALSE(ctx->isBelLocationValid(aff));
+}
+
+TEST_F(XilinxRouteThruTest, one_fabric_fed_ff_per_position_stays_legal)
+{
+    setup_nets();
+    CellInfo *ff2 = packed_ff("ff2", n2);
+    ctx->assignArchInfo();
+    xil->assign_cell_tags();
+    xil->cell_tags_set = true; // bel changes update the tile status only once the tags exist
+    BelId b5ff = logic_bel("SLICE_X0Y0.B5FF");
+    ctx->bindBel(b5ff, ff2, STRENGTH_USER);
+    EXPECT_TRUE(ctx->isBelLocationValid(b5ff));
+}
+
+TEST_F(XilinxRouteThruTest, carry_di_mux_has_a_bypass_leg)
+{
+    // The DI mux (xCY0) must be reachable from the bypass pin for pack_carry's
+    // choice to be routable; list its legs
+    BelId cy = logic_bel("SLICE_X0Y0.CARRY4");
+    ASSERT_NE(cy, BelId());
+    int tile = cy.tile;
+    IdString tname = ctx->getBelName(cy)[0];
+    for (const char *w : {"SLICE_X0Y0.ACY0_OUT", "SLICE_X0Y0.CCY0_OUT", "SLICE_X0Y0.AFFMUX_OUT", "SLICE_X0Y0.A5FFMUX_OUT"}) {
+        WireId wire = ctx->getWireByName(IdStringList::concat(tname, ctx->id(w)));
+        ASSERT_NE(wire, WireId()) << w;
+        int legs = 0, bypass = 0;
+        for (PipId pip : ctx->getPipsUphill(wire)) {
+            std::string src = ctx->getWireName(ctx->getPipSrcWire(pip))[1].str(ctx);
+            bool avail = !xil->is_pip_unavail(pip);
+            log_info("    %s <- %s%s\n", w, src.c_str(), avail ? "" : " (unavailable)");
+            legs++;
+            if (src.find("X") != std::string::npos && avail)
+                bypass++;
+        }
+        EXPECT_GT(legs, 0) << w;
+        (void)tile;
+    }
+}
+
+TEST_F(XilinxRouteThruTest, carry_di_bypass_pips_stay_available_with_the_carry_placed)
+{
+    // The site pips a bypassed DI needs, with a CARRY4 bound in the slice
+    setup_nets();
+    CellInfo *c4 = ctx->createCell(ctx->id("c4"), id_CARRY4);
+    for (int i = 0; i < 4; i++) {
+        c4->addInput(ctx->idf("S[%d]", i));
+        c4->addInput(ctx->idf("DI[%d]", i));
+        c4->addOutput(ctx->idf("O[%d]", i));
+        c4->addOutput(ctx->idf("CO[%d]", i));
+    }
+    c4->addInput(id_CYINIT);
+    c4->addInput(id_CI);
+    c4->addInput(ctx->id("DI2"));
+    c4->connectPort(ctx->id("DI2"), n2);
+    c4->params[id_DI_BYPASS] = Property(4, 4);
+    ctx->assignArchInfo();
+    xil->assign_cell_tags();
+    xil->cell_tags_set = true; // bel changes update the tile status only once the tags exist
+    BelId cy = logic_bel("SLICE_X0Y0.CARRY4");
+    ctx->bindBel(cy, c4, STRENGTH_USER);
+    EXPECT_TRUE(ctx->isBelLocationValid(cy));
+    for (int i = 0; i < 4; i++) {
+        WireId w = ctx->getBelPinWire(cy, ctx->idf("DI%d", i));
+        log_info("    DI%d pin wire: %s\n", i, w == WireId() ? "-" : ctx->nameOfWire(w));
+        if (w == WireId())
+            continue;
+        for (PipId pip : ctx->getPipsUphill(w))
+            log_info("        <- %s%s\n", ctx->nameOfWire(ctx->getPipSrcWire(pip)), xil->is_pip_unavail(pip) ? " (unavailable)" : "");
+    }
+    // and the X pin itself, from the interconnect
+    IdString tname = ctx->getBelName(cy)[0];
+    WireId cx = ctx->getWireByName(IdStringList::concat(tname, ctx->id("SLICE_X0Y0.CX")));
+    ASSERT_NE(cx, WireId());
+    int n = 0;
+    for (PipId pip : ctx->getPipsUphill(cx)) {
+        log_info("    CX <- %s%s\n", ctx->nameOfWire(ctx->getPipSrcWire(pip)), xil->is_pip_unavail(pip) ? " (unavailable)" : "");
+        n++;
+    }
+    EXPECT_GT(n, 0);
+}

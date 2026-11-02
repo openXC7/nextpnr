@@ -104,6 +104,7 @@ void XilinxImpl::refine_sparse_bels()
 
     int moved_total = 0;
     int64_t gain_total = 0;
+    pool<IdString> moved_cells;
     for (int pass = 0; pass < max_passes; pass++) {
         int moved = 0;
         for (CellInfo *ci : cells) {
@@ -154,6 +155,7 @@ void XilinxImpl::refine_sparse_bels()
             candidates.erase(std::find(candidates.begin(), candidates.end(), best));
             candidates.push_back(old);
             moved++;
+            moved_cells.insert(ci->name);
             gain_total += cost_here - best_cost;
         }
         moved_total += moved;
@@ -162,8 +164,8 @@ void XilinxImpl::refine_sparse_bels()
         if (moved == 0)
             break;
     }
-    log_info("sparse-refine: %d of %zu DSP/BRAM cells moved to a nearer free site, wirelength down by %lld\n", moved_total,
-             cells.size(), (long long)gain_total);
+    log_info("sparse-refine: %zu of %zu DSP/BRAM cells moved to a nearer free site (%d moves), wirelength down by %lld\n",
+             moved_cells.size(), cells.size(), moved_total, (long long)gain_total);
 }
 
 NEXTPNR_NAMESPACE_END
