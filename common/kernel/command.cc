@@ -381,6 +381,8 @@ po::options_description CommandHandler::getGeneralOptions()
     general.add_options()("placer-heap-legalise-effort", po::value<int>(),
                           "legaliser rip-up budget: give up after max(5000, N * cells) cell legalisations "
                           "(int, default: 8); a tight region constraint can need more");
+    general.add_options()("router2-partition-depth", po::value<int>(),
+                          "router2: quadtree depth of the parallel partitions (default from the thread count)");
     general.add_options()("placer-heap-cell-placement-timeout", po::value<int>(),
                           "allow placer to attempt up to max(10000, total cells^2 / N) iterations to place a cell (int "
                           "N, default: 8, 0 for no timeout)");
@@ -558,6 +560,8 @@ void CommandHandler::setupContext(Context *ctx)
     if (weight_without_spread)
         log_warning("--placer-heap-congestion-weight has no effect without --placer-heap-congestion-spread\n");
 
+    if (vm.count("router2-partition-depth"))
+        ctx->settings[ctx->id("router2/partitionDepth")] = std::to_string(vm["router2-partition-depth"].as<int>());
     if (vm.count("placer-heap-cell-placement-timeout"))
         ctx->settings[ctx->id("placerHeap/cellPlacementTimeout")] =
                 std::to_string(std::max(0, vm["placer-heap-cell-placement-timeout"].as<int>()));
