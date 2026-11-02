@@ -17,6 +17,7 @@ set(SOURCES
     pack_io.cc
     pins.cc
     pins.h
+    sparse_refine.cc
     xdc.cc
     xilinx.cc
     xilinx.h
