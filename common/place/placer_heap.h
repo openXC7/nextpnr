@@ -51,6 +51,12 @@ struct PlacerHeapCfg
     float congestionWeight;
     float solverTolerance;
     bool placeAllAtOnce;
+    // --placer-heap-seed FILE: lines "cell\tx\ty", the solver's starting
+    // positions (an external placer's result, in tile coordinates) instead
+    // of random ones.  --placer-heap-legalise-only: no solving at all --
+    // spread and legalise the seeded positions once, then refine.
+    std::string seedFile;
+    bool legaliseOnly = false;
     float netShareWeight;
     bool parallelRefine;
     bool chainRipup;

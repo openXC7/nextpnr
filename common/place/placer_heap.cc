@@ -172,7 +172,22 @@ class HeAPPlacer
         for (auto &cell : ctx->cells)
             if (!cell.second->isPseudo() && cell.second->cluster != ClusterId())
                 cluster2cells[cell.second->cluster].push_back(cell.second.get());
+        if (!cfg.seedFile.empty()) {
+            std::ifstream in(cfg.seedFile);
+            if (!in)
+                log_error("cannot read placer seed file '%s'\n", cfg.seedFile.c_str());
+            std::string line;
+            while (std::getline(in, line)) {
+                auto t1 = line.find('\t');
+                auto t2 = line.find('\t', t1 + 1);
+                if (t1 == std::string::npos || t2 == std::string::npos)
+                    continue;
+                seed[ctx->id(line.substr(0, t1))] = std::make_pair(std::atoi(line.c_str() + t1 + 1), std::atoi(line.c_str() + t2 + 1));
+            }
+            log_info("placer seed: %zu cell positions from %s\n", seed.size(), cfg.seedFile.c_str());
+        }
     }
+    dict<IdString, std::pair<int, int>> seed;
 
     bool place()
     {
@@ -183,11 +198,26 @@ class HeAPPlacer
         build_fast_bels();
         alloc_control_sets();
         seed_placement();
+        if (!seed.empty()) {
+            int seeded = 0;
+            for (auto cell : place_cells) {
+                auto it = seed.find(cell->name);
+                if (it == seed.end())
+                    continue;
+                auto &cl = cell_locs.at(cell->name);
+                cl.x = std::max(0, std::min(max_x, it->second.first));
+                cl.y = std::max(0, std::min(max_y, it->second.second));
+                cl.rawx = cl.x;
+                cl.rawy = cl.y;
+                seeded++;
+            }
+            log_info("placer seed: %d of %zu movable cells start at their seeded positions\n", seeded, place_cells.size());
+        }
         update_all_chains();
         wirelen_t hpwl = total_hpwl();
-        log_info("Creating initial analytic placement for %d cells, random placement wirelen = %d.\n",
-                 int(place_cells.size()), int(hpwl));
-        for (int i = 0; i < 4; i++) {
+        log_info("Creating initial analytic placement for %d cells, %s placement wirelen = %d.\n",
+                 int(place_cells.size()), seed.empty() ? "random" : "seeded", int(hpwl));
+        for (int i = 0; i < 4 && !cfg.legaliseOnly; i++) {
             setup_solve_cells();
             auto solve_startt = std::chrono::high_resolution_clock::now();
 #ifdef NPNR_DISABLE_THREADS
@@ -248,7 +278,7 @@ class HeAPPlacer
                      cfg.cell_placement_timeout);
         else
             log_info("Running main analytical placer.\n");
-        while (stalled < 5 && (solved_hpwl <= legal_hpwl * 0.8)) {
+        while (stalled < 5 && (solved_hpwl <= legal_hpwl * 0.8) && !(cfg.legaliseOnly && iter > 0)) {
             // Alternate between particular bel types and all bels
             for (auto &run : heap_runs) {
                 auto run_startt = std::chrono::high_resolution_clock::now();
@@ -260,6 +290,9 @@ class HeAPPlacer
                 auto solve_startt = std::chrono::high_resolution_clock::now();
 
                 // Build the connectivity matrix and run the solver; multithreaded between x and y axes if applicable
+                if (cfg.legaliseOnly) {
+                    // the seeded positions are the solution: spread and legalise them
+                } else
 #ifndef NPNR_DISABLE_THREADS
                 if (solve_cells.size() >= 500) {
                     boost::thread xaxis([&]() { build_solve_direction(false, (iter == 0) ? -1 : iter); });
@@ -2393,6 +2426,8 @@ PlacerHeapCfg::PlacerHeapCfg(Context *ctx)
     solverTolerance = 1e-5;
     placeAllAtOnce = false;
     chainRipup = false;
+    seedFile = ctx->settings.count(ctx->id("placerHeap/seedFile")) ? ctx->setting<std::string>("placerHeap/seedFile") : "";
+    legaliseOnly = ctx->setting<bool>("placerHeap/legaliseOnly", false);
 
     int timeout_divisor = ctx->setting<int>("placerHeap/cellPlacementTimeout", 8);
     if (timeout_divisor > 0) {
