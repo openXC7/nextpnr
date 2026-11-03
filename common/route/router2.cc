@@ -534,6 +534,18 @@ struct Router2
         ad.pre_routed = false;
     }
 
+    // The pip a wire is bound to its net through, when the binding is one the
+    // router keeps (strength >= STRENGTH_PLACER); PipId() when there is none
+    // or the wire is the net's source.  Read-only on the binding, so safe
+    // from the search threads.
+    PipId pip_locked_for_wire(NetInfo *net, WireId wire) const
+    {
+        auto it = net->wires.find(wire);
+        if (it == net->wires.end() || it->second.strength < STRENGTH_PLACER)
+            return PipId();
+        return it->second.pip;
+    }
+
     float score_wire_for_arc(NetInfo *net, store_index<PortRef> user, size_t phys_pin, WireId wire, PipId pip,
                              float crit_weight)
     {
@@ -1083,6 +1095,18 @@ struct Router2
                         // Reserved for another net
                         if (nwd.reserved_net != -1 && nwd.reserved_net != net->udata)
                             continue;
+                        // Reserved for this net: a locked tree (a pre-routed
+                        // net, a routed clock, a hold-fix detour) is entered
+                        // only through its bound pip.  nd.wires does not say
+                        // so once the arc that used the wire has been ripped
+                        // up, so ask the binding, which the rip-up does not
+                        // touch -- bind_and_check_all leaves it in place and
+                        // bindPip asserts on a second pip into the wire.
+                        if (nwd.reserved_net == net->udata) {
+                            PipId locked = pip_locked_for_wire(net, next);
+                            if (locked != PipId() && locked != dh)
+                                continue;
+                        }
                         // Don't allow the same wire to be bound to the same net with a different driving pip
                         auto fnd_wire = nd.wires.find(next);
                         if (fnd_wire != nd.wires.end() && fnd_wire->second.first != dh)
@@ -1133,6 +1157,10 @@ struct Router2
                     auto fnd_wire = nd.wires.find(curr_data.w);
                     if (fnd_wire != nd.wires.end())
                         bound_pip = fnd_wire->second.first;
+                    // ...and a wire reserved for this net only through its
+                    // locked pip (see the forward search)
+                    if (bound_pip == PipId() && curr_data.reserved_net == net->udata)
+                        bound_pip = pip_locked_for_wire(net, curr_data.w);
 
                     for (PipId uh : ctx->getPipsUphill(curr_data.w)) {
                         if (bound_pip != PipId() && bound_pip != uh)
