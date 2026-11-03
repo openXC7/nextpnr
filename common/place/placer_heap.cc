@@ -570,6 +570,12 @@ class HeAPPlacer
                     member->cluster = ClusterId();
                     auto &kids = root->constr_children;
                     kids.erase(std::remove(kids.begin(), kids.end(), member), kids.end());
+                    // and out of the solver's cluster map, or setup_solve_cells
+                    // would still give it the root's variable
+                    auto c2c = cluster2cells.find(root->cluster);
+                    if (c2c != cluster2cells.end())
+                        c2c->second.erase(std::remove(c2c->second.begin(), c2c->second.end(), member),
+                                          c2c->second.end());
                     continue;
                 }
                 ctx->bindBel(pb.second, pb.first, STRENGTH_USER);

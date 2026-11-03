@@ -615,26 +615,28 @@ TEST_F(XilinxRouteThruTest, one_fabric_fed_ff_per_position_stays_legal)
 
 TEST_F(XilinxRouteThruTest, carry_di_mux_has_a_bypass_leg)
 {
-    // The DI mux (xCY0) must be reachable from the bypass pin for pack_carry's
-    // choice to be routable; list its legs
+    // The DI mux (xCY0) and the flip-flop muxes must be reachable from the
+    // position's bypass pin (AX for position A, CX for C) for pack_carry's
+    // choice and the FF route-through to be routable: the leg from that pin
+    // has to exist and be available, not merely some leg.
     BelId cy = logic_bel("SLICE_X0Y0.CARRY4");
     ASSERT_NE(cy, BelId());
-    int tile = cy.tile;
     IdString tname = ctx->getBelName(cy)[0];
     for (const char *w : {"SLICE_X0Y0.ACY0_OUT", "SLICE_X0Y0.CCY0_OUT", "SLICE_X0Y0.AFFMUX_OUT", "SLICE_X0Y0.A5FFMUX_OUT"}) {
         WireId wire = ctx->getWireByName(IdStringList::concat(tname, ctx->id(w)));
         ASSERT_NE(wire, WireId()) << w;
+        const std::string bypass_pin = std::string("SLICE_X0Y0.") + std::string(w).at(11) + "X";
         int legs = 0, bypass = 0;
         for (PipId pip : ctx->getPipsUphill(wire)) {
             std::string src = ctx->getWireName(ctx->getPipSrcWire(pip))[1].str(ctx);
             bool avail = !xil->is_pip_unavail(pip);
             log_info("    %s <- %s%s\n", w, src.c_str(), avail ? "" : " (unavailable)");
             legs++;
-            if (src.find("X") != std::string::npos && avail)
+            if (src == bypass_pin && avail)
                 bypass++;
         }
         EXPECT_GT(legs, 0) << w;
-        (void)tile;
+        EXPECT_EQ(bypass, 1) << w << " has no available leg from " << bypass_pin;
     }
 }
 
@@ -714,16 +716,23 @@ TEST_F(XilinxRouteThruTest, carry_di_bypass_pips_in_a_slicem)
     EXPECT_TRUE(ctx->isBelLocationValid(cy));
     WireId w = ctx->getBelPinWire(cy, ctx->id("DI2"));
     ASSERT_NE(w, WireId());
-    int avail = 0;
+    WireId cx = ctx->getWireByName(IdStringList::concat(ctx->getBelName(cy)[0], ctx->id("SLICE_X0Y0.CX")));
+    ASSERT_NE(cx, WireId());
+    int avail = 0, from_bypass = 0;
     for (PipId pip : ctx->getPipsUphill(w)) {
         bool ok = ctx->checkPipAvailForNet(pip, nullptr);
         log_info("    %s <- %s%s\n", ctx->nameOfWire(w), ctx->nameOfWire(ctx->getPipSrcWire(pip)), ok ? "" : " (unavailable)");
         avail += ok;
+        if (ok && ctx->getPipSrcWire(pip) == cx)
+            from_bypass++;
     }
     EXPECT_GE(avail, 2);
-    // and from the X pin back to the interconnect
-    WireId cursor = ctx->getWireByName(IdStringList::concat(ctx->getBelName(cy)[0], ctx->id("SLICE_X0Y0.CX")));
-    for (int hop = 0; hop < 4 && cursor != WireId(); hop++) {
+    EXPECT_EQ(from_bypass, 1) << "the DI mux has no available leg from the CX bypass pin";
+    // and from the X pin back to the interconnect: the walk must leave the
+    // site and reach a tile-routing wire within a few hops
+    WireId cursor = cx;
+    int hops = 0;
+    for (; hops < 4 && cursor != WireId(); hops++) {
         PipId up;
         int n = 0;
         for (PipId pip : ctx->getPipsUphill(cursor)) {
@@ -733,19 +742,33 @@ TEST_F(XilinxRouteThruTest, carry_di_bypass_pips_in_a_slicem)
             }
         }
         log_info("    %s has %d available uphill pips\n", ctx->nameOfWire(cursor), n);
-        cursor = (n >= 1) ? ctx->getPipSrcWire(up) : WireId();
+        if (n == 0)
+            break;
+        cursor = ctx->getPipSrcWire(up);
+        if (ctx->getWireName(cursor)[1].str(ctx).find("SLICE_") == std::string::npos)
+            break; // out of the site
     }
+    ASSERT_NE(cursor, WireId());
+    EXPECT_EQ(ctx->getWireName(cursor)[1].str(ctx).find("SLICE_"), std::string::npos)
+            << "the bypass pin does not reach the interconnect: stuck at " << ctx->nameOfWire(cursor);
 }
 
 TEST_F(XilinxRouteThruTest, precyinit_legs)
 {
-    // What feeds a carry's CYINIT: the constant legs, CIN, and the AX pin
+    // What feeds a carry's CYINIT: the two constant legs, CIN from the slice
+    // below, and the AX bypass pin (the leg a fabric CYINIT takes, which is
+    // why position A yields its LUTs to it).  All four must be there.
     BelId cy = logic_bel("SLICE_X0Y0.CARRY4");
     ASSERT_NE(cy, BelId());
     WireId w = ctx->getBelPinWire(cy, id_CYINIT);
     ASSERT_NE(w, WireId());
-    for (PipId pip : ctx->getPipsUphill(w))
+    pool<std::string> legs;
+    for (PipId pip : ctx->getPipsUphill(w)) {
         log_info("    %s <- %s\n", ctx->nameOfWire(w), ctx->nameOfWire(ctx->getPipSrcWire(pip)));
+        legs.insert(ctx->getWireName(ctx->getPipSrcWire(pip))[1].str(ctx));
+    }
+    for (const char *leg : {"SLICE_X0Y0.CYINITGND_HARD0", "SLICE_X0Y0.CYINITVCC_HARD1", "SLICE_X0Y0.CIN", "SLICE_X0Y0.AX"})
+        EXPECT_TRUE(legs.count(leg)) << "CYINIT has no leg from " << leg;
 }
 
 TEST_F(XilinxRouteThruTest, chipdb_has_ff_mux_route_throughs)

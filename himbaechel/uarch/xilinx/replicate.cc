@@ -145,6 +145,8 @@ void XilinxImpl::replicate_merged_ffs()
     {
         CellInfo *cell;
         Pt centre;
+        NetInfo *original_q;              // where its sinks came from, for rolling the split back
+        std::vector<PortRef> taken_sinks; // the sinks moved onto the copy
     };
     std::vector<Copy> copies;
     int64_t saved = 0;
@@ -219,6 +221,7 @@ void XilinxImpl::replicate_merged_ffs()
             copy->params = ci->params;
             copy->attrs = ci->attrs;
             copy->attrs.erase(id_MERGED_EQUIV);
+            copy->region = ci->region; // a copy keeps to the original's floorplan
             for (auto &port : ci->ports) {
                 if (port.second.type == PORT_OUT)
                     copy->addOutput(port.first);
@@ -229,13 +232,15 @@ void XilinxImpl::replicate_merged_ffs()
             }
             NetInfo *nq = ctx->createNet(ctx->idf("%s$dup%d$Q", ci->name.c_str(ctx), n));
             copy->connectPort(id_Q, nq);
+            Copy cp{copy, best_centres[c], q, {}};
             for (size_t i = 0; i < sinks.size(); i++) {
                 if (best_assign[i] != c)
                     continue;
                 sinks[i].cell->disconnectPort(sinks[i].port);
                 sinks[i].cell->connectPort(sinks[i].port, nq);
+                cp.taken_sinks.push_back(sinks[i]);
             }
-            copies.push_back(Copy{copy, best_centres[c]});
+            copies.push_back(cp);
         }
         split++;
         saved += single - best_cost;
@@ -249,8 +254,9 @@ void XilinxImpl::replicate_merged_ffs()
     ctx->assignArchInfo();
     assign_cell_tags();
 
-    int placed = 0;
+    int placed = 0, undone = 0;
     for (auto &cp : copies) {
+        const Region *region = cp.cell->region;
         BelId found;
         for (int r = 0; r <= search_radius && found == BelId(); r++) {
             for (int dx = -r; dx <= r && found == BelId(); dx++) {
@@ -263,6 +269,8 @@ void XilinxImpl::replicate_merged_ffs()
                     for (BelId bel : ctx->getBelsByTile(x, y)) {
                         if (ctx->getBelType(bel) != id_SLICE_FFX || !ctx->checkBelAvail(bel))
                             continue;
+                        if (region != nullptr && region->constr_bels && !region->bels.count(bel))
+                            continue;
                         ctx->bindBel(bel, cp.cell, STRENGTH_WEAK);
                         if (ctx->isBelLocationValid(bel)) {
                             found = bel;
@@ -273,14 +281,33 @@ void XilinxImpl::replicate_merged_ffs()
                 }
             }
         }
-        if (found == BelId())
-            log_error("replicate: no free flip-flop site within %d tiles of (%d,%d) for '%s'\n", search_radius,
-                      cp.centre.x, cp.centre.y, ctx->nameOf(cp.cell));
+        if (found == BelId()) {
+            // No site near the cluster: this copy was not worth having.  Its
+            // sinks go back to the original, whose placement is still legal,
+            // and the copy and its net disappear.
+            log_warning("replicate: no free flip-flop site within %d tiles of (%d,%d) for '%s'; keeping the "
+                        "original\n",
+                        search_radius, cp.centre.x, cp.centre.y, ctx->nameOf(cp.cell));
+            for (auto &sink : cp.taken_sinks) {
+                sink.cell->disconnectPort(sink.port);
+                sink.cell->connectPort(sink.port, cp.original_q);
+            }
+            IdString copy_name = cp.cell->name;
+            NetInfo *nq = cp.cell->getPort(id_Q);
+            for (auto &port : cp.cell->ports)
+                if (port.second.net != nullptr)
+                    cp.cell->disconnectPort(port.first);
+            ctx->nets.erase(nq->name);
+            ctx->cells.erase(copy_name);
+            undone++;
+            continue;
+        }
         placed++;
     }
-    log_info("replicate: %d of %zu flip-flops (%zu merged by the synthesis) split into %d copies, wirelength down by "
-             "%lld\n",
-             split, merged.size(), flagged, placed, (long long)saved);
+    log_info("replicate: %d of %zu flip-flops (%zu merged by the synthesis) split into %d copies%s, wirelength down "
+             "by %lld\n",
+             split, merged.size(), flagged, placed, undone ? stringf(" (%d undone, no site)", undone).c_str() : "",
+             (long long)saved);
 }
 
 NEXTPNR_NAMESPACE_END

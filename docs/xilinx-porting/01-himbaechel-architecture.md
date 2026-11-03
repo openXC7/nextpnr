@@ -122,7 +122,10 @@ Line counts are `wc -l` on the checkout.
 | `gen/filters.py` | 110 | prjxray→nextpnr mapping: bel Z overrides (SLICE/BRAM), bel-type overrides (`SLICE_LUTX`/`SLICE_FFX`/IOL_*/BUFGCTRL…), pip inclusion/exclusion rules. |
 | `gen/parse_sdf.py` | 145 | Minimal SDF parser used to import prjxray cell timing. |
 | `gen/tileconn.py` | 38 | Applies `tileconn.json` wire-pair merges to build cross-tile *nodes*. |
-| `examples/` | — | `arty-a35/` (blinky.v + arty.xdc + blinky.sh) and `bitgen_xray.sh` (FASM→frames→bit). |
+| `sparse_refine.cc` | 177 | Post-placement refinement of DSP48E1 / RAMB36E1 / RAMB18E1 sites (`refine_sparse_bels`): each movable, unclustered cell is offered every free bel of its type within 80 tiles (inside its region, if constrained) and takes the one minimising the HPWL of its nets; passes repeat while anything moves. These bels sit in a few columns five rows apart, which HeAP's spreading and the annealer's shrinking radius handle badly (DSPs 27–38 tiles from their adder trees on a dense design; 9–11 after). `-o sparse-refine=off`. |
+| `replicate.cc` | 310 | Post-placement replication of flip-flops whose placed sinks cluster far apart (`replicate_merged_ffs`): k-means on the tile grid, up to one copy more than the synthesis merged into the cell (`MERGED_EQUIV`), else two; a split must save a quarter of the net's wirelength. Copies are `<cell>$dup<n>` with the original's D/clock/enable/reset/INIT and region, placed by spiral search on a free, legal FF bel; a copy with no site within 40 tiles is undone (sinks back to the original). `-o replicate=off`. The LVS tools treat a `$dup` copy as its original. |
+| `pack.cc` (`-o macro-region`) | — | `macro-region=<prefix>:<buffer>[:<rows>]`: every cell named `<prefix>…` (cluster roots) is constrained to the clock region of the placed buffer `<buffer>`, optionally with a row margin (clipped to the die) for the cells the clock does not reach; a cell already constrained to another region is an error. A placed BUFHCE's sinks are confined to its region like BUFIO/BUFR's. |
+| `examples/` | — | `arty-a35/` (blinky.v + arty.xdc + blinky.sh) and `bitgen_xray.sh` (FASM→frames→bit); `vc707-*/` netlist entries of the demos gate, among them `vc707-heavyhash4` (109k cells, 256 DSPs, the congestion-spread stretch entry). |
 
 ---
 
