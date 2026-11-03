@@ -388,6 +388,10 @@ po::options_description CommandHandler::getGeneralOptions()
                           "N, default: 8, 0 for no timeout)");
 
     general.add_options()("placer-heap-no-ctrl-set", "disable control set awareness in placer heap");
+    general.add_options()("placer-heap-seed", po::value<std::string>(),
+                          "placer heap: start from these cell positions (lines cell<TAB>x<TAB>y) instead of random ones");
+    general.add_options()("placer-heap-legalise-only",
+                          "placer heap: do not solve, only spread and legalise the seeded positions, then refine");
 
     general.add_options()("static-dump-density", "write density csv files during placer-static flow");
 
@@ -537,6 +541,10 @@ void CommandHandler::setupContext(Context *ctx)
     if (vm.count("no-tmdriv"))
         ctx->settings[ctx->id("timing_driven")] = false;
 
+    if (vm.count("placer-heap-seed"))
+        ctx->settings[ctx->id("placerHeap/seedFile")] = vm["placer-heap-seed"].as<std::string>();
+    if (vm.count("placer-heap-legalise-only"))
+        ctx->settings[ctx->id("placerHeap/legaliseOnly")] = true;
     if (vm.count("placer-heap-alpha"))
         ctx->settings[ctx->id("placerHeap/alpha")] = std::to_string(vm["placer-heap-alpha"].as<float>());
 
