@@ -478,6 +478,69 @@ TEST_F(XilinxPackTest, carry_di_from_a_single_load_lut_packs_the_lut)
     EXPECT_EQ(lut->constr_z, (1 << 4) | BEL_5LUT);
 }
 
+TEST_F(XilinxPackTest, carry_di_lut_counts_pins_beside_an_s_feedthrough)
+{
+    // YosysHQ/nextpnr#1816: S[1] comes from the fabric, so it gets a
+    // one-input feed-through LUT, and DI[1] from a LUT5 using five pins on
+    // four nets.  Counted by distinct nets that is 4 + 1 = 5 and the LUT5
+    // was packed beside the feed-through; the slice model counts pins, 5 + 1
+    // with none shared, and refused every slice, so the placer gave up.
+    XC7Packer p(ctx, xil);
+    p.pack_constants();
+    NetInfo *gnd = ctx->nets.at(ctx->id("$PACKER_GND_NET")).get();
+    CellInfo *lut = ctx->createCell(ctx->id("dilut5"), id_LUT5);
+    NetInfo *pnet = fabric_net(ctx, "p");
+    NetInfo *ins[5] = {pnet, pnet, fabric_net(ctx, "q"), fabric_net(ctx, "r"), fabric_net(ctx, "t")};
+    for (int j = 0; j < 5; j++) {
+        lut->addInput(ctx->idf("I%d", j));
+        lut->connectPort(ctx->idf("I%d", j), ins[j]);
+    }
+    lut->addOutput(id_O);
+    lut->params[id_INIT] = Property(0x96969696, 32);
+    NetInfo *dinet = ctx->createNet(ctx->id("dinet"));
+    lut->connectPort(id_O, dinet);
+    NetInfo *di[4] = {gnd, dinet, gnd, gnd};
+    CellInfo *c4_in = create_carry4(ctx, "add", di, gnd);
+    // S[1] from the fabric rather than the helper's LUT2
+    CellInfo *s1_lut = ctx->cells.at(ctx->id("add_s1")).get();
+    NetInfo *s1 = c4_in->getPort(ctx->id("S[1]"));
+    s1_lut->disconnectPort(id_O);
+    c4_in->disconnectPort(ctx->id("S[1]"));
+    ctx->nets.erase(s1->name);
+    c4_in->connectPort(ctx->id("S[1]"), fabric_net(ctx, "s1_fabric"));
+
+    p.pack_carries();
+
+    CellInfo *c4 = packed_carry4(ctx);
+    ASSERT_NE(c4, nullptr);
+    // the five-pin LUT does not fit beside the feed-through: DI[1] takes the bypass pin
+    EXPECT_EQ(int_or_default(c4->params, id_DI_BYPASS, 0), 1 << 1);
+    EXPECT_NE(lut->cluster, c4->cluster);
+    // and the position's pins add up: every clustered LUT pair fits five pins
+    for (CellInfo *child : c4->constr_children) {
+        if (!child->constr_abs_z || (child->constr_z & 0xf) != BEL_5LUT)
+            continue;
+        int pos = child->constr_z >> 4;
+        int pins5 = 0, pins6 = 0, shared = 0;
+        std::vector<NetInfo *> nets6;
+        for (CellInfo *other : c4->constr_children)
+            if (other->constr_abs_z && other->constr_z == ((pos << 4) | BEL_6LUT))
+                for (int j = 0; j < 6; j++)
+                    if (NetInfo *n = other->getPort(ctx->idf("I%d", j))) {
+                        nets6.push_back(n);
+                        pins6++;
+                    }
+        for (int j = 0; j < 5; j++)
+            if (NetInfo *n = child->getPort(ctx->idf("I%d", j))) {
+                pins5++;
+                for (NetInfo *m : nets6)
+                    if (m == n)
+                        shared++;
+            }
+        EXPECT_GE(shared, pins5 + pins6 - 5) << "position " << pos;
+    }
+}
+
 TEST_F(XilinxPackTest, carry_di0_keeps_a_lut_when_cyinit_has_the_pin)
 {
     // CYINIT from the fabric takes position 0's bypass pin, so DI[0] cannot
