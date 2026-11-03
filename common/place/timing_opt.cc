@@ -57,9 +57,10 @@ class TimingOptimiser
             st_gain = 0;
             for (auto &path : crit_paths)
                 optimise_path(path);
-            log_info("      %d critical paths: %d skipped (fewer than two movable cells), %d moved (%.2f ns of estimated path "
-                     "delay saved), %d without a better placement; %d of %d cells on them movable\n",
-                     st_paths, st_skipped, st_solved, ctx->getDelayNS(st_gain), st_nosol, st_movable, st_cells);
+            if (ctx->verbose)
+                log_info("      %d critical paths: %d skipped (fewer than two movable cells), %d moved (%.2f ns of "
+                         "estimated path delay saved), %d without a better placement; %d of %d cells on them movable\n",
+                         st_paths, st_skipped, st_solved, ctx->getDelayNS(st_gain), st_nosol, st_movable, st_cells);
             if (ctx->verbose)
                 timing_analysis(ctx, false, true, false, false);
         }

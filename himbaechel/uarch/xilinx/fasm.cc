@@ -1554,10 +1554,16 @@ struct FasmBackend
                         // VC707's BPI flash data pads (a Vivado bitstream,
                         // LIOB18_X81Y83) set it, and without it those pads read
                         // as constants -- the flash then looked silent.
+                        // The glue is a left-bank key only: RIOB18 has no
+                        // IOB_Y0.IBUF_HP_BANK_GLUE and fasm2frames stops at
+                        // it, while Vivado sets just the two .IN there
+                        // (xc7z030/z100/k160t, the two halves as IOBUF and
+                        // input, site bits identical without the glue).
                         if (yLoc == 1)
                             write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
                         else {
-                            write_bit("IBUF_HP_BANK_GLUE");
+                            if (is_liob18)
+                                write_bit("IBUF_HP_BANK_GLUE");
                             write_bit("LVCMOS12_LVCMOS15_LVCMOS18.IN");
                         }
                     }
@@ -1597,7 +1603,8 @@ struct FasmBackend
                     // right-hand side.  The database's LIOB18 LVDS.IN_DIFF key
                     // clears one of them (!38_126), so the SSTL key is the one
                     // that matches; nothing on the N half.
-                    if (yLoc == 0) {
+                    const bool is_p_half = yLoc == 0;
+                    if (is_p_half) {
                         write_bit("SSTL12_SSTL135_SSTL15.IN_DIFF");
                         if (!is_output)
                             write_bit("IBUF_HP_BANK_GLUE");
@@ -2345,7 +2352,8 @@ struct FasmBackend
         }
 
         int width = this_width;
-        if (width == 0) {
+        const bool width_unset = width == 0;
+        if (width_unset) {
             // A port the design never uses keeps its width field clear, the
             // _1 encoding.  That is what Vivado writes for an instantiated
             // RAMB with a port width of 0, decoded from its bitstreams: on

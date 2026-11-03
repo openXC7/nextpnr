@@ -201,9 +201,16 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
 - **`create_clock`** with `-period` (ns) on `[get_ports]`/`[get_nets]`
   (`xdc.cc:208-254`): sets `NetInfo::clkconstr` (period + 50% duty). `-name`, `-waveform`,
   `-add` are warned-and-ignored.
-- **`set_multicycle_path`** supports setup multicycle tagging with `-to [get_cells ...]`
-  NAME-glob selectors; `-hold` is parsed but does not set setup tags, and `-from` is
-  rejected as unsupported (`xdc.cc`).
+- **`set_multicycle_path -setup N [-end] -to <sel>`** (`xdc.cc`): `-end` is taken (the
+  default). `<sel>` is a list of cell names, or `get_cells` with names, `*`/`?` globs or
+  `-filter {NAME =~ <glob>}` (or `NAME == <name>`, an exact name: `*` there is no
+  wildcard, as in Vivado). A line with `get_pins`/`get_nets` (the tag relaxes every input
+  of a cell; Vivado does not apply a net), `-start`, `-from`, `-through`, another filter
+  or an N that does not fit an `int` is skipped with a warning; a selector that matches
+  nothing warns. The capture edge moves N−1 periods later; hold stays at the original edge (as
+  Vivado `-setup N -hold N-1`), and `-hold` has no effect. The Fmax of a tagged path is
+  N / datapath delay (N − ½ between opposite edges). Only cells that keep their name
+  through packing (e.g. `FDRE`) carry the tag; LUT-RAM macros such as `RAM32M` lose it.
 - **Not supported**: `set_false_path`, `set_max_delay`/`set_min_delay`,
   `create_generated_clock`, `set_input_delay`/`set_output_delay`, path groups,
   `get_pins`/`get_iobanks`/`get_clocks` targets, and any constraint other than the
@@ -231,9 +238,18 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
   WTDP/WSDP × RTDP/RSDP timing by rewriting `timing_index` (`xilinx.cc:602-612`).
 - **Timing-driven placement**: the *static* placer is configured with timing weights
   (`timing_c/mx/my`, `xilinx.cc:361-363`); the *heap* placer is **not** given explicit timing
-  weights (only HPWL scales and control-set grouping). There is **no `timing_opt.cc`
-  post-placement timing optimisation** invoked by himbaechel, and no arch-level `--report`
-  timing gate in the uarch itself (generic `CommandHandler`/`timing.h` reporting applies).
+  weights (only HPWL scales and control-set grouping). The upstream `timing_opt.cc`
+  post-placement optimisation runs when `-o timing-opt=R[,N]` is given (radius and rounds,
+  `xilinx.cc`), and there is no arch-level `--report` timing gate in the uarch itself
+  (generic `CommandHandler`/`timing.h` reporting applies).
+- **Clock tree model** (`clock_tree.cc`): the global clock tree's insertion delay per clock
+  region row and column, calibrated per die (the xc7vx485t today; `-o clock-tree=on|off|force`),
+  fed to timing analysis through `getArcDelayOverride` on every BUFGCTRL-driven sink and
+  switched on as `timing/clockSkew`. Dies without measured rates keep their routed delay.
+- **Block RAM placement** (`bram_place.cc`): after the heap placer, block RAMs sharing read-mux
+  logic are grouped and re-placed around their consumers with the delay matrix and the clock
+  tree as the cost, then the lifted logic is placed again; `-o bram-place=on|off|force`, on by
+  default only on dies with a calibrated clock tree.
 - **Derived constraints**: `generate_constraints` (`pack_clocking.cc:384-535`) propagates
   `create_clock` periods through BUFGCTRL/IBUF/PLL/MMCM, computing VCO and output-clock
   frequencies for downstream timing analysis.
