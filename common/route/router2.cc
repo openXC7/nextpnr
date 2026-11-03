@@ -141,14 +141,24 @@ struct Router2
     // how much of the box each arc's search is visiting.
     std::atomic<int64_t> stat_nets{0}, stat_arcs{0}, stat_explored{0}, stat_unbounded{0};
     size_t stat_nets_total = 0;
-    std::chrono::steady_clock::time_point stat_last_log;
+    // The time of the last progress line, as steady-clock nanoseconds in an
+    // atomic: every worker reads it (progress_due) while the one that logs
+    // writes it, so a plain time_point would be a data race.
+    std::atomic<int64_t> stat_last_log{0};
+    static int64_t now_ns()
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+    }
+    void mark_progress_logged() { stat_last_log.store(now_ns(), std::memory_order_relaxed); }
+    bool progress_due() const { return now_ns() - stat_last_log.load(std::memory_order_relaxed) > int64_t(120) * 1000000000; }
     void log_progress(const char *phase)
     {
         int64_t arcs = stat_arcs.load();
         log_info("    routing %s: %lld/%zu nets, %lld arcs, %.0f wires explored per arc, %lld unbounded retries\n",
                  phase, (long long)stat_nets.load(), stat_nets_total, (long long)arcs,
                  arcs ? double(stat_explored.load()) / double(arcs) : 0.0, (long long)stat_unbounded.load());
-        stat_last_log = std::chrono::steady_clock::now();
+        mark_progress_logged();
     }
     std::mutex progress_mutex;
     // Any thread may report, one at a time: the first thread of a phase can
@@ -156,17 +166,13 @@ struct Router2
     // one that can speak.
     void report_progress(const char *phase)
     {
-        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - stat_last_log).count() <= 120.0)
+        if (!progress_due())
             return;
         std::unique_lock<std::mutex> lock(progress_mutex, std::try_to_lock);
         if (!lock.owns_lock())
             return;
-        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - stat_last_log).count() > 120.0)
+        if (progress_due())
             log_progress(phase);
-    }
-    bool progress_due()
-    {
-        return std::chrono::duration<double>(std::chrono::steady_clock::now() - stat_last_log).count() > 120.0;
     }
 
     Router2(Context *ctx, const Router2Cfg &cfg) : ctx(ctx), cfg(cfg), tmg(ctx)
@@ -264,7 +270,7 @@ struct Router2
 
     inline int widx(WireId w) const
     {
-        return have_dense_wires ? dense_to_flat[ctx->getWireDenseIndex(w)] : widx(w);
+        return have_dense_wires ? dense_to_flat[ctx->getWireDenseIndex(w)] : wire_to_idx.at(w);
     }
     PerWireData &wire_data(WireId w) { return flat_wires[widx(w)]; }
 
@@ -2668,7 +2674,7 @@ struct Router2
 
             stat_nets = 0; stat_arcs = 0; stat_explored = 0; stat_unbounded = 0;
             stat_nets_total = route_queue.size();
-            stat_last_log = std::chrono::steady_clock::now();
+            mark_progress_logged();
             do_route();
             update_route_delays();
             route_queue.clear();

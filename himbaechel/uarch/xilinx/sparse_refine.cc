@@ -131,7 +131,12 @@ void XilinxImpl::refine_sparse_bels()
             BelId best;
             int64_t best_cost = cost_here;
             auto &candidates = free_bels[ci->type];
+            // a cell constrained to a region (a clock region, a macro
+            // region, a pblock) stays in it
+            const Region *region = ci->region;
             for (BelId bel : candidates) {
+                if (region != nullptr && region->constr_bels && !region->bels.count(bel))
+                    continue;
                 Loc l = ctx->getBelLocation(bel);
                 if (std::abs(l.x - here.x) + std::abs(l.y - here.y) > radius)
                     continue;

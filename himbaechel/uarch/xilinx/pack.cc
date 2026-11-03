@@ -1588,9 +1588,11 @@ void XilinxImpl::pack()
                     y1 = std::max(y1, l.y);
                 }
                 target = ctx->id("macroregion_" + buf.str(ctx));
-                ctx->createRectangularRegion(target, x0, std::max(0, y0 - margin), x1, y1 + margin);
+                // the margin stays on the die: getBelsByTile does not check
+                ctx->createRectangularRegion(target, x0, std::max(0, y0 - margin), x1,
+                                             std::min(ctx->getGridDimY() - 1, y1 + margin));
             }
-            int n = 0, matched = 0, outside = 0;
+            int n = 0, matched = 0, outside = 0, conflicts = 0;
             for (auto &cell : ctx->cells) {
                 CellInfo *ci = cell.second.get();
                 if (!has_prefix(ci))
@@ -1602,13 +1604,28 @@ void XilinxImpl::pack()
                     ++outside;
                     continue;
                 }
-                if (tgt->bel != BelId() || tgt->region != nullptr)
+                if (tgt->bel != BelId())
                     continue;
+                if (tgt->region != nullptr) {
+                    // its own clock region (a sink of the buffer) lies inside
+                    // the macro region; any other region is a contradiction,
+                    // not something to pass over quietly
+                    if (tgt->region->name != rname && tgt->region->name != target) {
+                        log_warning("macro-region: '%s' is already constrained to region '%s', not to '%s'\n",
+                                    tgt->name.c_str(ctx), tgt->region->name.c_str(ctx), target.c_str(ctx));
+                        ++conflicts;
+                    }
+                    continue;
+                }
                 ctx->constrainCellToRegion(tgt->name, target);
                 ++n;
             }
             if (matched == 0)
                 log_error("macro-region: no cell name begins with '%s'\n", prefix.c_str());
+            if (conflicts > 0)
+                log_error("macro-region: %d cell(s) under '%s' are constrained to another region; one block, one "
+                          "region\n",
+                          conflicts, prefix.c_str());
             log_info("    macro-region: %d cell(s) under '%s' constrained to the clock region of '%s'%s%s\n", n,
                      prefix.c_str(), buf.c_str(ctx), margin ? stringf(" +/- %d rows", margin).c_str() : "",
                      outside ? stringf(" (%d in clusters rooted outside it)", outside).c_str() : "");
