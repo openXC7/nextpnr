@@ -193,7 +193,29 @@ struct XilinxImpl : HimbaechelAPI
     std::vector<std::vector<uint8_t>> tt_wire_bufr_path, tt_pip_through_bufgctrl;
     void init_pip_avail_tables();
     bool checkPipAvail(PipId pip) const override { return !is_pip_unavail(pip); }
-    bool checkPipAvailForNet(PipId pip, const NetInfo *net) const override { return !is_pip_unavail(pip); }
+    bool checkPipAvailForNet(PipId pip, const NetInfo *net) const override;
+
+    // -o pr-window=x0,y0,x1,y1 with -o pr-cells=<prefix>: a reconfigurable
+    // window of the tile grid (pr_window.cc).  The cells named by the prefix
+    // are placed inside it and no other cell is; a pip inside it may only be
+    // used by a net with a pin inside, so the static design never routes
+    // through the window and the window's frames can be rewritten alone.
+    bool prw_active = false;
+    int prw_x0 = 0, prw_y0 = 0, prw_x1 = -1, prw_y1 = -1;
+    std::string prw_prefix;
+    std::vector<uint8_t> prw_tile;               // tile index -> inside the window
+    std::vector<int8_t> prw_net_class;           // net name index -> class, read-only while a router runs (-1: not indexed)
+    pool<IdString> prw_cells;                    // the window cells: the prefix, and their whole clusters
+    void init_pr_window();
+    bool pr_window_cell(const CellInfo *ci) const;
+    bool pr_window_net(const NetInfo *net) const;
+    int pr_window_net_class(const NetInfo *net) const; // 0 static, 1 crossing, 2 internal
+    void pr_window_index_nets();                        // single-threaded, before each router entry
+    void pr_window_reserve();                           // -o pr-reserve=<file>, a window build
+    pool<WireId> prw_reserved_wires;
+    bool checkWireAvail(WireId wire) const override { return prw_reserved_wires.empty() || !prw_reserved_wires.count(wire); }
+    void pr_window_constrain_cells();
+    void pr_window_report();
 
     // Flow management
     void parse_xdc(const std::string &filename);

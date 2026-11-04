@@ -627,6 +627,15 @@ void XilinxImpl::route_clocks()
                  (*clk_net->users.begin()).cell->type.in(id_PLLE2_ADV_PLLE2_ADV, id_MMCME2_ADV_MMCME2_ADV) &&
                  (*clk_net->users.begin()).port == id_CLKIN1)
             is_global = true;
+        else if (clk_net->driver.cell->type.str(ctx) == "PARTPIN_IN") {
+            // A window build's clock enters on a partition pin (an HROW line
+            // node): keep it on the dedicated tree, as a BUFG's net would be,
+            // or the router spreads it over the fabric and skews every flop.
+            // Compared as a string: ctx->id() would intern the name on every build.
+            for (auto &usr : clk_net->users)
+                if (usr.port.in(id_CK, id_CLK, id_C))
+                    is_global = true;
+        }
         if (!is_global)
             continue;
 
@@ -664,7 +673,7 @@ void XilinxImpl::route_clocks()
                     break;
                 }
                 for (auto uh : ctx->getPipsUphill(curr)) {
-                    if (!ctx->checkPipAvail(uh))
+                    if (!ctx->checkPipAvailForNet(uh, clk_net))
                         continue;
                     WireId src = ctx->getPipSrcWire(uh);
                     if (backtrace.count(src))
@@ -698,7 +707,7 @@ void XilinxImpl::route_clocks()
                             break;
                         }
                         for (auto uh : ctx->getPipsUphill(curr)) {
-                            if (!ctx->checkPipAvail(uh))
+                            if (!ctx->checkPipAvailForNet(uh, clk_net))
                                 continue;
                             WireId src = ctx->getPipSrcWire(uh);
                             if (backtrace.count(src))

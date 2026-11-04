@@ -284,6 +284,10 @@ struct Router2
             PerWireData pwd;
             pwd.w = wire;
             NetInfo *bound = ctx->getBoundWireNet(wire);
+            // a wire the arch withholds (xilinx -o pr-reserve: a node the static
+            // design drives into a reconfigurable window) is nobody's to use
+            if (bound == nullptr && !ctx->checkWireAvail(wire))
+                pwd.reserved_net = PerWireData::RESERVED_UNAVAILABLE;
             if (bound != nullptr) {
                 auto iter = bound->wires.find(wire);
                 if (iter != bound->wires.end()) {

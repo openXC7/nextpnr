@@ -100,6 +100,17 @@ po::options_description XilinxImpl::getUArchOptions()
     specific.add_options()("holdbufs", po::value<std::string>(),
                            "before placing, re-create the reference build's hold-fix feedthrough buffers listed in "
                            "this file (scripts/routing_dump.py), so -o preplaced / -o prerouted replay them too");
+    specific.add_options()("pr-window", po::value<std::string>(),
+                           "x0,y0,x1,y1 (tile grid, inclusive): a reconfigurable window. The cells named by -o pr-cells "
+                           "are placed inside it and nothing else is; a pip inside it may only be used by a net with a "
+                           "pin inside, so the static design never routes through it (pr_window.cc)");
+    specific.add_options()("pr-cells", po::value<std::string>(), "name prefix of the cells inside the -o pr-window");
+    specific.add_options()("pr-reserve", po::value<std::string>(),
+                           "one bel name per line: the wire on each bel's pin is withheld from every net "
+                           "(a window build keeps off the nodes the static design drives into the window)");
+    specific.add_options()("pr-interface", po::value<std::string>(),
+                           "after routing, write the -o pr-window boundary crossings here, one per line: "
+                           "\"<net>\\t<in|out>\\t<tile>/<wire>\" (real tile names), what a window-only build routes from");
     specific.add_options()("clock-tree", po::value<std::string>(),
                            "global clock insertion delay model: on (default; dies with measured clock delays only), "
                            "off, or force (an uncalibrated die takes the xc7vx485t's); see clock_tree.cc");
@@ -220,6 +231,7 @@ void XilinxImpl::init(Context *ctx)
     // (the route-through pips stay in the graph for fabric buffering)
     if (ctx->args.options.count("ff-routethru") && ctx->args.options.at("ff-routethru").as<std::string>() == "off")
         ff_routethru_pips = false;
+    init_pr_window();
 }
 
 void XilinxImpl::init_pip_avail_tables()
@@ -922,6 +934,7 @@ void XilinxImpl::prePlace()
     apply_holdbufs();
     apply_preplaced();
     close_routed_tiles();
+    pr_window_constrain_cells();
     // Before placement, so the measured table reaches the placer (through
     // predictDelay and criticality) as well as the router's A* guidance.  On by
     // default: the measured matrix converges the router (rocket goes from 672
@@ -1143,6 +1156,8 @@ void XilinxImpl::preRoute()
         }
     }
     find_source_sink_locs();
+    pr_window_reserve();
+    pr_window_index_nets();
     route_clocks();
     apply_prerouted();
 }
@@ -1467,6 +1482,7 @@ void XilinxImpl::name_clocks_after_ports()
 
 void XilinxImpl::postRoute()
 {
+    pr_window_report();
     // Insert feedthrough buffers on hold-violating arcs and reroute, before
     // routing is finalised and FASM is written.  No-op unless -o hold-fix.
     fixup_hold();
