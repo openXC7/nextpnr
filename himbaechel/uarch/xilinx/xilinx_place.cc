@@ -680,6 +680,13 @@ void XilinxImpl::explain_invalid_logic_tile(BelId bel) const
 
 bool XilinxImpl::isBelLocationValid(BelId bel, bool explain_invalid) const
 {
+    if (prw_active) {
+        // a window cell outside the window, or any other cell inside it
+        const CellInfo *ci = ctx->getBoundBelCell(bel);
+        const bool bel_is_in_the_window = prw_tile[bel.tile] != 0;
+        if (ci != nullptr && bel_is_in_the_window != pr_window_cell(ci))
+            return false;
+    }
     const bool tile_is_closed_to_new_cells = !frozen_tiles.empty() && frozen_tiles.count(bel.tile) != 0;
     if (tile_is_closed_to_new_cells) {
         // a cell that would be new in a closed tile: the design did not pin it there

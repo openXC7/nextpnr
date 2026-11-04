@@ -7,6 +7,7 @@ set(SOURCES
     extra_data.h
     fasm.cc
     hold_fix.cc
+    pr_window.cc
     mmcm_tables.cc
     pack_carry.cc
     pack.cc
