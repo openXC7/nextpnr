@@ -113,7 +113,7 @@ wires and every flip-flop is skewed.
 
 ## Making the image
 
-`pr_partial.py` in synthgui does this, using three steps:
+`synthgui --tool pr-partial` does this, using three steps:
 
 1. **Merge:** the harness FASM with its window-tile lines replaced by the window build's. A window FASM
    line outside the window is an error.
@@ -215,8 +215,8 @@ The nextpnr and generator options are in this tree. The rest is in
 
 | Tool | Purpose |
 |---|---|
-| `xc7/pr_block_json.py` | Merge the block into the harness netlist; make the window netlist and reservation list |
-| `xc7/pr_partial.py` | Merge FASM; extract and check the image |
-| `xc7/at_gen.py`, `xc7/at_decode.py` | Generate path-delay test blocks; decode their counters |
+| `synthgui --tool pr-block-json` | Merge the block into the harness netlist; make the window netlist and reservation list |
+| `synthgui --tool pr-partial` | Merge FASM; extract and check the image |
+| `synthgui --tool at-gen`, `--tool at-decode` | Generate path-delay test blocks; decode their counters |
 | `xc7/at_sweep.py` | Capture-phase sweep over the BIOS console |
 | `xc7/tftp_serve.py` | Serve images to the BIOS `netload` command |
