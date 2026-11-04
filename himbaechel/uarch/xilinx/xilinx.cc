@@ -110,7 +110,7 @@ po::options_description XilinxImpl::getUArchOptions()
                            "(a window build keeps off the nodes the static design drives into the window)");
     specific.add_options()("pr-interface", po::value<std::string>(),
                            "after routing, write the -o pr-window boundary crossings here, one per line: "
-                           "\"<net>\\t<in|out>\\t<tile>/<wire>\" (real tile names), what a window-only build routes from");
+                           "\"<net>\\t<in|out|reentry|reexit>\\t<tile>/<wire>\" (real tile names), what a window-only build routes from");
     specific.add_options()("clock-tree", po::value<std::string>(),
                            "global clock insertion delay model: on (default; dies with measured clock delays only), "
                            "off, or force (an uncalibrated die takes the xc7vx485t's); see clock_tree.cc");
