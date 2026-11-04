@@ -22,6 +22,7 @@
 #include <iterator>
 #include <queue>
 #include <unordered_set>
+#include <boost/algorithm/string.hpp>
 #include "chain_utils.h"
 #include "design_utils.h"
 #include "extra_data.h"
@@ -113,6 +114,21 @@ void XilinxPacker::preplace_unique(CellInfo *cell)
                 other.second->type == cell->type && other.second->attrs.count(id_BEL) != 0;
         if (another_cell_of_this_type_is_pinned)
             claimed.insert(ctx->getBelByNameStr(other.second->attrs.at(id_BEL).as_string()));
+    }
+    // The configuration logic listens to the top ICAP unless CTL0.ICAP_SELECT
+    // says otherwise, and an ICAPE2 on the bottom site reads back only zeros
+    // (measured on an xc7vx485t and an xc7a50t), so the first free site is the
+    // wrong default for this one.
+    if (cell->type == id_ICAP_ICAP) {
+        for (auto bel : ctx->getBels()) {
+            const bool is_a_free_top_icap = ctx->getBelType(bel) == cell->type && claimed.count(bel) == 0 &&
+                                            ctx->checkBelAvail(bel) &&
+                                            boost::contains(std::string(ctx->nameOfBel(bel)), "ICAP_X0Y1");
+            if (is_a_free_top_icap) {
+                ctx->bindBel(bel, cell, STRENGTH_LOCKED);
+                return;
+            }
+        }
     }
     for (auto bel : ctx->getBels()) {
         const bool bel_is_claimed_by_a_pinned_cell = claimed.count(bel) != 0;

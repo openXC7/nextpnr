@@ -3292,6 +3292,10 @@ struct FasmBackend
                 write_bit("DCIRESET.ENABLED");
             if (ci->type == id_ICAP_ICAP) {
                 push("ICAP");
+                // The site's "in use" bits (prjxray-db virtex7 segbits_cfg_center_mid.db,
+                // added from a Vivado bitstream diff): without them the configuration
+                // logic ignores the ICAPE2 entirely -- no readback, no IPROG, no frames.
+                write_bit("IN_USE");
                 std::string width = str_or_default(ci->params, id_ICAP_WIDTH, "X32");
                 bool invalid_width = width != "X32" && width != "X16" && width != "X8";
                 if (invalid_width)
