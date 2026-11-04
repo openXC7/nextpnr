@@ -11,11 +11,14 @@
  *
  *   - a window cell is placed in the window (a Region constraint, which the
  *     analytic placer spreads within) and no other cell is (bel validity);
- *   - a pip in a window tile may only be used by a "crossing" net, one with
- *     a pin on a window cell, so no static net routes through the window;
+ *   - a static net (no pin on a window cell) may not use a pip in the window,
+ *     and an internal net (every pin on one) may not use a pip outside it;
  *   - after routing the crossings are reported: every node a crossing net
- *     drives from one side and consumes from the other.  These nodes are
+ *     drives from one side and consumes from the other, classified by whether
+ *     the driver reaches it without crossing first.  The clean ones are
  *     the window's interface, the contract a window-only build routes from.
+ *
+ *  See docs/xilinx-partial-reconfiguration.md.
  *
  *  A crossing net's route inside the window belongs to the window (it is
  *  replaced with the window), its route outside to the static design.  A
