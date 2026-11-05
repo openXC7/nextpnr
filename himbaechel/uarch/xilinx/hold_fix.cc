@@ -653,6 +653,7 @@ void XilinxImpl::fixup_hold()
             // retag after any undo erasures so get_tags() stays valid.
             ctx->assignArchInfo();
             assign_cell_tags();
+            pr_window_index_nets(); // the buffers moved sinks to new nets
             router2(ctx, rcfg);
         }
 

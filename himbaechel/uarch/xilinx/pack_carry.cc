@@ -213,7 +213,19 @@ void XC7Packer::pack_carries()
     pool<IdString> lut_types{id_LUT1, id_LUT2, id_LUT3, id_LUT4, id_LUT5};
 
     pool<IdString> folded_nets;
-    int moved = 0, duplicated = 0;
+    int moved = 0, duplicated = 0, bypassed = 0;
+    // A DI input's mux has two legs: the position's O5, or the AX/BX/CX/DX
+    // bypass pin straight from the fabric.  A net that is not a LUT output
+    // fitting beside the S LUT used to get a buffer LUT in the 5LUT (9,000
+    // of them on a 4-lane miner, each spending the position's 5LUT and a
+    // LUT input); Vivado routes it to the bypass pin.  The bypass pin is
+    // shared with the flip-flop's own bypass and the F7/F8 select, which
+    // the legality model already arbitrates through x_sigs, so the choice is
+    // recorded on the CARRY4 for the tag builder.  -o carry-di-bypass=off
+    // restores the buffers.
+    const bool di_bypass_allowed = !(ctx->args.options.count("carry-di-bypass") &&
+                                     ctx->args.options.at("carry-di-bypass").as<std::string>() == "off");
+    const IdString gnd_net = ctx->id("$PACKER_GND_NET"), vcc_net = ctx->id("$PACKER_VCC_NET");
 
     for (auto &grp : groups) {
         std::vector<CellInfo *> carry4s;
@@ -275,8 +287,16 @@ void XC7Packer::pack_carries()
             NetInfo *c4_s = c4->getPort(ctx->idf("S[%d]", z));
             NetInfo *c4_di = c4->getPort(ctx->idf("DI[%d]", z));
             // Keep track of the total LUT input count; cannot exceed five or the LUTs cannot be packed together
+            // All six LUT inputs count.  Counting I0..I4 only let a six-input
+            // S LUT read as five, so a five-input DI LUT sharing those five
+            // was packed beside it; but a LUT using A6 leaves no 5LUT in its
+            // position (the 5LUT needs A6 held high), so the cluster was
+            // illegal in every slice and the placer gave up (YosysHQ #1816).
             pool<IdString> unique_lut_inputs;
-            int s_inputs = 0;
+            // The input nets in pin order, duplicates kept: the slice model
+            // counts pins, and a net on two pins of one LUT is two pins.
+            std::vector<NetInfo *> s_nets, s_dup_nets, di_nets;
+            int s_inputs = 0, di_inputs = 0;
             // Check that S and DI are validy and unqiuely driven by LUTs
             CellInfo *s_lut = nullptr, *di_lut = nullptr;
             // A LUT that drives S and other loads is moved into the carry site when it
@@ -288,19 +308,22 @@ void XC7Packer::pack_carries()
                 const bool s_is_only_load = c4_s->users.entries() == 1;
                 if (s_driven_by_lut && s_is_only_load) {
                     s_lut = c4_s->driver.cell;
-                    for (int j = 0; j < 5; j++) {
+                    for (int j = 0; j < 6; j++) {
                         NetInfo *ix = s_lut->getPort(ctx->idf("I%d", j));
                         if (ix) {
                             unique_lut_inputs.insert(ix->name);
+                            s_nets.push_back(ix);
                             s_inputs++;
                         }
                     }
                 } else if (s_driven_by_lut) {
                     s_dup_source = c4_s->driver.cell;
-                    for (int j = 0; j < 5; j++) {
+                    for (int j = 0; j < 6; j++) {
                         NetInfo *ix = s_dup_source->getPort(ctx->idf("I%d", j));
-                        if (ix)
+                        if (ix) {
                             s_dup_inputs.insert(ix->name);
+                            s_dup_nets.push_back(ix);
+                        }
                     }
                 }
             }
@@ -308,10 +331,12 @@ void XC7Packer::pack_carries()
                 if (c4_di->users.entries() == 1 && c4_di->driver.cell != nullptr &&
                     lut_types.count(c4_di->driver.cell->type)) {
                     di_lut = c4_di->driver.cell;
-                    for (int j = 0; j < 5; j++) {
+                    for (int j = 0; j < 6; j++) {
                         NetInfo *ix = di_lut->getPort(ctx->idf("I%d", j));
                         if (ix) {
                             unique_lut_inputs.insert(ix->name);
+                            di_nets.push_back(ix);
+                            di_inputs++;
                         }
                     }
                 }
@@ -337,12 +362,17 @@ void XC7Packer::pack_carries()
                 if (duplicate_fits && source_is_free) {
                     s_lut = s_dup_source;
                     s_inputs = int(s_dup_inputs.size());
+                    s_nets = s_dup_nets;
                     unique_lut_inputs = shared_inputs;
                     ++moved;
                 } else if (duplicate_fits) {
-                    CellInfo *dup = ctx->createCell(ctx->idf("%s$S_DUP%d", s_dup_source->name.c_str(ctx), ++autoidx),
-                                                    s_dup_source->type);
-                    NetInfo *dup_out = ctx->createNet(ctx->idf("%s$S_DUP%d", c4_s->name.c_str(ctx), ++autoidx));
+                    // Named after the carry and the S input it feeds (at most one
+                    // duplicate each), not a counter over the design: a block
+                    // instantiated many times from one mapped netlist then gets the
+                    // same names in every instance, which placing it by template
+                    // relies on.
+                    CellInfo *dup = ctx->createCell(ctx->idf("%s$S%d_DUP", c4->name.c_str(ctx), z), s_dup_source->type);
+                    NetInfo *dup_out = ctx->createNet(ctx->idf("%s$S%d_DUP_O", c4->name.c_str(ctx), z));
                     for (int j = 0; j < 5; j++) {
                         IdString ip = ctx->idf("I%d", j);
                         const bool source_has_input = s_dup_source->ports.count(ip);
@@ -358,6 +388,7 @@ void XC7Packer::pack_carries()
                     c4->connectPort(ctx->idf("S[%d]", z), dup_out);
                     s_lut = dup;
                     s_inputs = int(s_dup_inputs.size());
+                    s_nets = s_dup_nets;
                     unique_lut_inputs = shared_inputs;
                     ++duplicated;
                 }
@@ -373,6 +404,38 @@ void XC7Packer::pack_carries()
                 if (s_inputs > 4)
                     s_lut = nullptr;
             }
+            // What ends up in the position has to pass the slice model
+            // (xc7_logic_tile_valid), which counts pins: a 6LUT and a 5LUT
+            // share A1..A5, so their pins beyond five must carry the same
+            // nets, pair by pair, and a six-input 6LUT leaves no 5LUT at all
+            // (it uses A6).  An S feed-through is a one-input LUT whose pin
+            // carries the S net, and counts like any other.
+            auto pins_fit = [](const std::vector<NetInfo *> &a, const std::vector<NetInfo *> &b) {
+                int need = int(a.size() + b.size()) - 5;
+                if (need <= 0)
+                    return true;
+                int shared = 0;
+                for (NetInfo *x : a)
+                    for (NetInfo *y : b)
+                        if (x == y)
+                            shared++;
+                return shared >= need;
+            };
+            if (di_lut != nullptr) {
+                std::vector<NetInfo *> s_side;
+                if (s_lut != nullptr)
+                    s_side = s_nets;
+                else if (c4_s != nullptr)
+                    s_side.push_back(c4_s);
+                const bool six_input_s = s_lut != nullptr && s_inputs >= 6;
+                if (six_input_s || !pins_fit(s_side, di_nets))
+                    di_lut = nullptr; // DI takes the bypass pin or a feed-through of its own
+            }
+            if (ctx->verbose)
+                log_info("    carry %s position %d: S %s (%d inputs), DI %s (%d inputs), %d unique; S %s, DI %s\n",
+                         ctx->nameOf(c4), z, c4_s ? ctx->nameOf(c4_s) : "-", s_inputs, c4_di ? ctx->nameOf(c4_di) : "-",
+                         di_inputs, lut_inp_count, s_lut ? "LUT kept" : (c4_s ? "feed-through" : "unused"),
+                         di_lut ? "LUT kept" : (c4_di ? "bypass or feed-through" : "unused"));
             // If LUTs are nullptr, that means we need a feedthrough lut
             if (!s_lut && c4_s) {
                 PortRef pr;
@@ -382,11 +445,25 @@ void XC7Packer::pack_carries()
                 s_lut = s_feed;
             }
             if (!di_lut && c4_di) {
-                PortRef pr;
-                pr.cell = c4;
-                pr.port = ctx->idf("DI[%d]", z);
-                auto di_feed = feed_through_lut(c4_di, {pr});
-                di_lut = di_feed;
+                // A constant keeps its LUT: the bit is a LUT INIT, not a route.
+                // Position 0's bypass pin carries CYINIT when there is one --
+                // a constant too, since PRECYINIT's hard 0/1 legs are only
+                // usable while position A's LUTs are free, which the S LUT
+                // rules out, so the router brings the constant in on AX.
+                const bool di_is_constant = c4_di->name == gnd_net || c4_di->name == vcc_net;
+                NetInfo *cyinit = (z == 0) ? c4->getPort(id_CYINIT) : nullptr;
+                const bool bypass_pin_is_cyinit = cyinit != nullptr && cyinit != c4_di;
+                if (di_bypass_allowed && !di_is_constant && !bypass_pin_is_cyinit) {
+                    int mask = int_or_default(c4->params, id_DI_BYPASS, 0) | (1 << z);
+                    c4->params[id_DI_BYPASS] = Property(mask, 4);
+                    ++bypassed;
+                } else {
+                    PortRef pr;
+                    pr.cell = c4;
+                    pr.port = ctx->idf("DI[%d]", z);
+                    auto di_feed = feed_through_lut(c4_di, {pr});
+                    di_lut = di_feed;
+                }
             }
             // Constrain LUTs relative to root CARRY4
             if (s_lut) {
@@ -412,6 +489,8 @@ void XC7Packer::pack_carries()
         log_info("   Moved %d shared LUTs driving carry S inputs into the carry site.\n", moved);
     if (duplicated > 0)
         log_info("   Duplicated %d shared LUTs driving carry S inputs.\n", duplicated);
+    if (bypassed > 0)
+        log_info("   %d carry DI inputs take the bypass pin instead of a buffer LUT.\n", bypassed);
 
     for (auto net : folded_nets)
         ctx->nets.erase(net);

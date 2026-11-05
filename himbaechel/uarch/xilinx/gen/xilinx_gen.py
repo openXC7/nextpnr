@@ -210,6 +210,27 @@ def pip_has_bits(tile_type, dst_wire, src_wire):
     nobits_by_tiletype[tile_type] = nobits_by_tiletype.get(tile_type, 0) + 1
     return False
 
+def add_pseudo_constants(ch: Chip, tt):
+    # pseudo ground bels
+    tt.create_wire(f"GND", "GND", const_value="GND")
+    tt.create_wire(f"VCC", "VCC", const_value="VCC")
+
+    gnd = tt.create_bel(f"PSEUDO_GND", f"PSEUDO_GND", z=0)
+    gnd.site = -1
+    gnd.extra_data = BelExtraData(name_in_site=ch.strs.id("PSEUDO_GND"))
+    gnd.flags |= BEL_FLAG_GLOBAL
+    tt.add_bel_pin(gnd, "Y", "GND", PinType.OUTPUT)
+
+    vcc = tt.create_bel(f"PSEUDO_VCC", f"PSEUDO_VCC", z=1)
+    vcc.site = -1
+    vcc.extra_data = BelExtraData(name_in_site=ch.strs.id("PSEUDO_VCC"))
+    vcc.flags |= BEL_FLAG_GLOBAL
+    tt.add_bel_pin(vcc, "Y", "VCC", PinType.OUTPUT)
+
+def make_pseudo_corner(ch: Chip):
+    # --window: the corner tile of the ring, with no device tile behind it
+    add_pseudo_constants(ch, ch.create_tile_type("NULL_CORNER"))
+
 def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
     tile_type = tile.tile_type()
     if tile.x == 0 and tile.y == 0:
@@ -225,21 +246,7 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
         if wire.is_vcc():
             nw.const_value = ch.strs.id("VCC")
     if tile_type == "NULL_CORNER":
-        # pseudo ground bels
-        tt.create_wire(f"GND", "GND", const_value="GND")
-        tt.create_wire(f"VCC", "VCC", const_value="VCC")
-
-        gnd = tt.create_bel(f"PSEUDO_GND", f"PSEUDO_GND", z=0)
-        gnd.site = -1
-        gnd.extra_data = BelExtraData(name_in_site=ch.strs.id("PSEUDO_GND"))
-        gnd.flags |= BEL_FLAG_GLOBAL
-        tt.add_bel_pin(gnd, "Y", "GND", PinType.OUTPUT)
-
-        vcc = tt.create_bel(f"PSEUDO_VCC", f"PSEUDO_VCC", z=1)
-        vcc.site = -1
-        vcc.extra_data = BelExtraData(name_in_site=ch.strs.id("PSEUDO_VCC"))
-        vcc.flags |= BEL_FLAG_GLOBAL
-        tt.add_bel_pin(vcc, "Y", "VCC", PinType.OUTPUT)
+        add_pseudo_constants(ch, tt)
     def add_pip(src_wire, dst_wire, pip_class=PipClass.TILE_ROUTING, timing="",
         site_key=-1, bel_name="", pip_config=0):
         np = tt.create_pip(src_wire, dst_wire, timing)
@@ -290,14 +297,29 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
                             site_key=(s.index << 8),
                             timing="SITE_NULL"
                         )
-                    # Add LUT route-through pseudo-pip
+                    # Add LUT route-through pseudo-pip: the input straight to the
+                    # 6LUT's O6 site wire, from which the site's own pips reach
+                    # the output pin (a fabric buffer) and the flip-flop mux (how
+                    # a fabric signal reaches the main FF of a position whose
+                    # bypass pin the 5FF already uses: Vivado's route-through).
+                    # Ending at the O6 wire rather than at the output pin keeps
+                    # the two uses on one resource, so one LUT never carries two
+                    # route-throughs, whose INITs could not coexist.  Bit 0 of
+                    # the config marks this form for the uarch.
                     rt_config = ("ABCDEFGH".index(swn[0]) << 8)
                     if s.rel_xy()[0] == 1:
                         rt_config |= (4 << 8)
                     rt_config |= ((i - 1) << 1)
-                    add_pip(pin.tile_wire().name(), s.pin(f"{swn[0]}").tile_wire().name(),
+                    o6 = None
+                    for b in s.bels():
+                        if b.name() == f"{swn[0]}6LUT":
+                            for bp in b.pins():
+                                if bp.name == "O6":
+                                    o6 = bp.site_wire()
+                    assert o6 is not None, f"no O6 on {swn[0]}6LUT"
+                    add_pip(pin.tile_wire().name(), lookup_site_wire(o6),
                             pip_class=PipClass.LUT_ROUTETHRU,
-                            pip_config=rt_config,
+                            pip_config=rt_config | 1,
                             site_key=(s.index << 8),
                             timing="SITE_NULL"
                         )
@@ -548,6 +570,11 @@ def main():
     parser.add_argument("--device", help="name of device to export", type=str, required=True)
     parser.add_argument("--constids", help="name of nextpnr constids file to read", type=str, default=path.join(xlbase, "constids.inc"))
     parser.add_argument("--bba", help="bba file to write", type=str, required=True)
+    parser.add_argument("--window", help="x0,y0,x1,y1 (tile grid, inclusive): write a chipdb of that window of the "
+                        "device only, ringed by border tiles that carry a PARTPIN_IN and a PARTPIN_OUT bel on every "
+                        "node crossing the window's edge (a window build's interface to the static design around it)",
+                        type=str)
+    parser.add_argument("--window-map", help="with --window: JSON of the boundary nodes, their wires and bels", type=str)
     args = parser.parse_args()
 
     # Init database paths
@@ -571,12 +598,35 @@ def main():
     xraydb_root_for_bits = xraydb_root
     # Load prjxray device data
     d = xilinx_device.import_device(args.device, xraydb_root, metadata_root)
+    # --window: the chip is the window plus a one-tile ring of border tiles;
+    # grid (0, 0) is the pseudo-constant corner as on a whole device, and
+    # every real tile keeps its own name (TileExtraData) for the fasm.
+    win = None
+    if args.window:
+        wx0, wy0, wx1, wy1 = (int(v) for v in args.window.split(","))
+        assert 0 <= wx0 <= wx1 < d.width and 0 <= wy0 <= wy1 < d.height, "--window is off the tile grid"
+        win = (wx0, wy0, wx1, wy1)
+        chip_w, chip_h = wx1 - wx0 + 3, wy1 - wy0 + 3
+        def inside(tile): return wx0 <= tile.x <= wx1 and wy0 <= tile.y <= wy1
+        def gx(x): return x - wx0 + 1
+        def gy(y): return y - wy0 + 1
+    else:
+        chip_w, chip_h = d.width, d.height
+        def inside(tile): return True
+        def gx(x): return x
+        def gy(y): return y
     # Init constant ids
-    ch = Chip("xilinx", args.device, d.width, d.height)
+    ch = Chip("xilinx", args.device, chip_w, chip_h)
     ch.strs.read_constids(path.join(path.dirname(__file__), args.constids))
     ch.set_speed_grades(["DEFAULT", ]) # TODO: figure out how speed grades are supposed to work in prjxray
+    if win is not None:
+        make_pseudo_corner(ch)
+        ch.set_tile_type(0, 0, "NULL_CORNER").extra_data = TileExtraData(ch.strs.id("PRBORDER"), 0, 0)
+        ch.create_tile_type("PRNULL")
     # Import tile types
     for tile in d.tiles:
+        if not inside(tile):
+            continue
         tile_type = tile.tile_type()
         if tile.x == 0 and tile.y == 0:
             assert tile_type == "NULL"
@@ -584,7 +634,7 @@ def main():
             tile_type = "NULL_CORNER"
         if tile_type not in ch.tile_type_idx:
             import_tiletype(ch, tile)
-        ti = ch.set_tile_type(tile.x, tile.y, tile_type)
+        ti = ch.set_tile_type(gx(tile.x), gy(tile.y), tile_type)
         prefix, tx, ty = tile.split_name()
         ti.extra_data = TileExtraData(ch.strs.id(prefix), tx, ty)
         for site in tile.sites():
@@ -598,6 +648,18 @@ def main():
     # Import nodes
     seen_nodes = set()
     tt_used_wires = {}
+    def used_in_tile(w):
+        tt = w.tile.tile_type()
+        if tt not in tt_used_wires:
+            tt_used_wires[tt] = w.tile.used_wire_indices()
+        return w.index in tt_used_wires[tt]
+    # --window: a node with a usable wire outside the window is a boundary
+    # node.  It gets one more wire in a border tile and a PARTPIN_IN /
+    # PARTPIN_OUT bel pair on it, so a window build can drive it (an input
+    # from the static design) or consume it (an output to it).  Deferred
+    # until the border tile types exist.
+    boundary = []            # (node_wires, timing_class, canonical name, all wire names, border x, border y)
+    border_records = {}      # (bx, by) -> list of canonical names
     print("Processing nodes...")
     for row in range(d.height):
         # TODO: GND and VCC row connectivity...
@@ -608,32 +670,85 @@ def main():
                 uid = n.unique_index()
                 if uid in seen_nodes:
                     continue
+                seen_nodes.add(uid)
+                if win is not None:
+                    ins = [nw for nw in n.wires if inside(nw.tile)]
+                    if not ins:
+                        continue
+                    outs = [nw for nw in n.wires if not inside(nw.tile) and used_in_tile(nw)]
+                    wires_of_node = ins
+                else:
+                    outs = []
+                    wires_of_node = n.wires
                 if len(n.wires) > 1:
                     node_wires = []
                     node_cap = 0
                     node_res = 0
                     # Add interconnect tiles first for better delay estimates in nextpnr
                     for j in range(2):
-                        for w in n.wires:
+                        for w in wires_of_node:
                             if (w.tile.tile_type() in ("INT", "INT_L", "INT_R")) != (j == 0):
                                 continue
-                            if w.tile.tile_type() not in tt_used_wires:
-                                tt_used_wires[w.tile.tile_type()] = w.tile.used_wire_indices()
                             node_cap += int(w.capacitance() * 1000)
                             node_res += int(w.resistance())
                             # prune wires from nodes that just pass through a tile without connecting to
                             # bels/pips, because nextpnr doesn't care about these
-                            if w.index not in tt_used_wires[w.tile.tile_type()]:
+                            if not used_in_tile(w):
                                 continue
-                            node_wires.append(NodeWire(w.tile.x, w.tile.y, w.index))
-                    if len(node_wires) > 1:
-                        timing_class = f"node_c{node_cap}_c{node_res}"
+                            node_wires.append(NodeWire(gx(w.tile.x), gy(w.tile.y), w.index))
+                    timing_class = f"node_c{node_cap}_c{node_res}"
+                    is_boundary = bool(outs and node_wires)
+                    if (is_boundary or len(node_wires) > 1) and timing_class not in seen_node_timings:
+                        # only for a node that will exist: a whole-device chipdb stays as it was
+                        ch.timing.set_node_class("DEFAULT", timing_class, delay=TimingValue(0), cap=TimingValue(node_cap), res=TimingValue(node_res))
+                        seen_node_timings.add(timing_class)
+                    if is_boundary:
+                        ow = outs[0]
+                        bx = min(max(gx(ow.tile.x), 0), chip_w - 1)
+                        by = min(max(gy(ow.tile.y), 0), chip_h - 1)
+                        if (bx, by) == (0, 0):
+                            bx = 1
+                        canon = f"{n.wires[0].tile.name}/{n.wires[0].name()}"
+                        names = [f"{nw.tile.name}/{nw.name()}" for nw in n.wires]
+                        boundary.append((node_wires, timing_class, canon, names, bx, by))
+                        border_records.setdefault((bx, by), []).append(canon)
+                    elif len(node_wires) > 1:
                         ch.add_node(node_wires, timing_class=timing_class)
-                        if timing_class not in seen_node_timings:
-                            ch.timing.set_node_class("DEFAULT", timing_class, delay=TimingValue(0), cap=TimingValue(node_cap), res=TimingValue(node_res))
-                            seen_node_timings.add(timing_class)
                     del node_wires
-                seen_nodes.add(uid)
+    if win is not None:
+        window_map = {"window": list(win), "grid": [chip_w, chip_h], "nodes": {}, "wires": {}}
+        for (bx, by), canons in sorted(border_records.items()):
+            tt = ch.create_tile_type(f"PRBORDER_{bx}_{by}")
+            for k, canon in enumerate(canons):
+                dotted = canon.replace("/", ".")
+                bw = tt.create_wire(dotted, "PARTPIN")
+                bw.flags = -1 # a tile wire, not a site wire
+                for z, (kind, pin, pdir, prefix) in enumerate(((PinType.OUTPUT, "O", PinType.OUTPUT, "PIN"),
+                                                               (PinType.INPUT, "I", PinType.INPUT, "POUT"))):
+                    bel = tt.create_bel(f"{prefix}.{dotted}", "PARTPIN_IN" if prefix == "PIN" else "PARTPIN_OUT", z=2 * k + z)
+                    bel.site = -1
+                    bel.extra_data = BelExtraData(name_in_site=ch.strs.id(f"{prefix}.{dotted}"))
+                    tt.add_bel_pin(bel, pin, dotted, pdir)
+        for by in range(chip_h):
+            for bx in range(chip_w):
+                on_the_ring = bx in (0, chip_w - 1) or by in (0, chip_h - 1)
+                if not on_the_ring or (bx, by) == (0, 0):
+                    continue
+                ti = ch.set_tile_type(bx, by, f"PRBORDER_{bx}_{by}" if (bx, by) in border_records else "PRNULL")
+                ti.extra_data = TileExtraData(ch.strs.id("PRBORDER"), bx, by)
+        for node_wires, timing_class, canon, names, bx, by in boundary:
+            dotted = canon.replace("/", ".")
+            ch.add_node(node_wires + [NodeWire(bx, by, dotted)], timing_class=timing_class)
+            tile = f"X{bx}Y{by}"   # nextpnr's own tile naming is the bare grid position
+            window_map["nodes"][canon] = {"in": f"{tile}/PIN.{dotted}", "out": f"{tile}/POUT.{dotted}",
+                                          "root": f"{names[0]}", "wires": names}
+            for nm in names:
+                window_map["wires"][nm] = canon
+        print(f"--window: {len(boundary)} boundary nodes on {len(border_records)} border tiles", file=sys.stderr)
+        if args.window_map:
+            import json
+            with open(args.window_map, "w") as f:
+                json.dump(window_map, f, indent=1)
     # Stub timing class
     ch.timing.set_pip_class("DEFAULT", "SITE_NULL", delay=TimingValue(20))
     # Stub bel timings. On virtex7 the LUT comb delay and the FF D/CK->Q
@@ -676,9 +791,11 @@ def main():
         pkg = ch.create_package(package_name)
         for pin, site in sorted(package.pin_map.items(), key=lambda x:x[0]):
             site_data = d.sites_by_name[site]
+            if not inside(site_data.tile):
+                continue
             bel_name = gen_bel_name(site_data, "PAD")
-            tile_type = ch.tile_type_at(site_data.tile.x, site_data.tile.y)
-            pkg.create_pad(pin, f"X{site_data.tile.x}Y{site_data.tile.y}",
+            tile_type = ch.tile_type_at(gx(site_data.tile.x), gy(site_data.tile.y))
+            pkg.create_pad(pin, f"X{gx(site_data.tile.x)}Y{gy(site_data.tile.y)}",
             f"{site_data.rel_name()}.{bel_name}",
             "", 0) # TODO: bank
     # Report the bitstream-representation census.  A non-zero "no bits" count

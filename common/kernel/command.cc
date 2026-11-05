@@ -378,11 +378,20 @@ po::options_description CommandHandler::getGeneralOptions()
                           "congestion-driven spreading: push cells out of routing-congested regions (prototype)");
     general.add_options()("placer-heap-congestion-weight", po::value<float>(),
                           "how hard congested tiles are penalised under --placer-heap-congestion-spread (default 0.5)");
+    general.add_options()("placer-heap-legalise-effort", po::value<int>(),
+                          "legaliser rip-up budget: give up after max(5000, N * cells) cell legalisations "
+                          "(int, default: 8); a tight region constraint can need more");
+    general.add_options()("router2-partition-depth", po::value<int>(),
+                          "router2: quadtree depth of the parallel partitions (default from the thread count)");
     general.add_options()("placer-heap-cell-placement-timeout", po::value<int>(),
                           "allow placer to attempt up to max(10000, total cells^2 / N) iterations to place a cell (int "
                           "N, default: 8, 0 for no timeout)");
 
     general.add_options()("placer-heap-no-ctrl-set", "disable control set awareness in placer heap");
+    general.add_options()("placer-heap-seed", po::value<std::string>(),
+                          "placer heap: start from these cell positions (lines cell<TAB>x<TAB>y) instead of random ones");
+    general.add_options()("placer-heap-legalise-only",
+                          "placer heap: do not solve, only spread and legalise the seeded positions, then refine");
 
     general.add_options()("static-dump-density", "write density csv files during placer-static flow");
 
@@ -532,6 +541,10 @@ void CommandHandler::setupContext(Context *ctx)
     if (vm.count("no-tmdriv"))
         ctx->settings[ctx->id("timing_driven")] = false;
 
+    if (vm.count("placer-heap-seed"))
+        ctx->settings[ctx->id("placerHeap/seedFile")] = vm["placer-heap-seed"].as<std::string>();
+    if (vm.count("placer-heap-legalise-only"))
+        ctx->settings[ctx->id("placerHeap/legaliseOnly")] = true;
     if (vm.count("placer-heap-alpha"))
         ctx->settings[ctx->id("placerHeap/alpha")] = std::to_string(vm["placer-heap-alpha"].as<float>());
 
@@ -545,6 +558,9 @@ void CommandHandler::setupContext(Context *ctx)
         ctx->settings[ctx->id("placerHeap/timingWeight")] = std::to_string(vm["placer-heap-timingweight"].as<int>());
     if (vm.count("placer-heap-congestion-spread"))
         ctx->settings[ctx->id("placerHeap/congestionSpread")] = true;
+    if (vm.count("placer-heap-legalise-effort"))
+        ctx->settings[ctx->id("placerHeap/legaliseEffort")] =
+                std::to_string(vm["placer-heap-legalise-effort"].as<int>());
     if (vm.count("placer-heap-congestion-weight"))
         ctx->settings[ctx->id("placerHeap/congestionWeight")] =
                 std::to_string(vm["placer-heap-congestion-weight"].as<float>());
@@ -552,6 +568,8 @@ void CommandHandler::setupContext(Context *ctx)
     if (weight_without_spread)
         log_warning("--placer-heap-congestion-weight has no effect without --placer-heap-congestion-spread\n");
 
+    if (vm.count("router2-partition-depth"))
+        ctx->settings[ctx->id("router2/partitionDepth")] = std::to_string(vm["router2-partition-depth"].as<int>());
     if (vm.count("placer-heap-cell-placement-timeout"))
         ctx->settings[ctx->id("placerHeap/cellPlacementTimeout")] =
                 std::to_string(std::max(0, vm["placer-heap-cell-placement-timeout"].as<int>()));

@@ -609,6 +609,32 @@ jobs:
             timeout: 120
             pnr_flags: --placer-heap-timingweight 60 --placer-heap-congestion-spread --freq 25
 
+          # A four-lane Kaspa kHeavyHash miner: 256 DSP48E1s in four compact,
+          # identical lanes behind a LiteEth SGMII MAC, 109k cells from
+          # Verilator's structural backend.  The design that showed HeAP's
+          # wirelength-only placement does not route at this density: with
+          # no flags, or with the timing weight the other stretch entries
+          # use, router2 never finishes its first pass.  Congestion-driven
+          # spreading on its own -- no timing weight, which on this design
+          # undoes the spread -- routes it to zero overuse, and beta 0.7
+          # brings the wirelength under Vivado's.  These flags are the board
+          # build's: that bitstream mined testnet-10 with every nonce
+          # verified.  --timing-allow-fail because the route closes at 97.8
+          # MHz against a 100 MHz constraint; the Fmax is printed, not gated.
+          # Three hours on a 24-thread desktop, so it takes the full budget
+          # of a hosted runner.  See its README.
+          - name: vc707-heavyhash4
+            tier: stretch
+            source: netlist
+            design: vc707-heavyhash4
+            netlist: vc707_heavyhash4.json.gz
+            xdc: vc707_heavyhash4.xdc
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 360
+            pnr_flags: --placer-heap-beta 0.7 --placer-heap-congestion-spread -o replicate=off
+
     steps:
       - uses: actions/checkout@v4
         with:
