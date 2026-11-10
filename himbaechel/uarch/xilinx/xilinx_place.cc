@@ -230,19 +230,25 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                         DBG();
                         return false;
                     }
-                    // If more than 5 total inputs are used, need to check number of shared input
-                    bool must_share_inputs = !srl_pair && (lut6->lut.input_count + lut5->lut.input_count) > 5;
+                    // The pair shares A1-A5 (A6 is tied high), so together they may read at most
+                    // 5 distinct nets: fixup_placement gives each one a pin.  Counted as distinct
+                    // nets, not as matching pin pairs, which a net on two pins of one LUT counts
+                    // twice (a 6-net pair then passed here and failed connectPort there).
+                    const bool must_share_inputs = !srl_pair && (lut6->lut.input_count + lut5->lut.input_count) > 5;
                     if (must_share_inputs) {
-                        int shared = 0, need_shared = (lut6->lut.input_count + lut5->lut.input_count - 5);
+                        std::set<const NetInfo *> nets;
                         for (int j = 0; j < lut6->lut.input_count; j++) {
-                            for (int k = 0; k < lut5->lut.input_count; k++) {
-                                if (lut6->lut.input_sigs[j] == lut5->lut.input_sigs[k])
-                                    shared++;
-                                if (shared >= need_shared)
-                                    break;
-                            }
+                            const bool pin_has_net = lut6->lut.input_sigs[j] != nullptr;
+                            if (pin_has_net)
+                                nets.insert(lut6->lut.input_sigs[j]);
                         }
-                        if (shared < need_shared) {
+                        for (int k = 0; k < lut5->lut.input_count; k++) {
+                            const bool pin_has_net = lut5->lut.input_sigs[k] != nullptr;
+                            if (pin_has_net)
+                                nets.insert(lut5->lut.input_sigs[k]);
+                        }
+                        const bool more_than_five_nets = nets.size() > 5;
+                        if (more_than_five_nets) {
                             DBG();
                             return false;
                         }
