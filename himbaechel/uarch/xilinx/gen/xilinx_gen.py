@@ -104,6 +104,45 @@ def timing_pip_classs(pip: xilinx_device.PIP):
 seen_pip_timings = set()
 seen_node_timings = set()
 
+# --- measured timing calibration (--timing-cal) ------------------------------
+# A JSON written by a fit of nextpnr's own pip delays to silicon (synthgui runs/2026-11-09-npcal/calfit.py):
+#   classes: {class: {rise: f, fall: f}}  scale factor on nextpnr's delay for pips into that wire class
+#   per_use: {class: {rise: ps, fall: ps}} a fixed delay for pips into that class (FAN/BYP, which prjxray gives about 0 ps)
+#   lut_pin: {A1..A6: {rise: ps, fall: ps}} cost of a LUT stage entered on that physical pin, beyond its IMUX pip
+# Scaling a class's pip intrinsic delay, pip output resistance and node resistance by f scales Arch::getPipDelay's
+# (int_delay + RC) for that class by f, with no change to nextpnr itself. nextpnr times one value per pip (slow_max):
+# max takes the fall figure, min the rise figure. Without --timing-cal nothing below changes the chipdb.
+import re as _re
+TIMING_CAL = None
+LUT_CAL_BASE = 10  # ps left on the LUT cell arc; the rest of a stage's cost goes on the physical pin's permutation pip
+def cal_wire_class(dst):
+    """Same classes as runs/2026-11-09-npcal/npmodel.py wire_class: a pip's class is its destination wire's."""
+    for pat, c in [(r'(EE|WW|NN|SS|NE|NW|SE|SW|EL|ER|WL|WR|NL|NR|SL|SR)1BEG(_[NS])?\d', 'sgl'),
+                   (r'(EE|WW|NN|SS|NE|NW|SE|SW)2BEG\d', 'dbl'),
+                   (r'(EE|WW)4BEG\d', 'quad'),
+                   (r'(NN|SS|NE|NW|SE|SW)6BEG\d', 'hex'),
+                   (r'LVB(_L)?\d+', 'lvb'), (r'LV(_L)?\d+', 'lv'), (r'LH\d+', 'lh'),
+                   (r'(FAN_ALT|FAN_BOUNCE|GFAN)\d+', 'fan'), (r'(BYP_ALT|BYP_BOUNCE)\d+', 'byp')]:
+        if _re.fullmatch(pat, dst): return c
+    return None
+def cal_scale(c):
+    """(rise, fall) scale factors for class c, or None"""
+    if TIMING_CAL is None or c is None or c not in TIMING_CAL.get("classes", {}): return None
+    v = TIMING_CAL["classes"][c]; return (float(v["rise"]), float(v["fall"]))
+def cal_per_use(c):
+    if TIMING_CAL is None or c is None or c not in TIMING_CAL.get("per_use", {}): return None
+    v = TIMING_CAL["per_use"][c]; return (float(v["rise"]), float(v["fall"]))
+def cal_tv(lo, hi):
+    lo, hi = int(round(max(lo, 0))), int(round(max(hi, 0)))
+    return TimingValue(min(lo, hi), max(lo, hi))
+def cal_node_class(wires):
+    """class of a node for scaling its resistance: the class of the first of its wires that has one"""
+    if TIMING_CAL is None: return None
+    for w in wires:
+        c = cal_wire_class(w.name())
+        if cal_scale(c): return c
+    return None
+
 # --- prjxray bitstream-representation lookup -------------------------------
 # A tile-routing pip is only usable if the bitstream can express it, i.e. its
 # fasm feature "<TILETYPE>.<dst_wire>.<src_wire>" appears in either
@@ -291,11 +330,12 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
                         pip_config = ("ABCDEFGH".index(swn[0]) << 8) | ((j - 1) << 4) | (i - 1)
                         if s.rel_xy()[0] == 1:
                             pip_config |= (4 << 8)
+                        # physical pin j: with --timing-cal its measured stage cost (LUTPIN<j>), else the stub
                         add_pip(s.pin(f"{swn[0]}{j}").tile_wire().name(), lookup_site_wire(pin.site_wire()),
                             pip_class=PipClass.LUT_PERMUTATION,
                             pip_config=pip_config,
                             site_key=(s.index << 8),
-                            timing="SITE_NULL"
+                            timing=(f"LUTPIN{j}" if TIMING_CAL is not None and "lut_pin" in TIMING_CAL else "SITE_NULL")
                         )
                     # Add LUT route-through pseudo-pip: the input straight to the
                     # 6LUT's O6 site wire, from which the site's own pips reach
@@ -426,11 +466,21 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
         if not filters.include_pip(tile.tile_type(), pip):
             continue
         tcls = timing_pip_classs(pip)
+        ccls = cal_wire_class(pip.dst_wire().name()) if TIMING_CAL is not None else None
+        sc, pu = cal_scale(ccls), cal_per_use(ccls)
+        if sc or pu: tcls = f"{tcls}_cal{ccls}"
         if tcls not in seen_pip_timings:
+            delay = TimingValue(int(pip.min_delay()*1000), int(pip.max_delay()*1000)) # ps
+            out_res = TimingValue(int(pip.resistance())) # mohm
+            if sc:
+                delay = cal_tv(pip.min_delay()*1000*sc[0], pip.max_delay()*1000*sc[1])
+                out_res = TimingValue(int(pip.resistance()*sc[1]))
+            elif pu:
+                delay = cal_tv(pu[0], pu[1])
             ch.timing.set_pip_class(f"DEFAULT", tcls,
-                delay=TimingValue(int(pip.min_delay()*1000), int(pip.max_delay()*1000)), # ps
+                delay=delay,
                 in_cap=TimingValue(int(pip.capacitance()*1000)), # fF
-                out_res=TimingValue(int(pip.resistance())), # mohm
+                out_res=out_res,
                 is_buffered=pip.is_buffered())
             seen_pip_timings.add(tcls)
         rt = PIP_CFG_ROUTETHRU if pip.is_route_thru() else 0
@@ -575,7 +625,16 @@ def main():
                         "node crossing the window's edge (a window build's interface to the static design around it)",
                         type=str)
     parser.add_argument("--window-map", help="with --window: JSON of the boundary nodes, their wires and bels", type=str)
+    parser.add_argument("--timing-cal", help="JSON of measured timing: per wire class scale factors and per-use delays, "
+                        "per physical LUT pin stage costs (see TIMING_CAL above)", type=str)
     args = parser.parse_args()
+    global TIMING_CAL
+    if args.timing_cal:
+        import json
+        with open(args.timing_cal) as f:
+            TIMING_CAL = json.load(f)
+        print(f"--timing-cal {args.timing_cal}: classes {sorted(TIMING_CAL.get('classes', {}))}, "
+              f"per use {sorted(TIMING_CAL.get('per_use', {}))}, lut pins {'lut_pin' in TIMING_CAL}", file=sys.stderr)
 
     # Init database paths
     metadata_root = args.metadata
@@ -697,6 +756,10 @@ def main():
                                 continue
                             node_wires.append(NodeWire(gx(w.tile.x), gy(w.tile.y), w.index))
                     timing_class = f"node_c{node_cap}_c{node_res}"
+                    ncls = cal_node_class(wires_of_node)
+                    if ncls:  # --timing-cal: the node's resistance carries its class's (fall) scale factor
+                        node_res = int(node_res * cal_scale(ncls)[1])
+                        timing_class = f"{timing_class}_cal{ncls}"
                     is_boundary = bool(outs and node_wires)
                     if (is_boundary or len(node_wires) > 1) and timing_class not in seen_node_timings:
                         # only for a node that will exist: a whole-device chipdb stays as it was
@@ -751,12 +814,23 @@ def main():
                 json.dump(window_map, f, indent=1)
     # Stub timing class
     ch.timing.set_pip_class("DEFAULT", "SITE_NULL", delay=TimingValue(20))
+    if TIMING_CAL is not None and "lut_pin" in TIMING_CAL:
+        # a stage on pin j costs lut_pin[Aj] beyond its IMUX pip: LUTPIN<j> + the LUT arc (LUT_CAL_BASE) + what nextpnr already
+        # prices in every stage outside the fit's IMUX/wire classes (site exit stub, CLB tile pips): lut_stage_overhead, measured by
+        # comparing nextpnr's SDF with the fit's model on the same routes (runs/2026-11-09-npcal/consist.py); 20 if absent
+        ovh = float(TIMING_CAL.get("lut_stage_overhead", 20))
+        for j in range(1, 7):
+            v = TIMING_CAL["lut_pin"][f"A{j}"]
+            ch.timing.set_pip_class("DEFAULT", f"LUTPIN{j}",
+                delay=cal_tv(float(v["rise"]) - LUT_CAL_BASE - ovh, float(v["fall"]) - LUT_CAL_BASE - ovh))
     # Stub bel timings. On virtex7 the LUT comb delay and the FF D/CK->Q
     # figures are replaced by the VC707 Vivado-oracle calibration
     # (docs/extracted-timing.md): nextpnr's generic guesses of 0.30 ns
     # clk->Q and 0.20 ns FF hold measured as low by 3x and 2x respectively
     # against Vivado's own probed paths.
     lut_delay = TimingValue(45, 124) if is_virtex7 else None
+    if TIMING_CAL is not None and "lut_pin" in TIMING_CAL:
+        lut_delay = TimingValue(LUT_CAL_BASE, LUT_CAL_BASE)  # the pin-dependent part is on the permutation pips
     ff_d_setup = TimingValue(34) if is_virtex7 else TimingValue(100, 100)
     ff_d_hold = TimingValue(87) if is_virtex7 else TimingValue(200, 200)
     ff_clk_q = TimingValue(100, 303) if is_virtex7 else TimingValue(300, 350)
