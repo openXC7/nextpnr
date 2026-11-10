@@ -973,6 +973,16 @@ struct FasmBackend
                 pop();
             }
         }
+        if (!lts) {
+            // A tile with no cells at all can still hold route-throughs.  Their site
+            // exit (the [A-D]MUX OUTMUX pip, e.g. BMUX <- B6LUT_O6) is written with the
+            // LUT logic below, which needs tile status; without this the LUT carried the
+            // signal and the OUTMUX never selected it, an open on the net.
+            BelId bel_in_half =
+                    ctx->getBelByLocation(Loc(tile % ctx->chip_info->width, tile / ctx->chip_info->width, half << 6));
+            for (int i = 0; i < 4; i++)
+                write_routing_bel(get_site_wire(bel_in_half, stringf("%cMUX", "ABCD"[i])));
+        }
         if (lts) {
             // Write logic
             BelId bel_in_half =
