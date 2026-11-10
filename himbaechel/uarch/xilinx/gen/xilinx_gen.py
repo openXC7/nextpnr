@@ -547,9 +547,9 @@ def import_bram_timings(timing, sdf, is_virtex7=False):
     # WF = WRITE_FIRST), and READ_FIRST's setup and hold are shorter. DIADI and
     # DIPADIP take WRITE_MODE_A's entry, DIBDI and DIPBDIP WRITE_MODE_B's, so
     # each variant name ends in both modes; the uarch picks it per cell.
-    def import_data_in_sethold(cell, di_width, dip_width, wsdp, mode_a, mode_b):
-        # In SDP both halves of the data in are written by the port B clock.
-        clock_a = "CLKBWRCLK" if wsdp else "CLKARDCLK"
+    def import_data_in_sethold(cell, di_width, dip_width, wsdp, mode_a, mode_b, clk_sfx=""):
+        # In SDP both halves of the data in are written by the port B clock. clk_sfx: see the RAMB36 note below.
+        clock_a = ("CLKBWRCLK" if wsdp else "CLKARDCLK") + clk_sfx
         ram_mode = "RAMB18SDP" if wsdp else "RAMB18TDP"
         for port, mode in (("A", mode_a), ("B", mode_b)):
             sdfcell = sdf.cells[(f"RAMBFIFO36E1RAM_MODE_{ram_mode}_U_WRITE_MODE_U_{mode}_EN_ECC_READ_FALSE_EN_ECC_WRITE_FALSE", "RAMBFIFO36E1")]
@@ -557,8 +557,8 @@ def import_bram_timings(timing, sdf, is_virtex7=False):
                 if isinstance(entry, parse_sdf.SetupHoldCheck):
                     if port == "A" and entry.pin == "DIADIU": import_bus_sethold(cell, "DIADI", di_width, clock_a, entry)
                     if port == "A" and entry.pin == "DIPADIPU": import_bus_sethold(cell, "DIPADIP", dip_width, clock_a, entry)
-                    if port == "B" and entry.pin == "DIBDIU": import_bus_sethold(cell, "DIBDI", di_width, "CLKBWRCLK", entry)
-                    if port == "B" and entry.pin == "DIPBDIPU": import_bus_sethold(cell, "DIPBDIP", dip_width, "CLKBWRCLK", entry)
+                    if port == "B" and entry.pin == "DIBDIU": import_bus_sethold(cell, "DIBDI", di_width, "CLKBWRCLK" + clk_sfx, entry)
+                    if port == "B" and entry.pin == "DIPBDIPU": import_bus_sethold(cell, "DIPBDIP", dip_width, "CLKBWRCLK" + clk_sfx, entry)
 
     write_modes = ("NC", "RF", "WF")
     for wsdp, rsdp, mode_a, mode_b in itertools.product((False, True), (False, True), write_modes, write_modes):
@@ -588,12 +588,16 @@ def import_bram_timings(timing, sdf, is_virtex7=False):
                 if entry.to_pin == "DOPBDOPU": import_bus_clkq(bram18, "DOPBDOP", 2, "CLKARDCLK" if rsdp else "CLKBWRCLK", entry)
 
         bram36 = timing.add_cell_variant("DEFAULT", f"RAMB36E1_RAMB36E1_{variant}")
+        # The packed RAMB36 has no CLKARDCLK or CLKBWRCLK port, only the L and U halves (CLKARDCLKL/U, CLKBWRCLKL/U),
+        # which the packer connects to the same clock net. An arc that names the unsuffixed clock is dropped by the
+        # timing analyser without a word, which left every RAMB36 read (clock-to-out of DO*) and its address and
+        # data-in setup untimed. The full-width buses take the L clock; WE, EN and RSTRAM take their own half's.
 
         for u in ('L', 'U'):
             for entry in sdf.cells[("RAMBFIFO36E1", "RAMBFIFO36E1")].entries:
                 if isinstance(entry, parse_sdf.SetupHoldCheck):
-                    if entry.pin == "ADDRAU": import_bus_sethold(bram36, f"ADDRARDADDR{u}", 15 if u == 'L' else 14, "CLKARDCLK", entry)
-                    if entry.pin == "ADDRBU": import_bus_sethold(bram36, f"ADDRBWRADDR{u}", 15 if u == 'L' else 14, "CLKBWRCLK", entry)
+                    if entry.pin == "ADDRAU": import_bus_sethold(bram36, f"ADDRARDADDR{u}", 15 if u == 'L' else 14, f"CLKARDCLK{u}", entry)
+                    if entry.pin == "ADDRBU": import_bus_sethold(bram36, f"ADDRBWRADDR{u}", 15 if u == 'L' else 14, f"CLKBWRCLK{u}", entry)
                     if entry.pin == "WEAU": import_bus_sethold(bram36, f"WEA{u}", 4, f"CLKARDCLK{u}", entry)
                     if entry.pin == "WEBU": import_bus_sethold(bram36, f"WEBWE{u}", 8, f"CLKBWRCLK{u}", entry)
             for entry in sdf.cells[("RAMBFIFO36E1_ISFIFO_FALSE", "RAMBFIFO36E1")].entries:
@@ -602,15 +606,15 @@ def import_bram_timings(timing, sdf, is_virtex7=False):
                     if entry.pin == "ENBWRENU": import_pin_sethold(bram36, f"ENBWREN{u}", f"CLKBWRCLK{u}", entry)
                     if entry.pin == "RSTRAMAU": import_pin_sethold(bram36, f"RSTRAMARSTRAM{u}", f"CLKARDCLK{u}", entry)
                     if entry.pin == "RSTRAMBU": import_pin_sethold(bram36, f"RSTRAMB{u}", f"CLKBWRCLK{u}", entry)
-        import_data_in_sethold(bram36, 32, 4, wsdp, mode_a, mode_b)
+        import_data_in_sethold(bram36, 32, 4, wsdp, mode_a, mode_b, clk_sfx="L")
         for entry in sdf.cells[("RAMBFIFO36E1RAM_MODE_U_RAMB18SDP_U_DOA_REG_U_0_EN_ECC_READ_FALSE", "RAMBFIFO36E1")].entries:
             if isinstance(entry, parse_sdf.IOPath):
-                if entry.to_pin == "DOADOU": import_bus_clkq(bram36, "DOADO", 32, "CLKARDCLK", entry)
-                if entry.to_pin == "DOPADOPU": import_bus_clkq(bram36, "DOPADOP", 4, "CLKARDCLK", entry)
+                if entry.to_pin == "DOADOU": import_bus_clkq(bram36, "DOADO", 32, "CLKARDCLKL", entry)
+                if entry.to_pin == "DOPADOPU": import_bus_clkq(bram36, "DOPADOP", 4, "CLKARDCLKL", entry)
         for entry in sdf.cells[("RAMBFIFO36E1RAM_MODE_U_RAMB18TDP_U_DOB_REG_U_0_EN_ECC_READ_FALSE", "RAMBFIFO36E1")].entries:
             if isinstance(entry, parse_sdf.IOPath):
-                if entry.to_pin == "DOBDOU": import_bus_clkq(bram36, "DOBDO", 32, "CLKARDCLK" if rsdp else "CLKBWRCLK", entry)
-                if entry.to_pin == "DOPBDOPU": import_bus_clkq(bram36, "DOPBDOP", 4, "CLKARDCLK" if rsdp else "CLKBWRCLK", entry)
+                if entry.to_pin == "DOBDOU": import_bus_clkq(bram36, "DOBDO", 32, "CLKARDCLKL" if rsdp else "CLKBWRCLKL", entry)
+                if entry.to_pin == "DOPBDOPU": import_bus_clkq(bram36, "DOPBDOP", 4, "CLKARDCLKL" if rsdp else "CLKBWRCLKL", entry)
 
 def main():
     xlbase = path.join(path.dirname(path.realpath(__file__)), "..")
