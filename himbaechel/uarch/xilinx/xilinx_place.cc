@@ -1071,6 +1071,69 @@ void XilinxImpl::fixup_routing()
     }
 
     /*
+     * Keep each net's route consistent with the remapping above. A used permutation pip runs from physical pin j's tile wire
+     * to logical pin i's site wire; the LUT port is now physical pin j, so the route must end at j's site wire, or
+     * Context::getNetinfoRouteDelay cannot walk from the sink back to the source and STA and the SDF fall back to
+     * predictArcDelay (an estimate) for every permuted LUT input. Replace each non-identity permutation pip with the identity
+     * pip from the same tile wire: same physical pin, so the same timing class, and FASM writes no permutation pips.
+     * Unbind all first: two nets can swap pins, and each new end is the other's old one.
+     */
+    {
+        std::vector<std::pair<NetInfo *, std::pair<PipId, PlaceStrength>>> swaps;
+        for (auto &net : ctx->nets) {
+            NetInfo *ni = net.second.get();
+            for (auto &wire : ni->wires) {
+                PipId pip = wire.second.pip;
+                if (pip == PipId())
+                    continue;
+                auto &pd = chip_pip_info(ctx->chip_info, pip);
+                if (pd.flags != PIP_LUT_PERMUTATION)
+                    continue;
+                int cfg = reinterpret_cast<const XlnxPipExtraDataPOD *>(pd.extra_data.get())->pip_config;
+                if (((cfg >> 4) & 0xF) == (cfg & 0xF))
+                    continue; // already the identity
+                swaps.push_back({ni, {pip, wire.second.strength}});
+            }
+        }
+        int unmatched = 0;
+        struct Rebind
+        {
+            NetInfo *net;
+            PipId old_pip, new_pip;
+            PlaceStrength strength;
+        };
+        std::vector<Rebind> binds;
+        for (auto &s : swaps) {
+            PipId pip = s.second.first;
+            int cfg = reinterpret_cast<const XlnxPipExtraDataPOD *>(chip_pip_info(ctx->chip_info, pip).extra_data.get())
+                              ->pip_config;
+            PipId ident;
+            for (PipId p : ctx->getPipsDownhill(ctx->getPipSrcWire(pip))) {
+                auto &qd = chip_pip_info(ctx->chip_info, p);
+                if (qd.flags != PIP_LUT_PERMUTATION)
+                    continue;
+                int qc = reinterpret_cast<const XlnxPipExtraDataPOD *>(qd.extra_data.get())->pip_config;
+                if ((qc >> 8) == (cfg >> 8) && ((qc >> 4) & 0xF) == ((cfg >> 4) & 0xF) &&
+                    (qc & 0xF) == ((cfg >> 4) & 0xF)) {
+                    ident = p;
+                    break;
+                }
+            }
+            if (ident == PipId()) {
+                unmatched++;
+                continue;
+            }
+            binds.push_back({s.first, pip, ident, s.second.second});
+        }
+        for (auto &b : binds) // all old ends free before any new one is taken
+            ctx->unbindPip(b.old_pip);
+        for (auto &b : binds)
+            ctx->bindPip(b.new_pip, b.net, b.strength);
+        log_info("    %d permuted LUT inputs re-bound to the identity pip of their physical pin (%d without one)\n",
+                 int(binds.size()), unmatched);
+    }
+
+    /*
      * Legalise route through OSERDESE3s
      */
     for (auto &cell : ctx->cells) {
