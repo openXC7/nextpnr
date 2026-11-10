@@ -27,6 +27,7 @@
 #include "util.h"
 
 #include "placer_heap.h"
+#include "timing.h"
 #include "timing_opt.h"
 #include "placer_static.h"
 #include "router2.h"
@@ -1480,6 +1481,29 @@ void XilinxImpl::name_clocks_after_ports()
                  entry.second.c_str(ctx));
 }
 
+bool XilinxImpl::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort, DelayQuad &delay) const
+{
+    // A 5LUT and a 6LUT in one position share pins A1-A5, and fixup_routing connects both cells to every net on them, so a
+    // cell can carry nets its function does not read (even its own output, through its partner). The packer names the
+    // inputs a LUT does read X_ORIG_PORT_<pin>; when a LUT has them, a pin without one has no arc to the output.
+    if (cell->type == id_SLICE_LUTX) {
+        static const IdString pins[6] = {id_A1, id_A2, id_A3, id_A4, id_A5, id_A6};
+        static const IdString orig[6] = {ctx->id("X_ORIG_PORT_A1"), ctx->id("X_ORIG_PORT_A2"), ctx->id("X_ORIG_PORT_A3"),
+                                         ctx->id("X_ORIG_PORT_A4"), ctx->id("X_ORIG_PORT_A5"), ctx->id("X_ORIG_PORT_A6")};
+        for (int i = 0; i < 6; i++) {
+            if (fromPort != pins[i])
+                continue;
+            bool named = false;
+            for (int k = 0; k < 6 && !named; k++)
+                named = cell->attrs.count(orig[k]) > 0;
+            if (named && !cell->attrs.count(orig[i]))
+                return false;
+            break;
+        }
+    }
+    return ctx->get_cell_delay_default(cell, fromPort, toPort, delay);
+}
+
 void XilinxImpl::postRoute()
 {
     pr_window_report();
@@ -1490,6 +1514,13 @@ void XilinxImpl::postRoute()
     // After the last timing analysis (hold-fix runs one).
     name_clocks_after_ports();
     ctx->assignArchInfo();
+    // The router's own timing report came before fixup_routing re-bound the permuted LUT inputs, so it used estimates for
+    // them; analyse again, so the logged Fmax and --report agree with the SDF.
+    if (lut_perm_rebound > 0) {
+        log_info("Timing after re-binding permuted LUT inputs:\n");
+        timing_analysis(ctx, false /*histogram*/, true /*fmax*/, ctx->detailed_timing_report /*path*/, false /*warn*/,
+                        true /*update_results*/);
+    }
     const ArchArgs &args = ctx->args;
     if (args.options.count("fasm")) {
         write_fasm(args.options["fasm"].as<std::string>());

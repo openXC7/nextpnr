@@ -1127,10 +1127,28 @@ void XilinxImpl::fixup_routing()
         }
         for (auto &b : binds) // all old ends free before any new one is taken
             ctx->unbindPip(b.old_pip);
-        for (auto &b : binds)
+        // One physical pin can feed several logical pins of the same LUTs (a net on two inputs): its permutation pips then share
+        // one identity pip, which the net may also hold already (one of the logical pins was the physical one). Bind it once.
+        int shared = 0, conflict = 0;
+        for (auto &b : binds) {
+            NetInfo *pn = ctx->getBoundPipNet(b.new_pip);
+            if (pn == b.net) {
+                shared++;
+                continue;
+            }
+            NetInfo *wn = ctx->getBoundWireNet(ctx->getPipDstWire(b.new_pip));
+            if (pn != nullptr || wn != nullptr) {
+                conflict++;
+                log_warning("permuted LUT input of net '%s': identity pip %s is held by net '%s', not re-bound\n",
+                            b.net->name.c_str(ctx), ctx->nameOfPip(b.new_pip), (pn ? pn : wn)->name.c_str(ctx));
+                continue;
+            }
             ctx->bindPip(b.new_pip, b.net, b.strength);
-        log_info("    %d permuted LUT inputs re-bound to the identity pip of their physical pin (%d without one)\n",
-                 int(binds.size()), unmatched);
+        }
+        lut_perm_rebound = int(binds.size()) - conflict;
+        log_info("    %d permuted LUT inputs re-bound to the identity pip of their physical pin (%d without one, %d sharing "
+                 "one, %d held by another net)\n",
+                 int(binds.size()), unmatched, shared, conflict);
     }
 
     /*

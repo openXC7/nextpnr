@@ -157,6 +157,7 @@ struct XilinxImpl : HimbaechelAPI
     void update_bram_bel(BelId bel, CellInfo *cell);
 
     bool isBelLocationValid(BelId bel, bool explain_invalid = false) const override;
+    bool getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort, DelayQuad &delay) const override;
     bool xc7_logic_tile_valid(IdString tileType, const LogicTileStatus &lts) const;
     void explain_invalid_logic_tile(BelId bel) const;
     // A tile is explained once: the final check of the placer asks every bel of it in turn
@@ -240,6 +241,7 @@ struct XilinxImpl : HimbaechelAPI
 
     void fixup_placement();
     void fixup_routing();
+    int lut_perm_rebound = 0; // permuted LUT inputs fixup_routing re-bound: timing is re-analysed after it when > 0
     void fixup_hold();
     void route_clocks();
     IdString clock_source_port(const NetInfo *net) const;
