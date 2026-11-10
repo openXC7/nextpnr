@@ -230,19 +230,19 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                         DBG();
                         return false;
                     }
-                    // If more than 5 total inputs are used, need to check number of shared input
-                    bool must_share_inputs = !srl_pair && (lut6->lut.input_count + lut5->lut.input_count) > 5;
-                    if (must_share_inputs) {
-                        int shared = 0, need_shared = (lut6->lut.input_count + lut5->lut.input_count - 5);
-                        for (int j = 0; j < lut6->lut.input_count; j++) {
-                            for (int k = 0; k < lut5->lut.input_count; k++) {
-                                if (lut6->lut.input_sigs[j] == lut5->lut.input_sigs[k])
-                                    shared++;
-                                if (shared >= need_shared)
-                                    break;
-                            }
-                        }
-                        if (shared < need_shared) {
+                    // The pair shares A1-A5 (A6 is tied high), so together they may read at most
+                    // 5 distinct nets: fixup_placement gives each one a pin.  Counted as distinct
+                    // nets, not as matching pin pairs, which a net on two pins of one LUT counts
+                    // twice (a 6-net pair then passed here and failed connectPort there).
+                    if (!srl_pair && (lut6->lut.input_count + lut5->lut.input_count) > 5) {
+                        std::set<const NetInfo *> nets;
+                        for (int j = 0; j < lut6->lut.input_count; j++)
+                            if (lut6->lut.input_sigs[j])
+                                nets.insert(lut6->lut.input_sigs[j]);
+                        for (int k = 0; k < lut5->lut.input_count; k++)
+                            if (lut5->lut.input_sigs[k])
+                                nets.insert(lut5->lut.input_sigs[k]);
+                        if (nets.size() > 5) {
                             DBG();
                             return false;
                         }
