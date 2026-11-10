@@ -361,7 +361,8 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
                             pip_class=PipClass.LUT_ROUTETHRU,
                             pip_config=rt_config | 1,
                             site_key=(s.index << 8),
-                            timing="SITE_NULL"
+                            # with --timing-cal a route-through on physical pin i costs a stage on that pin (LUTRT<i>)
+                            timing=(f"LUTRT{i}" if TIMING_CAL is not None and "lut_pin" in TIMING_CAL else "SITE_NULL")
                         )
 
                     return
@@ -823,6 +824,10 @@ def main():
             v = TIMING_CAL["lut_pin"][f"A{j}"]
             ch.timing.set_pip_class("DEFAULT", f"LUTPIN{j}",
                 delay=cal_tv(float(v["rise"]) - LUT_CAL_BASE - ovh, float(v["fall"]) - LUT_CAL_BASE - ovh))
+            # a LUT route-through goes from pin j's tile wire straight to O6, skipping the permutation pip and the LUT arc,
+            # and costs the same as a stage on pin j (measured: windows 1 and 2 of 2026-11-05, runs/2026-11-09-npcal/layouts.py)
+            ch.timing.set_pip_class("DEFAULT", f"LUTRT{j}",
+                delay=cal_tv(float(v["rise"]) - ovh, float(v["fall"]) - ovh))
     # Stub bel timings. On virtex7 the LUT comb delay and the FF D/CK->Q
     # figures are replaced by the VC707 Vivado-oracle calibration
     # (docs/extracted-timing.md): nextpnr's generic guesses of 0.30 ns
