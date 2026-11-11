@@ -115,6 +115,9 @@ seen_node_timings = set()
 import re as _re
 TIMING_CAL = None
 LUT_CAL_BASE = 10  # ps left on the LUT cell arc; the rest of a stage's cost goes on the physical pin's permutation pip
+LUT_PIN_ARC = {}   # --timing-cal: physical pin j -> its LUT arc (LUT_CAL_BASE, or less on a pin that costs less than that)
+CAL_WIRE_CLASSES = {"sgl", "dbl", "quad", "hex", "lvb", "lv", "lh"}   # "classes" keys of a --timing-cal file
+CAL_PER_USE_CLASSES = {"fan", "byp"}                                   # "per_use" keys
 def cal_wire_class(dst):
     """Same classes as runs/2026-11-09-npcal/npmodel.py wire_class: a pip's class is its destination wire's."""
     for pat, c in [(r'(EE|WW|NN|SS|NE|NW|SE|SW|EL|ER|WL|WR|NL|NR|SL|SR)1BEG(_[NS])?\d', 'sgl'),
@@ -133,6 +136,9 @@ def cal_per_use(c):
     if TIMING_CAL is None or c is None or c not in TIMING_CAL.get("per_use", {}): return None
     v = TIMING_CAL["per_use"][c]; return (float(v["rise"]), float(v["fall"]))
 def cal_tv(lo, hi):
+    """A TimingValue from a measured (rise, fall) pair. TimingValue has no edges: its fields are min and max, and
+    nextpnr keeps one delay per pip and arc (setup analysis reads the max). So the pair goes in as min and max in
+    whichever order they fall, and the slower edge is the one timed. Negative values clamp to 0 (no negative delay)."""
     lo, hi = int(round(max(lo, 0))), int(round(max(hi, 0)))
     return TimingValue(min(lo, hi), max(lo, hi))
 def cal_node_class(wires):
@@ -638,6 +644,16 @@ def main():
         import json
         with open(args.timing_cal) as f:
             TIMING_CAL = json.load(f)
+        # a key the generator does not know would leave that class at its prjxray timing while the chipdb looks
+        # calibrated: refuse it rather than skip it
+        known = {"classes": CAL_WIRE_CLASSES, "per_use": CAL_PER_USE_CLASSES, "lut_pin": {f"A{j}" for j in range(1, 7)}}
+        for section, names in known.items():
+            unknown = sorted(set(TIMING_CAL.get(section, {})) - names)
+            if unknown:
+                sys.exit(f"--timing-cal {args.timing_cal}: unknown {section} key(s) {unknown}; known: {sorted(names)}")
+        missing = sorted(known["lut_pin"] - set(TIMING_CAL.get("lut_pin", known["lut_pin"])))
+        if missing:
+            sys.exit(f"--timing-cal {args.timing_cal}: lut_pin lacks {missing}")
         print(f"--timing-cal {args.timing_cal}: classes {sorted(TIMING_CAL.get('classes', {}))}, "
               f"per use {sorted(TIMING_CAL.get('per_use', {}))}, lut pins {'lut_pin' in TIMING_CAL}", file=sys.stderr)
 
@@ -826,8 +842,17 @@ def main():
         ovh = float(TIMING_CAL.get("lut_stage_overhead", 20))
         for j in range(1, 7):
             v = TIMING_CAL["lut_pin"][f"A{j}"]
-            ch.timing.set_pip_class("DEFAULT", f"LUTPIN{j}",
-                delay=cal_tv(float(v["rise"]) - LUT_CAL_BASE - ovh, float(v["fall"]) - LUT_CAL_BASE - ovh))
+            # what this pin's stage costs beyond the overhead, per edge; the LUT arc takes up to LUT_CAL_BASE of it and the
+            # permutation pip the rest, so a pin cheaper than LUT_CAL_BASE + overhead (A6, about 0-16 ps measured) is not
+            # charged the full arc. Below the overhead itself nothing here can take it lower: say how much is left over.
+            beyond = [float(v["rise"]) - ovh, float(v["fall"]) - ovh]
+            arc = [min(max(b, 0.0), LUT_CAL_BASE) for b in beyond]
+            LUT_PIN_ARC[j] = cal_tv(*arc)
+            ch.timing.set_pip_class("DEFAULT", f"LUTPIN{j}", delay=cal_tv(beyond[0] - arc[0], beyond[1] - arc[1]))
+            excess = max(-b for b in beyond)
+            if excess > 0:
+                print(f"--timing-cal: A{j} measures {v['rise']}/{v['fall']} ps, below the {ovh:g} ps stage overhead; "
+                      f"its stage is modelled {excess:.0f} ps slow", file=sys.stderr)
             # a LUT route-through goes from pin j's tile wire straight to O6, skipping the permutation pip and the LUT arc,
             # and costs the same as a stage on pin j (measured: windows 1 and 2 of 2026-11-05, runs/2026-11-09-npcal/layouts.py)
             ch.timing.set_pip_class("DEFAULT", f"LUTRT{j}",
@@ -839,14 +864,15 @@ def main():
     # against Vivado's own probed paths.
     lut_delay = TimingValue(45, 124) if is_virtex7 else None
     if TIMING_CAL is not None and "lut_pin" in TIMING_CAL:
-        lut_delay = TimingValue(LUT_CAL_BASE, LUT_CAL_BASE)  # the pin-dependent part is on the permutation pips
+        lut_delay = TimingValue(LUT_CAL_BASE, LUT_CAL_BASE)  # the pin-dependent part is on the permutation pips (and LUT_PIN_ARC)
     ff_d_setup = TimingValue(34) if is_virtex7 else TimingValue(100, 100)
     ff_d_hold = TimingValue(87) if is_virtex7 else TimingValue(200, 200)
     ff_clk_q = TimingValue(100, 303) if is_virtex7 else TimingValue(300, 350)
     def add_lut_timing(lut):
         for i in range(1, 6+1):
-            lut.add_comb_arc(f"A{i}", "O6", lut_delay or TimingValue(100, 125))
-            if i <= 5: lut.add_comb_arc(f"A{i}", "O5", lut_delay or TimingValue(120, 150))
+            arc = LUT_PIN_ARC.get(i, lut_delay)   # --timing-cal: per physical pin, else one value for all
+            lut.add_comb_arc(f"A{i}", "O6", arc or TimingValue(100, 125))
+            if i <= 5: lut.add_comb_arc(f"A{i}", "O5", arc or TimingValue(120, 150))
         for i in range(1, 8+1):
             lut.add_setup_hold("CLK", f"WA{i}", ClockEdge.RISING, TimingValue(100, 500), TimingValue(100, 200))
         lut.add_setup_hold("CLK", "WE", ClockEdge.RISING, TimingValue(100, 600), TimingValue(100, 100))
