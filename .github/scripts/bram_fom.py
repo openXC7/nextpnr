@@ -12,7 +12,7 @@ with route the measured delay matrix's estimate for the grid offset (nextpnr's
 -o delay-matrix file, extrapolated at its edge rates as nextpnr does), and
 skew the clock tree's extra insertion delay at the block RAM over a flip-flop
 at r (nextpnr's clock_tree.cc model: 170 ps per clock region row from the
-BUFGs, 1.7 ps per column from the spine, 430 ps for a block RAM clock pin).
+BUFGs, 1.7 ps per column from the spine, 60 ps for a block RAM clock pin).
 The mux logic between them is the same in every placement of a netlist, so
 the score ranks placements; it is not a slack.
 
@@ -117,7 +117,7 @@ class ClockTree:
         r = min(self.rows, key=lambda r: abs(r - y))
         off = r - self.centre
         away = sum(1 for q in self.rows if ((q - self.centre) > 0) == (off > 0) and abs(q - self.centre) < abs(off))
-        return 170 * away + 1.7 * abs(x - self.spine) + (430 if bram else 0)
+        return 170 * away + 1.7 * abs(x - self.spine) + (60 if bram else 0)
 
 
 def load_placement(spec, site_xy):
