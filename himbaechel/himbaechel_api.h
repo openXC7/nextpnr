@@ -86,6 +86,10 @@ struct HimbaechelAPI
     virtual BelBucketId getBelBucketForCellType(IdString cell_type) const;
     virtual bool isValidBelForCellType(IdString cell_type, BelId bel) const;
     virtual bool isBelLocationValid(BelId bel, bool explain_invalid = false) const { return true; }
+    // A bel the device utilisation (the log and --report) does not count, on top
+    // of the chipdb's hidden flag: the generic architecture API's getBelHidden,
+    // passed through to the uarch.  It does not affect placement.
+    virtual bool getBelHidden(BelId bel) const { return false; }
 
     // --- Wire and pip functions ---
     // Called when a wire/pip is placed/unplaced (with net=nullptr for a unbind)

@@ -236,6 +236,26 @@ struct XilinxImpl : HimbaechelAPI
     // The die whose chipdb is loaded (xc7a35t is "xc7a50t", and so on)
     std::string chipdb_die;
 
+    // A device on another device's die (init_database) offers only this many
+    // LUTs, flip-flops, RAMB36-sized block RAMs and DSP48E1s; zero means the
+    // whole die.  Placement may use any site of the die, as Vivado does: only
+    // the counts are limited (part_resources.cc).
+    struct PartLimits
+    {
+        int luts = 0;
+        int ffs = 0;
+        int bram36 = 0;
+        int dsps = 0;
+    };
+    PartLimits part_limits;
+    // Bels the device utilisation does not count (getBelHidden): the LUT5
+    // half of every LUT, the IO sites the package does not bond, and what a
+    // device on a bigger die does not offer.  Placement does not look at it.
+    pool<BelId> uncounted_bels;
+    void init_part_resources();
+    bool getBelHidden(BelId bel) const override;
+    void check_part_limits() const;
+
     std::vector<XilinxCellTags> cell_tags;
     const XilinxCellTags *get_tags(const CellInfo *cell) const
     {

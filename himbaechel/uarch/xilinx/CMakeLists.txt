@@ -15,6 +15,7 @@ set(SOURCES
     pack_dsp_xc7.cc
     pack.h
     pack_io.cc
+    part_resources.cc
     pins.cc
     pins.h
     xdc.cc
@@ -26,6 +27,7 @@ set(SOURCES
 set(TEST_SOURCES
     tests/bel_bucket_test.cc
     tests/pack_test.cc
+    tests/part_resources_test.cc
 )
 
 add_nextpnr_himbaechel_microarchitecture(${uarch}

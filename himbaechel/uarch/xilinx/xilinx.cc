@@ -141,20 +141,32 @@ void XilinxImpl::init_database(Arch *arch)
         log_error("Invalid device %s\n", args.device.c_str());
     }
     std::string die = match[1].str();
-    if (die == "xc7a35t")
-        die = "xc7a50t";
-    // xc7z007s is the xc7z010 die with fewer resources enabled, and has no
-    // chipdb of its own (see prjxray-db/zynq7/mapping/devices.yaml).
-    if (die == "xc7z007s")
-        die = "xc7z010";
-    // prjxray-db/zynq7/mapping/devices.yaml: xc7z035's fabric is xc7z045.
-    const bool xc7z035_uses_xc7z045 = die == "xc7z035";
-    if (xc7z035_uses_xc7z045)
-        die = "xc7z045";
-    // prjxray-db/spartan7/mapping/devices.yaml: xc7s75's fabric is xc7s100.
-    const bool xc7s75_uses_xc7s100 = die == "xc7s75";
-    if (xc7s75_uses_xc7s100)
-        die = "xc7s100";
+    // Devices that are a bigger device's die and have no chipdb of their own
+    // (prjxray-db <family>/mapping/devices.yaml).  Vivado lists every site of
+    // the die for them and places on any of them, but limits the LUTs,
+    // flip-flops, block RAMs and DSPs to what the device is sold with: its
+    // part properties LUT_ELEMENTS, FLIPFLOPS, BLOCK_RAMS and DSP, which
+    // report_utilization shows as available (Vivado 2026.1).
+    struct SharedDie
+    {
+        const char *device;
+        const char *die;
+        PartLimits limits;
+    };
+    static const SharedDie shared_dies[] = {
+            {"xc7a35t", "xc7a50t", {20800, 41600, 50, 90}},
+            {"xc7z007s", "xc7z010", {14400, 28800, 50, 66}},
+            {"xc7z035", "xc7z045", {171900, 343800, 500, 900}},
+            {"xc7s75", "xc7s100", {48000, 96000, 90, 140}},
+    };
+    for (const auto &shared : shared_dies) {
+        const bool device_is_on_a_shared_die = die == shared.device;
+        if (device_is_on_a_shared_die) {
+            die = shared.die;
+            part_limits = shared.limits;
+            break;
+        }
+    }
     chipdb_die = die;
     arch->load_chipdb(stringf("xilinx/chipdb-%s.bin", die.c_str()));
     std::string package = match[2].str();
@@ -203,6 +215,7 @@ void XilinxImpl::init(Context *ctx)
         auto extra_data = tile_extra_data(i);
         tile_status.at(i).site_variant.resize(extra_data->sites.ssize());
     }
+    init_part_resources();
 }
 
 IdString XilinxImpl::getBelBucketForCellType(IdString cell_type) const
@@ -882,7 +895,9 @@ void XilinxImpl::close_routed_tiles()
 
 void XilinxImpl::prePlace()
 {
+    // After apply_holdbufs(): its buffers are LUT cells too.
     apply_holdbufs();
+    check_part_limits();
     apply_preplaced();
     close_routed_tiles();
     // Before placement, so the measured table reaches the placer (through
@@ -1431,6 +1446,8 @@ void XilinxImpl::postRoute()
     // Insert feedthrough buffers on hold-violating arcs and reroute, before
     // routing is finalised and FASM is written.  No-op unless -o hold-fix.
     fixup_hold();
+    // Again: the hold-fix buffers are LUT cells, and FASM is written next.
+    check_part_limits();
     fixup_routing();
     // After the last timing analysis (hold-fix runs one).
     name_clocks_after_ports();
