@@ -122,7 +122,10 @@ Line counts are `wc -l` on the checkout.
 | `gen/filters.py` | 110 | prjxray→nextpnr mapping: bel Z overrides (SLICE/BRAM), bel-type overrides (`SLICE_LUTX`/`SLICE_FFX`/IOL_*/BUFGCTRL…), pip inclusion/exclusion rules. |
 | `gen/parse_sdf.py` | 145 | Minimal SDF parser used to import prjxray cell timing. |
 | `gen/tileconn.py` | 38 | Applies `tileconn.json` wire-pair merges to build cross-tile *nodes*. |
-| `examples/` | — | `arty-a35/` (blinky.v + arty.xdc + blinky.sh) and `bitgen_xray.sh` (FASM→frames→bit). |
+| `sparse_refine.cc` | 177 | Post-placement refinement of DSP48E1 / RAMB36E1 / RAMB18E1 sites (`refine_sparse_bels`): each movable, unclustered cell is offered every free bel of its type within 80 tiles (inside its region, if constrained) and takes the one minimising the HPWL of its nets; passes repeat while anything moves. These bels sit in a few columns five rows apart, which HeAP's spreading and the annealer's shrinking radius handle badly (DSPs 27–38 tiles from their adder trees on a dense design; 9–11 after). `-o sparse-refine=off`. |
+| `replicate.cc` | 310 | Post-placement replication of flip-flops whose placed sinks cluster far apart (`replicate_merged_ffs`): k-means on the tile grid, up to one copy more than the synthesis merged into the cell (`MERGED_EQUIV`), else two; a split must save a quarter of the net's wirelength. Copies are `<cell>$dup<n>` with the original's D/clock/enable/reset/INIT and region, placed by spiral search on a free, legal FF bel; a copy with no site within 40 tiles is undone (sinks back to the original). `-o replicate=off`. The LVS tools treat a `$dup` copy as its original. |
+| `pack.cc` (`-o macro-region`) | — | `macro-region=<prefix>:<buffer>[:<rows>]`: every cell named `<prefix>…` (cluster roots) is constrained to the clock region of the placed buffer `<buffer>`, optionally with a row margin (clipped to the die) for the cells the clock does not reach; a cell already constrained to another region is an error. A placed BUFHCE's sinks are confined to its region like BUFIO/BUFR's. |
+| `examples/` | — | `arty-a35/` (blinky.v + arty.xdc + blinky.sh) and `bitgen_xray.sh` (FASM→frames→bit); `vc707-*/` netlist entries of the demos gate, among them `vc707-heavyhash4` (109k cells, 256 DSPs, the congestion-spread stretch entry). |
 
 ---
 
@@ -226,8 +229,15 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
   - Node timing: `NodeTimingPOD` (`cap`/`res`/`delay`) for merged cross-tile nodes
     (`gen/xilinx_gen.py:409-447`).
   - Cell timing: `CellTimingPOD`/`CellPinTimingPOD` with comb arcs and reg arcs
-    (setup/hold/clk_q) — LUT/FF stubbed in `xilinx_gen.py:450-462`; SELMUX2_1, CARRY4 and
-    BRAM imported from prjxray SDF (`xilinx_gen.py:464-474`).
+    (setup/hold/clk_q) — LUT and FF from fixed figures in `xilinx_gen.py` (on virtex7 the
+    Vivado-oracle values of `docs/extracted-timing.md`); SELMUX2_1, CARRY4 and BRAM imported
+    from prjxray SDF. RAMB36 arcs name the packed cell's CLKARDCLKL/CLKBWRCLKL clock pins.
+  - **Silicon calibration** (`gen/xilinx_gen.py --timing-cal <json>`, optional): per wire class
+    a factor on pip delay, output resistance and node resistance; a fixed cost per use of fan
+    and bypass pips; and a stage cost per physical LUT pin, carried on the permutation pips
+    (`LUTPIN<j>`) and the pin's LUT arc, with route-throughs priced by input pin (`LUTRT<j>`).
+    Unknown keys in the JSON are refused. Without the option the chipdb is unchanged. Data for
+    xc7vx485t-2: openXC7/prjxray-db `virtex7/timings/silicon/xc7vx485t-2.cal.json`.
 - **Only one speed grade exists**: `set_speed_grades(["DEFAULT"])`
   (`xilinx_gen.py:387`, TODO) and `init_database` calls `set_speed_grade("DEFAULT")`
   (`xilinx.cc:91`). Real -1/-2/-3 grades are not modelled.
@@ -346,9 +356,9 @@ The most meaningful `TODO`/`FIXME`/`NPNR_ASSERT_FALSE` markers in `uarch/xilinx`
 - **SRL Q31 out of a slice needs the A LUT when Q reads another address** — only the A LUT's
   `MC31` reaches `DOUTMUX`; a cell already locked above the A LUT, or in another cluster, is a
   packer error (`pack.cc:927-961`).
-- **Routing delay model is deliberately coarse** — `xilinx.cc:767` and `:778`
-  (`TODO: improve sophistication here based on old nextpnr-xilinx code`); pip/placer delay
-  estimates are heuristics.
+- **Routing delay model is deliberately coarse** — `xilinx.cc` (`TODO: improve sophistication
+  here based on old nextpnr-xilinx code`); the placer's delay estimates are heuristics. Routed
+  delays come from the chipdb, which `--timing-cal` can calibrate from silicon (above).
 - **LUT permutation/routethru special-cases** — `xilinx.cc:291,293` (`FIXME: conflict with
   ground`, `FIXME: routethru to MUX`).
 - **Carry feed-through inefficiency** — `pack_carry.cc:280` (`FIXME: in multiple fanout cases,
@@ -360,12 +370,15 @@ The most meaningful `TODO`/`FIXME`/`NPNR_ASSERT_FALSE` markers in `uarch/xilinx`
 - **Missing pseudo-pips** — `fasm.cc:306` (`FIXME: PPIPs missing for DSPs`), `fasm.cc:312`
   (`FIXME: PPIPs missing for SING IOI3s`), `fasm.cc:224` (`FIXME: shouldn't these be in the
   X-RAY ppips database?`).
-- **Timing database gaps** — single `DEFAULT` speed grade (`xilinx_gen.py:387`), stubbed LUT/FF
-  timing (`xilinx_gen.py:450-462`), `xilinx_gen.py:466` (`kintex7 … TODO: missing` → reuses
+- **Timing database gaps** — single `DEFAULT` speed grade (`xilinx_gen.py:387`), fixed LUT/FF
+  figures unless `--timing-cal` gives per-pin LUT costs, no CARRY4 DI arcs, `xilinx_gen.py:466` (`kintex7 … TODO: missing` → reuses
   artix7 timing), `xilinx_gen.py:276` (`TODO: anything other than comb` in SDF import),
   `xilinx_gen.py:485` (`TODO: bank` for pads).
 - **RapidWright-alignment hacks** — `fixup_routing` re-encodes LUT input permutations into
-  `X_ORIG_PORT` attributes to keep Vivado/RapidWright happy (`xilinx_place.cc:512-625`);
+  `X_ORIG_PORT` attributes to keep Vivado/RapidWright happy (`xilinx_place.cc`), and re-binds
+  each permuted input's route to the identity pip of its physical pin (once, when several
+  logical pins share one) so route delay and the SDF follow the remapped port; `postRoute`
+  then runs timing analysis again;
   `fixup_placement` remaps LUT5/LUT6 physical inputs post-place (`xilinx_place.cc:389-481`).
 - **Other** — `xilinx_device.py:425` (`FIXME: tied_value`), `:435` (`FIXME: pip/wire delays`);
   DSP constant-pin handling comments (`pack_dsp_xc7.cc:146`).
@@ -378,5 +391,5 @@ The most meaningful `TODO`/`FIXME`/`NPNR_ASSERT_FALSE` markers in `uarch/xilinx`
   kintex7 in the default list; no UltraScale(+) in this uarch (separate ng-ultra effort).
 - Constraints: only `set_property`/`create_clock` on ports/nets; no I/O timing, multicycle,
   false-path, generated clocks, or cell/pin targets.
-- Timing: single speed grade, stub LUT/FF delays, no timing-driven post-placement optimisation.
+- Timing: single speed grade, fixed LUT/FF delays (per-pin LUT costs with `--timing-cal`), no timing-driven post-placement optimisation.
 - Tests/CI: no xilinx unit tests, no chipdb/P&R regression in upstream CI.

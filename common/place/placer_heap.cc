@@ -172,7 +172,22 @@ class HeAPPlacer
         for (auto &cell : ctx->cells)
             if (!cell.second->isPseudo() && cell.second->cluster != ClusterId())
                 cluster2cells[cell.second->cluster].push_back(cell.second.get());
+        if (!cfg.seedFile.empty()) {
+            std::ifstream in(cfg.seedFile);
+            if (!in)
+                log_error("cannot read placer seed file '%s'\n", cfg.seedFile.c_str());
+            std::string line;
+            while (std::getline(in, line)) {
+                auto t1 = line.find('\t');
+                auto t2 = line.find('\t', t1 + 1);
+                if (t1 == std::string::npos || t2 == std::string::npos)
+                    continue;
+                seed[ctx->id(line.substr(0, t1))] = std::make_pair(std::atoi(line.c_str() + t1 + 1), std::atoi(line.c_str() + t2 + 1));
+            }
+            log_info("placer seed: %zu cell positions from %s\n", seed.size(), cfg.seedFile.c_str());
+        }
     }
+    dict<IdString, std::pair<int, int>> seed;
 
     bool place()
     {
@@ -183,11 +198,26 @@ class HeAPPlacer
         build_fast_bels();
         alloc_control_sets();
         seed_placement();
+        if (!seed.empty()) {
+            int seeded = 0;
+            for (auto cell : place_cells) {
+                auto it = seed.find(cell->name);
+                if (it == seed.end())
+                    continue;
+                auto &cl = cell_locs.at(cell->name);
+                cl.x = std::max(0, std::min(max_x, it->second.first));
+                cl.y = std::max(0, std::min(max_y, it->second.second));
+                cl.rawx = cl.x;
+                cl.rawy = cl.y;
+                seeded++;
+            }
+            log_info("placer seed: %d of %zu movable cells start at their seeded positions\n", seeded, place_cells.size());
+        }
         update_all_chains();
         wirelen_t hpwl = total_hpwl();
-        log_info("Creating initial analytic placement for %d cells, random placement wirelen = %d.\n",
-                 int(place_cells.size()), int(hpwl));
-        for (int i = 0; i < 4; i++) {
+        log_info("Creating initial analytic placement for %d cells, %s placement wirelen = %d.\n",
+                 int(place_cells.size()), seed.empty() ? "random" : "seeded", int(hpwl));
+        for (int i = 0; i < 4 && !cfg.legaliseOnly; i++) {
             setup_solve_cells();
             auto solve_startt = std::chrono::high_resolution_clock::now();
 #ifdef NPNR_DISABLE_THREADS
@@ -248,7 +278,7 @@ class HeAPPlacer
                      cfg.cell_placement_timeout);
         else
             log_info("Running main analytical placer.\n");
-        while (stalled < 5 && (solved_hpwl <= legal_hpwl * 0.8)) {
+        while (stalled < 5 && (solved_hpwl <= legal_hpwl * 0.8) && !(cfg.legaliseOnly && iter > 0)) {
             // Alternate between particular bel types and all bels
             for (auto &run : heap_runs) {
                 auto run_startt = std::chrono::high_resolution_clock::now();
@@ -260,6 +290,9 @@ class HeAPPlacer
                 auto solve_startt = std::chrono::high_resolution_clock::now();
 
                 // Build the connectivity matrix and run the solver; multithreaded between x and y axes if applicable
+                if (cfg.legaliseOnly) {
+                    // the seeded positions are the solution: spread and legalise them
+                } else
 #ifndef NPNR_DISABLE_THREADS
                 if (solve_cells.size() >= 500) {
                     boost::thread xaxis([&]() { build_solve_direction(false, (iter == 0) ? -1 : iter); });
@@ -525,10 +558,26 @@ class HeAPPlacer
                 if (member_already_has_a_bel)
                     continue;
                 const bool wanted_bel_is_taken = (ctx->getBoundBelCell(pb.second) != nullptr);
-                if (wanted_bel_is_taken)
-                    log_error("cluster member '%s' of pinned '%s' needs bel '%s', which '%s' holds\n",
-                              pb.first->name.c_str(ctx), root->name.c_str(ctx), ctx->nameOfBel(pb.second),
-                              ctx->getBoundBelCell(pb.second)->name.c_str(ctx));
+                if (wanted_bel_is_taken) {
+                    // The pins are authoritative (a placement imported from
+                    // another tool, say, which packed differently): the
+                    // member leaves the cluster and is placed on its own.
+                    log_warning("cluster member '%s' of pinned '%s' needs bel '%s', which '%s' holds; placing it "
+                                "freely\n",
+                                pb.first->name.c_str(ctx), root->name.c_str(ctx), ctx->nameOfBel(pb.second),
+                                ctx->getBoundBelCell(pb.second)->name.c_str(ctx));
+                    CellInfo *member = pb.first;
+                    member->cluster = ClusterId();
+                    auto &kids = root->constr_children;
+                    kids.erase(std::remove(kids.begin(), kids.end(), member), kids.end());
+                    // and out of the solver's cluster map, or setup_solve_cells
+                    // would still give it the root's variable
+                    auto c2c = cluster2cells.find(root->cluster);
+                    if (c2c != cluster2cells.end())
+                        c2c->second.erase(std::remove(c2c->second.begin(), c2c->second.end(), member),
+                                          c2c->second.end());
+                    continue;
+                }
                 ctx->bindBel(pb.second, pb.first, STRENGTH_USER);
                 constrained.push_back(pb.second);
                 placed_cells++;
@@ -613,15 +662,19 @@ class HeAPPlacer
         FastBels::FastBelsData *ff_bels;
         fast_bels.getBelsForBelBucket(cfg.ff_bel_bucket, &ff_bels);
         control_sets.reset(max_x + 1, max_y + 1);
-        for (int x = 0; x <= max_x; x++) {
-            if (x >= int(ff_bels->size()))
+        // Every tile with a flip-flop bel gets its groups, bound or not:
+        // fast_bels lists only the free bels, so a tile whose flip-flops
+        // are all pinned (an imported placement) would otherwise have no
+        // entry and bind_ctrl_set() would index an empty vector.
+        for (auto bel : ctx->getBels()) {
+            if (ctx->getBelBucketForBel(bel) != cfg.ff_bel_bucket)
                 continue;
-            auto &col = ff_bels->at(x);
-            for (int y = 0; y <= max_y; y++) {
-                if (y < int(col.size()) && !col.at(y).empty())
-                    control_sets.at(x, y).resize(cfg.ff_control_set_groups.size());
-            }
+            Loc loc = ctx->getBelLocation(bel);
+            auto &tile = control_sets.at(loc.x, loc.y);
+            if (tile.empty())
+                tile.resize(cfg.ff_control_set_groups.size());
         }
+        (void)ff_bels;
         for (int g = 0; g < int(cfg.ff_control_set_groups.size()); g++) {
             for (int z : cfg.ff_control_set_groups.at(g)) {
                 z_to_ctrl_set[z] = g;
@@ -1167,6 +1220,28 @@ class HeAPPlacer
             }
             auto endt = std::chrono::high_resolution_clock::now();
             p->sl_time += std::chrono::duration<float>(endt - startt).count();
+            // How far legalisation moved the cells from the solved positions,
+            // per bel bucket: a sparse bucket (DSPs, block RAMs) that lands
+            // far from where the solver wanted it is a placement-quality
+            // problem no amount of routing fixes.
+            std::map<IdString, std::vector<int>> disp;
+            for (auto cell : p->solve_cells) {
+                if (cell->bel == BelId())
+                    continue;
+                auto &cl = p->cell_locs.at(cell->name);
+                Loc l = ctx->getBelLocation(cell->bel);
+                disp[ctx->getBelBucketForCellType(cell->type)].push_back(std::abs(l.x - int(cl.rawx)) +
+                                                                          std::abs(l.y - int(cl.rawy)));
+            }
+            for (auto &d : disp) {
+                auto &v = d.second;
+                std::sort(v.begin(), v.end());
+                int64_t sum = 0;
+                for (int x : v)
+                    sum += x;
+                log_info("    legalised %s: %zu cells moved %.1f tiles on average, p90 %d, max %d\n",
+                         d.first.c_str(ctx), v.size(), double(sum) / double(v.size()), v[v.size() * 9 / 10], v.back());
+            }
         }
         void legalise_cell(CellInfo *ci)
         {
@@ -1186,7 +1261,30 @@ class HeAPPlacer
                 ripup_radius = std::min(std::max(p->max_x, p->max_y), ripup_radius * 2);
             }
 
-            if (total_iters_noreset > std::max(5000, 8 * int(ctx->cells.size()))) {
+            const int64_t budget = std::max<int64_t>(5000, int64_t(p->cfg.legaliseEffort) * int64_t(ctx->cells.size()));
+            ++legalise_count[ci->name];
+            if (total_iters_noreset > budget) {
+                // Say what would not settle: the unplaced cells by type and
+                // region, and the cells ripped up and re-legalised most often.
+                dict<std::pair<IdString, IdString>, int> unplaced;
+                for (auto cell : p->solve_cells)
+                    if (cell->bel == BelId())
+                        ++unplaced[{cell->type, cell->region ? cell->region->name : IdString()}];
+                log_info("Legaliser gave up after %lld legalisations, on '%s' (%s%s%s); unplaced:\n",
+                         (long long)total_iters_noreset, ctx->nameOf(ci), ci->type.c_str(ctx),
+                         ci->region ? ", region " : "", ci->region ? ci->region->name.c_str(ctx) : "");
+                for (auto &u : unplaced)
+                    log_info("    %6d %s%s%s\n", u.second, u.first.first.c_str(ctx), u.first.second != IdString() ? " in " : "",
+                             u.first.second != IdString() ? u.first.second.c_str(ctx) : "");
+                std::vector<std::pair<int, IdString>> churn;
+                for (auto &lc : legalise_count)
+                    churn.emplace_back(lc.second, lc.first);
+                std::sort(churn.rbegin(), churn.rend());
+                for (size_t i = 0; i < std::min<size_t>(10, churn.size()); ++i) {
+                    const CellInfo *cc = ctx->cells.at(churn[i].second).get();
+                    log_info("    legalised %d times: %s (%s%s%s)\n", churn[i].first, ctx->nameOf(cc), cc->type.c_str(ctx),
+                             cc->region ? ", region " : "", cc->region ? cc->region->name.c_str(ctx) : "");
+                }
                 log_error("Unable to find legal placement for all cells, design is probably at utilisation limit.\n");
             }
 
@@ -1310,6 +1408,7 @@ class HeAPPlacer
         Context *ctx;
 
         int ripup_radius, chain_ripup_radius, total_iters, total_iters_noreset;
+        dict<IdString, int> legalise_count; // per cell, for the give-up report
 
         FastBels::FastBelsData *fb;
 
@@ -2323,6 +2422,7 @@ PlacerHeapCfg::PlacerHeapCfg(Context *ctx)
     criticalityExponent = ctx->setting<int>("placerHeap/criticalityExponent");
     timingWeight = ctx->setting<int>("placerHeap/timingWeight");
     congestionSpread = ctx->setting<bool>("placerHeap/congestionSpread", false);
+    legaliseEffort = ctx->setting<int>("placerHeap/legaliseEffort", 8);
     congestionWeight = ctx->setting<float>("placerHeap/congestionWeight", 0.5f);
     parallelRefine = ctx->setting<bool>("placerHeap/parallelRefine", false);
     netShareWeight = ctx->setting<float>("placerHeap/netShareWeight", 0);
@@ -2332,12 +2432,21 @@ PlacerHeapCfg::PlacerHeapCfg(Context *ctx)
     solverTolerance = 1e-5;
     placeAllAtOnce = false;
     chainRipup = false;
+    seedFile = ctx->settings.count(ctx->id("placerHeap/seedFile")) ? ctx->setting<std::string>("placerHeap/seedFile") : "";
+    legaliseOnly = ctx->setting<bool>("placerHeap/legaliseOnly", false);
 
     int timeout_divisor = ctx->setting<int>("placerHeap/cellPlacementTimeout", 8);
     if (timeout_divisor > 0) {
         // Set a conservative default. This is a rather large number and could probably
         // be shaved down, but for now it will keep the process from running indefinite.
-        cell_placement_timeout = std::max(10000, (int(ctx->cells.size()) * int(ctx->cells.size()) / timeout_divisor));
+        // In 64 bits: cells^2 overflows an int past ~46k cells, and the wrapped
+        // (often negative) value made the limit the 10000 floor, whatever the divisor.
+        const int64_t n = int64_t(ctx->cells.size());
+        const int64_t limit = std::min<int64_t>(n * n / timeout_divisor, std::numeric_limits<int>::max());
+        cell_placement_timeout = std::max(10000, int(limit));
+        if (ctx->verbose)
+            log_info("placer-heap: cell placement timeout %d (cells %lld, divisor %d, limit %lld)\n",
+                     cell_placement_timeout, (long long)n, timeout_divisor, (long long)limit);
     } else {
         cell_placement_timeout = 0;
     }

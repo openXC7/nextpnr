@@ -96,7 +96,7 @@ items to port (each maps to a fork commit):
 
 | Item | Fork | Upstream |
 |---|---|---|
-| Delay model | per-BEL SDF from prjxray timings/ (slicel/m, BRAM, carry4) | chipdb pip/node/cell timing; **LUT/FF stubbed** in gen; BRAM SDF-imported |
+| Delay model | per-BEL SDF from prjxray timings/ (slicel/m, BRAM, carry4) | chipdb pip/node/cell timing; LUT/FF fixed figures, per-pin LUT costs and wire-class factors with `gen --timing-cal`; BRAM SDF-imported |
 | Speed grades | real parts' grades | **single `DEFAULT` grade** (`xilinx_gen.py:387`) |
 | DSP48E1 comb model | ✓ (`dsp48e1IsCombinational`) | ? (verify in doc 01 §5) |
 | Multicycle | `NEXTPNR_MCP_SETUP` in timing walk | upstream SDC path (verify) |

@@ -230,19 +230,19 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                         DBG();
                         return false;
                     }
-                    // If more than 5 total inputs are used, need to check number of shared input
-                    bool must_share_inputs = !srl_pair && (lut6->lut.input_count + lut5->lut.input_count) > 5;
-                    if (must_share_inputs) {
-                        int shared = 0, need_shared = (lut6->lut.input_count + lut5->lut.input_count - 5);
-                        for (int j = 0; j < lut6->lut.input_count; j++) {
-                            for (int k = 0; k < lut5->lut.input_count; k++) {
-                                if (lut6->lut.input_sigs[j] == lut5->lut.input_sigs[k])
-                                    shared++;
-                                if (shared >= need_shared)
-                                    break;
-                            }
-                        }
-                        if (shared < need_shared) {
+                    // The pair shares A1-A5 (A6 is tied high), so together they may read at most
+                    // 5 distinct nets: fixup_placement gives each one a pin.  Counted as distinct
+                    // nets, not as matching pin pairs, which a net on two pins of one LUT counts
+                    // twice (a 6-net pair then passed here and failed connectPort there).
+                    if (!srl_pair && (lut6->lut.input_count + lut5->lut.input_count) > 5) {
+                        std::set<const NetInfo *> nets;
+                        for (int j = 0; j < lut6->lut.input_count; j++)
+                            if (lut6->lut.input_sigs[j])
+                                nets.insert(lut6->lut.input_sigs[j]);
+                        for (int k = 0; k < lut5->lut.input_count; k++)
+                            if (lut5->lut.input_sigs[k])
+                                nets.insert(lut5->lut.input_sigs[k]);
+                        if (nets.size() > 5) {
                             DBG();
                             return false;
                         }
@@ -319,7 +319,7 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
             // FF1 might use X, if it isn't driven directly
             CellInfo *ff1_cell = lts.cells[i << 4 | BEL_FF];
             auto ff1 = get_tags(ff1_cell);
-            bool ff1_uses_x = false;
+            bool ff1_uses_x = false, ff1_indirect = false;
             if (ff1 != nullptr && ff1->ff.d != nullptr && ff1->ff.d->driver.cell != nullptr) {
                 auto &drv = ff1->ff.d->driver;
                 CellInfo *carry4_cell = lts.cells[((i / 4) << 6) | BEL_CARRY4];
@@ -351,19 +351,15 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                         DBG();
                         return false;
                     }
-                    // Indirect, must use X input
-                    ff1_uses_x = true;
-                    if (x_net == nullptr)
-                        x_net = ff1->ff.d;
-                    else if (x_net != ff1->ff.d) {
-                        DBG();
-                        return false;
-                    }
+                    // Indirect: the X input, or the position's idle LUT as a
+                    // route-through (see below)
+                    ff1_indirect = true;
                 }
             }
 
             // FF2 might use X, if it isn't driven directly
             auto ff2 = get_tags(lts.cells[i << 4 | BEL_FF2]);
+            bool ff2_indirect = false;
             if (ff2 != nullptr && ff2->ff.d != nullptr && ff2->ff.d->driver.cell != nullptr) {
                 auto &drv = ff2->ff.d->driver;
                 CellInfo *carry4_cell = lts.cells[((i / 4) << 6) | BEL_CARRY4];
@@ -381,13 +377,34 @@ bool XilinxImpl::xc7_logic_tile_valid(IdString tile_type, const LogicTileStatus 
                         DBG();
                         return false;
                     }
-                    // Indirect, must use X input
-                    if (x_net == nullptr)
-                        x_net = ff2->ff.d;
-                    else if (x_net != ff2->ff.d) {
-                        DBG();
-                        return false;
-                    }
+                    ff2_indirect = true;
+                }
+            }
+
+            // The bypass pin and the route-through.  A fabric signal reaches
+            // the 5FF only through the X pin.  The main FF can take X too,
+            // or, when the position's two LUT bels are idle, come in through
+            // the 6LUT programmed as a buffer (the router's LUT route-through
+            // pip, which the FASM writer turns into an INIT): that is how
+            // Vivado packs two fabric-fed flip-flops into one position.
+            // Position A of the lower slice has no route-through (its LUT
+            // serves the ground driver, see is_pip_unavail).
+            const bool route_through_available = ff_routethru_pips && lut6 == nullptr && lut5 == nullptr && i != 0;
+            if (ff2_indirect) {
+                if (x_net == nullptr)
+                    x_net = ff2->ff.d;
+                else if (x_net != ff2->ff.d) {
+                    DBG();
+                    return false;
+                }
+            }
+            if (ff1_indirect) {
+                if (x_net == nullptr || x_net == ff1->ff.d) {
+                    x_net = ff1->ff.d;
+                    ff1_uses_x = true;
+                } else if (!route_through_available) {
+                    DBG();
+                    return false;
                 }
             }
 
@@ -663,6 +680,13 @@ void XilinxImpl::explain_invalid_logic_tile(BelId bel) const
 
 bool XilinxImpl::isBelLocationValid(BelId bel, bool explain_invalid) const
 {
+    if (prw_active) {
+        // a window cell outside the window, or any other cell inside it
+        const CellInfo *ci = ctx->getBoundBelCell(bel);
+        const bool bel_is_in_the_window = prw_tile[bel.tile] != 0;
+        if (ci != nullptr && bel_is_in_the_window != pr_window_cell(ci))
+            return false;
+    }
     const bool tile_is_closed_to_new_cells = !frozen_tiles.empty() && frozen_tiles.count(bel.tile) != 0;
     if (tile_is_closed_to_new_cells) {
         // a cell that would be new in a closed tile: the design did not pin it there
@@ -1044,6 +1068,87 @@ void XilinxImpl::fixup_routing()
                 }
             }
         }
+    }
+
+    /*
+     * Keep each net's route consistent with the remapping above. A used permutation pip runs from physical pin j's tile wire
+     * to logical pin i's site wire; the LUT port is now physical pin j, so the route must end at j's site wire, or
+     * Context::getNetinfoRouteDelay cannot walk from the sink back to the source and STA and the SDF fall back to
+     * predictArcDelay (an estimate) for every permuted LUT input. Replace each non-identity permutation pip with the identity
+     * pip from the same tile wire: same physical pin, so the same timing class, and FASM writes no permutation pips.
+     * Unbind all first: two nets can swap pins, and each new end is the other's old one.
+     */
+    {
+        std::vector<std::pair<NetInfo *, std::pair<PipId, PlaceStrength>>> swaps;
+        for (auto &net : ctx->nets) {
+            NetInfo *ni = net.second.get();
+            for (auto &wire : ni->wires) {
+                PipId pip = wire.second.pip;
+                if (pip == PipId())
+                    continue;
+                auto &pd = chip_pip_info(ctx->chip_info, pip);
+                if (pd.flags != PIP_LUT_PERMUTATION)
+                    continue;
+                int cfg = reinterpret_cast<const XlnxPipExtraDataPOD *>(pd.extra_data.get())->pip_config;
+                if (((cfg >> 4) & 0xF) == (cfg & 0xF))
+                    continue; // already the identity
+                swaps.push_back({ni, {pip, wire.second.strength}});
+            }
+        }
+        int unmatched = 0;
+        struct Rebind
+        {
+            NetInfo *net;
+            PipId old_pip, new_pip;
+            PlaceStrength strength;
+        };
+        std::vector<Rebind> binds;
+        for (auto &s : swaps) {
+            PipId pip = s.second.first;
+            int cfg = reinterpret_cast<const XlnxPipExtraDataPOD *>(chip_pip_info(ctx->chip_info, pip).extra_data.get())
+                              ->pip_config;
+            PipId ident;
+            for (PipId p : ctx->getPipsDownhill(ctx->getPipSrcWire(pip))) {
+                auto &qd = chip_pip_info(ctx->chip_info, p);
+                if (qd.flags != PIP_LUT_PERMUTATION)
+                    continue;
+                int qc = reinterpret_cast<const XlnxPipExtraDataPOD *>(qd.extra_data.get())->pip_config;
+                if ((qc >> 8) == (cfg >> 8) && ((qc >> 4) & 0xF) == ((cfg >> 4) & 0xF) &&
+                    (qc & 0xF) == ((cfg >> 4) & 0xF)) {
+                    ident = p;
+                    break;
+                }
+            }
+            if (ident == PipId()) {
+                unmatched++;
+                continue;
+            }
+            binds.push_back({s.first, pip, ident, s.second.second});
+        }
+        for (auto &b : binds) // all old ends free before any new one is taken
+            ctx->unbindPip(b.old_pip);
+        // One physical pin can feed several logical pins of the same LUTs (a net on two inputs): its permutation pips then share
+        // one identity pip, which the net may also hold already (one of the logical pins was the physical one). Bind it once.
+        int shared = 0, conflict = 0;
+        for (auto &b : binds) {
+            NetInfo *pn = ctx->getBoundPipNet(b.new_pip);
+            if (pn == b.net) {
+                shared++;
+                continue;
+            }
+            NetInfo *wn = ctx->getBoundWireNet(ctx->getPipDstWire(b.new_pip));
+            if (pn != nullptr || wn != nullptr) {
+                conflict++;
+                log_warning("permuted LUT input of net '%s': identity pip %s is held by net '%s', not re-bound\n",
+                            b.net->name.c_str(ctx), ctx->nameOfPip(b.new_pip), (pn ? pn : wn)->name.c_str(ctx));
+                continue;
+            }
+            ctx->bindPip(b.new_pip, b.net, b.strength);
+        }
+        lut_perm_rebound = int(binds.size()) - conflict;
+        log_info("    %d permuted LUT inputs re-bound to the identity pip of their physical pin (%d without one, %d sharing "
+                 "one, %d held by another net)\n",
+                 int(binds.size()), unmatched, shared, conflict);
     }
 
     /*

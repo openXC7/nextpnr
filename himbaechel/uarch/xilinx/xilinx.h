@@ -134,6 +134,7 @@ struct XilinxImpl : HimbaechelAPI
     void init_database(Arch *arch) override;
 
     void init(Context *ctx) override;
+    void assign_cell_tags(); // the legality tags of every cell (tests call it directly)
 
     // Chipdb bel types that repeat their primitive name (RAMB18E1_RAMB18E1,
     // from prjxray's "<site type>_<bel name>" naming) bucket as the primitive,
@@ -156,6 +157,7 @@ struct XilinxImpl : HimbaechelAPI
     void update_bram_bel(BelId bel, CellInfo *cell);
 
     bool isBelLocationValid(BelId bel, bool explain_invalid = false) const override;
+    bool getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort, DelayQuad &delay) const override;
     bool xc7_logic_tile_valid(IdString tileType, const LogicTileStatus &lts) const;
     void explain_invalid_logic_tile(BelId bel) const;
     // A tile is explained once: the final check of the placer asks every bel of it in turn
@@ -181,8 +183,40 @@ struct XilinxImpl : HimbaechelAPI
     // Cached: is_pip_unavail is on the router's hot path.
     mutable bool design_has_bufr = false;
     mutable bool design_has_bufr_valid = false;
+    // is_pip_unavail's name tests, resolved once per tile type in init():
+    // tt_is_clk_bufg_r[type]; tt_wire_bufr_path[type][wire] (the wire is on the
+    // BUFR datapath); tt_pip_through_bufgctrl[type][pip] (I0/I1 -> O of a BUFGCTRL).
+    std::vector<uint8_t> tt_is_clk_bufg_r;
+    // The chipdb has LUT route-through pips into the flip-flop mux (bit 0 of
+    // pip_config), so a main FF can be fed through an idle LUT; older
+    // databases only route through to the slice output pin.
+    bool ff_routethru_pips = false;
+    std::vector<std::vector<uint8_t>> tt_wire_bufr_path, tt_pip_through_bufgctrl;
+    void init_pip_avail_tables();
     bool checkPipAvail(PipId pip) const override { return !is_pip_unavail(pip); }
-    bool checkPipAvailForNet(PipId pip, const NetInfo *net) const override { return !is_pip_unavail(pip); }
+    bool checkPipAvailForNet(PipId pip, const NetInfo *net) const override;
+
+    // -o pr-window=x0,y0,x1,y1 with -o pr-cells=<prefix>: a reconfigurable
+    // window of the tile grid (pr_window.cc).  The cells named by the prefix
+    // are placed inside it and no other cell is; a pip inside it may only be
+    // used by a net with a pin inside, so the static design never routes
+    // through the window and the window's frames can be rewritten alone.
+    bool prw_active = false;
+    int prw_x0 = 0, prw_y0 = 0, prw_x1 = -1, prw_y1 = -1;
+    std::string prw_prefix;
+    std::vector<uint8_t> prw_tile;               // tile index -> inside the window
+    std::vector<int8_t> prw_net_class;           // net name index -> class, read-only while a router runs (-1: not indexed)
+    pool<IdString> prw_cells;                    // the window cells: the prefix, and their whole clusters
+    void init_pr_window();
+    bool pr_window_cell(const CellInfo *ci) const;
+    bool pr_window_net(const NetInfo *net) const;
+    int pr_window_net_class(const NetInfo *net) const; // 0 static, 1 crossing, 2 internal
+    void pr_window_index_nets();                        // single-threaded, before each router entry
+    void pr_window_reserve();                           // -o pr-reserve=<file>, a window build
+    pool<WireId> prw_reserved_wires;
+    bool checkWireAvail(WireId wire) const override { return prw_reserved_wires.empty() || !prw_reserved_wires.count(wire); }
+    void pr_window_constrain_cells();
+    void pr_window_report();
 
     // Flow management
     void parse_xdc(const std::string &filename);
@@ -207,6 +241,7 @@ struct XilinxImpl : HimbaechelAPI
 
     void fixup_placement();
     void fixup_routing();
+    int lut_perm_rebound = 0; // permuted LUT inputs fixup_routing re-bound: timing is re-analysed after it when > 0
     void fixup_hold();
     void route_clocks();
     IdString clock_source_port(const NetInfo *net) const;
@@ -247,7 +282,31 @@ struct XilinxImpl : HimbaechelAPI
     bool cell_tags_set = false;
 
     // Improved delay predictions where sites are located far from their associated interconnect
-    dict<WireId, Loc> source_locs, sink_locs;
+    // Where a pin's net enters or leaves the general routing, for pins off
+    // the INT tiles.  Keyed by the arch's dense wire index into pin_loc_idx
+    // (-1: none), which selects a PinLoc; one PinLoc is shared by every wire
+    // of a search's backtrace.
+    struct PinLoc
+    {
+        Loc source, sink;
+        bool has_source = false, has_sink = false;
+    };
+    std::vector<int32_t> pin_loc_idx;
+    std::vector<PinLoc> pin_locs;
+    const PinLoc *pin_loc(WireId w) const
+    {
+        int32_t i = pin_loc_idx[ctx->getWireDenseIndex(w)];
+        return i < 0 ? nullptr : &pin_locs[i];
+    }
+    PinLoc &pin_loc_for(WireId w)
+    {
+        int32_t &i = pin_loc_idx[ctx->getWireDenseIndex(w)];
+        if (i < 0) {
+            i = int32_t(pin_locs.size());
+            pin_locs.emplace_back();
+        }
+        return pin_locs[i];
+    }
     bool is_general_routing(WireId wire) const;
     void find_source_sink_locs();
 
@@ -299,6 +358,8 @@ struct XilinxImpl : HimbaechelAPI
     bool is_movable_bram(const CellInfo *ci) const;
     bool place_brams_by_group();
     void replace_around_brams();
+    void refine_sparse_bels(); // sparse_refine.cc
+    void replicate_merged_ffs(); // replicate.cc
 
     delay_t predictDelay(BelId src_bel, IdString src_pin, BelId dst_bel, IdString dst_pin) const override;
     delay_t estimateDelay(WireId src, WireId dst) const override;
@@ -309,7 +370,6 @@ struct XilinxImpl : HimbaechelAPI
     // Bel types (bel_type -> primitive name) whose chipdb name repeats the
     // primitive; lookups happen per cell on the placer's hot path.
     dict<IdString, IdString> primitive_bucket_for_bel_type;
-    void assign_cell_tags();
     void index_control_sets();
 };
 

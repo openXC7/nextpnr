@@ -22,6 +22,7 @@
 #include <iterator>
 #include <queue>
 #include <unordered_set>
+#include <boost/algorithm/string.hpp>
 #include "chain_utils.h"
 #include "design_utils.h"
 #include "extra_data.h"
@@ -113,6 +114,21 @@ void XilinxPacker::preplace_unique(CellInfo *cell)
                 other.second->type == cell->type && other.second->attrs.count(id_BEL) != 0;
         if (another_cell_of_this_type_is_pinned)
             claimed.insert(ctx->getBelByNameStr(other.second->attrs.at(id_BEL).as_string()));
+    }
+    // The configuration logic listens to the top ICAP unless CTL0.ICAP_SELECT
+    // says otherwise, and an ICAPE2 on the bottom site reads back only zeros
+    // (measured on an xc7vx485t and an xc7a50t), so the first free site is the
+    // wrong default for this one.
+    if (cell->type == id_ICAP_ICAP) {
+        for (auto bel : ctx->getBels()) {
+            const bool is_a_free_top_icap = ctx->getBelType(bel) == cell->type && claimed.count(bel) == 0 &&
+                                            ctx->checkBelAvail(bel) &&
+                                            boost::contains(std::string(ctx->nameOfBel(bel)), "ICAP_X0Y1");
+            if (is_a_free_top_icap) {
+                ctx->bindBel(bel, cell, STRENGTH_LOCKED);
+                return;
+            }
+        }
     }
     for (auto bel : ctx->getBels()) {
         const bool bel_is_claimed_by_a_pinned_cell = claimed.count(bel) != 0;
@@ -611,6 +627,15 @@ void XilinxImpl::route_clocks()
                  (*clk_net->users.begin()).cell->type.in(id_PLLE2_ADV_PLLE2_ADV, id_MMCME2_ADV_MMCME2_ADV) &&
                  (*clk_net->users.begin()).port == id_CLKIN1)
             is_global = true;
+        else if (clk_net->driver.cell->type.str(ctx) == "PARTPIN_IN") {
+            // A window build's clock enters on a partition pin (an HROW line
+            // node): keep it on the dedicated tree, as a BUFG's net would be,
+            // or the router spreads it over the fabric and skews every flop.
+            // Compared as a string: ctx->id() would intern the name on every build.
+            for (auto &usr : clk_net->users)
+                if (usr.port.in(id_CK, id_CLK, id_C))
+                    is_global = true;
+        }
         if (!is_global)
             continue;
 
@@ -648,7 +673,7 @@ void XilinxImpl::route_clocks()
                     break;
                 }
                 for (auto uh : ctx->getPipsUphill(curr)) {
-                    if (!ctx->checkPipAvail(uh))
+                    if (!ctx->checkPipAvailForNet(uh, clk_net))
                         continue;
                     WireId src = ctx->getPipSrcWire(uh);
                     if (backtrace.count(src))
@@ -682,7 +707,7 @@ void XilinxImpl::route_clocks()
                             break;
                         }
                         for (auto uh : ctx->getPipsUphill(curr)) {
-                            if (!ctx->checkPipAvail(uh))
+                            if (!ctx->checkPipAvailForNet(uh, clk_net))
                                 continue;
                             WireId src = ctx->getPipSrcWire(uh);
                             if (backtrace.count(src))

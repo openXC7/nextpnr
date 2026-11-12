@@ -973,6 +973,16 @@ struct FasmBackend
                 pop();
             }
         }
+        if (!lts) {
+            // A tile with no cells at all can still hold route-throughs.  Their site
+            // exit (the [A-D]MUX OUTMUX pip, e.g. BMUX <- B6LUT_O6) is written with the
+            // LUT logic below, which needs tile status; without this the LUT carried the
+            // signal and the OUTMUX never selected it, an open on the net.
+            BelId bel_in_half =
+                    ctx->getBelByLocation(Loc(tile % ctx->chip_info->width, tile / ctx->chip_info->width, half << 6));
+            for (int i = 0; i < 4; i++)
+                write_routing_bel(get_site_wire(bel_in_half, stringf("%cMUX", "ABCD"[i])));
+        }
         if (lts) {
             // Write logic
             BelId bel_in_half =
@@ -3303,6 +3313,10 @@ struct FasmBackend
                 write_bit("DCIRESET.ENABLED");
             if (ci->type == id_ICAP_ICAP) {
                 push("ICAP");
+                // The site's "in use" bits (prjxray-db virtex7 segbits_cfg_center_mid.db,
+                // added from a Vivado bitstream diff): without them the configuration
+                // logic ignores the ICAPE2 entirely -- no readback, no IPROG, no frames.
+                write_bit("IN_USE");
                 std::string width = str_or_default(ci->params, id_ICAP_WIDTH, "X32");
                 bool invalid_width = width != "X32" && width != "X16" && width != "X8";
                 if (invalid_width)

@@ -670,6 +670,7 @@ void XilinxImpl::fixup_hold()
                 ctx->settings[tmg_ripup_key] = Property(0);
                 log_info("Hold-fix: timing ripup off for this repair route.\n");
             }
+            pr_window_index_nets(); // the buffers moved sinks to new nets
             router2(ctx, rcfg);
             const bool restore_tmg_ripup = tmg_ripup_is_on;
             if (restore_tmg_ripup)

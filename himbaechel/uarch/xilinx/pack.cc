@@ -1749,17 +1749,122 @@ void XilinxImpl::pack()
     packer.pack_lutffs();
 
     // Now that LUT-FF clusters exist, keep the sinks of every placed regional
-    // buffer (BUFIO/BUFR) inside the clock region that buffer drives.  The
+    // buffer (BUFIO/BUFR/BUFHCE) inside the clock region that buffer drives.  The
     // placer positions a cluster by its root, so the region must land on the
     // root -- walked inside constrain_regional_clock_sinks -- not on the
     // pre-cluster FF, which is why this runs after pack_lutffs() rather than
     // in constrain_bufios() alongside the bel binding.
+    //
+    // A BUFHCE drives the one clock region it sits in, so a LOC on it is a
+    // floorplan for everything it clocks: a design that gives each block its
+    // own BUFHCE gets each block placed in its own region, which nextpnr's
+    // XDC reader (no pblocks) has no other way to say.  An unplaced BUFHCE
+    // (no LOC, placed later) constrains nothing.
     for (auto &cell : ctx->cells) {
         CellInfo *ci = cell.second.get();
-        const bool is_regional_buffer = ci->type == id_BUFIO_BUFIO || ci->type == id_BUFR_BUFR;
+        const bool is_regional_buffer =
+                ci->type == id_BUFIO_BUFIO || ci->type == id_BUFR_BUFR || ci->type == id_BUFHCE_BUFHCE;
         const bool buffer_is_placed = ci->bel != BelId();
         if (is_regional_buffer && buffer_is_placed)
             packer.constrain_regional_clock_sinks(ci);
+    }
+
+    // -o macro-region=<prefix>:<buffer>[:<rows>][,...]
+    // A regional buffer's clock region holds only what that clock reaches --
+    // the flip-flops, BRAMs and DSPs -- and leaves a block's LUTs and carries
+    // free to wander, which stretches the very paths the region was meant to
+    // keep short.  This confines every cell whose name begins with <prefix>
+    // (a block spliced in under one prefix, as synthgui's lane_macro.py does)
+    // to the region of the placed buffer <buffer>.  With <rows>, the cells the
+    // clock does not reach (LUTs, carries) may lie up to that many tile rows
+    // above or below it -- the clock sinks stay inside: packing a dense block
+    // into exactly one region can be more than the greedy legaliser settles.
+    if (args.options.count("macro-region")) {
+        std::string spec = args.options["macro-region"].as<std::string>();
+        size_t pos = 0;
+        while (pos <= spec.size()) {
+            size_t end = spec.find(',', pos);
+            if (end == std::string::npos)
+                end = spec.size();
+            std::string item = spec.substr(pos, end - pos);
+            pos = end + 1;
+            if (item.empty())
+                continue;
+            int margin = 0;
+            size_t colon = item.rfind(':');
+            if (colon != std::string::npos && colon + 1 < item.size() &&
+                item.find_first_not_of("0123456789", colon + 1) == std::string::npos) {
+                size_t c2 = item.rfind(':', colon - 1);
+                if (c2 != std::string::npos && colon > 0) {
+                    margin = std::stoi(item.substr(colon + 1));
+                    item = item.substr(0, colon);
+                    colon = c2;
+                }
+            }
+            if (colon == std::string::npos || colon == 0 || colon + 1 == item.size())
+                log_error("macro-region: '%s' is not <prefix>:<buffer cell>[:<rows>]\n", item.c_str());
+            std::string prefix = item.substr(0, colon);
+            IdString buf = ctx->id(item.substr(colon + 1));
+            IdString rname = ctx->id("clkregion_" + buf.str(ctx));
+            if (!ctx->cells.count(buf))
+                log_error("macro-region: no cell '%s'\n", buf.c_str(ctx));
+            if (!ctx->region.count(rname))
+                log_error("macro-region: '%s' has no clock region (is it a placed BUFHCE/BUFR/BUFIO with sinks?)\n",
+                          buf.c_str(ctx));
+            auto has_prefix = [&](const CellInfo *c) { return c->name.str(ctx).compare(0, prefix.size(), prefix) == 0; };
+            IdString target = rname;
+            if (margin > 0) {
+                int x0 = std::numeric_limits<int>::max(), y0 = x0, x1 = -1, y1 = -1;
+                for (BelId b : ctx->region.at(rname)->bels) {
+                    Loc l = ctx->getBelLocation(b);
+                    x0 = std::min(x0, l.x);
+                    x1 = std::max(x1, l.x);
+                    y0 = std::min(y0, l.y);
+                    y1 = std::max(y1, l.y);
+                }
+                target = ctx->id("macroregion_" + buf.str(ctx));
+                // the margin stays on the die: getBelsByTile does not check
+                ctx->createRectangularRegion(target, x0, std::max(0, y0 - margin), x1,
+                                             std::min(ctx->getGridDimY() - 1, y1 + margin));
+            }
+            int n = 0, matched = 0, outside = 0, conflicts = 0;
+            for (auto &cell : ctx->cells) {
+                CellInfo *ci = cell.second.get();
+                if (!has_prefix(ci))
+                    continue;
+                ++matched;
+                CellInfo *tgt = ci->cluster != IdString() ? ctx->getClusterRootCell(ci->cluster) : ci;
+                // a cluster rooted outside the block stays where its root goes
+                if (!has_prefix(tgt)) {
+                    ++outside;
+                    continue;
+                }
+                if (tgt->bel != BelId())
+                    continue;
+                if (tgt->region != nullptr) {
+                    // its own clock region (a sink of the buffer) lies inside
+                    // the macro region; any other region is a contradiction,
+                    // not something to pass over quietly
+                    if (tgt->region->name != rname && tgt->region->name != target) {
+                        log_warning("macro-region: '%s' is already constrained to region '%s', not to '%s'\n",
+                                    tgt->name.c_str(ctx), tgt->region->name.c_str(ctx), target.c_str(ctx));
+                        ++conflicts;
+                    }
+                    continue;
+                }
+                ctx->constrainCellToRegion(tgt->name, target);
+                ++n;
+            }
+            if (matched == 0)
+                log_error("macro-region: no cell name begins with '%s'\n", prefix.c_str());
+            if (conflicts > 0)
+                log_error("macro-region: %d cell(s) under '%s' are constrained to another region; one block, one "
+                          "region\n",
+                          conflicts, prefix.c_str());
+            log_info("    macro-region: %d cell(s) under '%s' constrained to the clock region of '%s'%s%s\n", n,
+                     prefix.c_str(), buf.c_str(ctx), margin ? stringf(" +/- %d rows", margin).c_str() : "",
+                     outside ? stringf(" (%d in clusters rooted outside it)", outside).c_str() : "");
+        }
     }
 }
 NEXTPNR_NAMESPACE_END

@@ -27,6 +27,7 @@
 #include "util.h"
 
 #include "placer_heap.h"
+#include "timing.h"
 #include "timing_opt.h"
 #include "placer_static.h"
 #include "router2.h"
@@ -82,6 +83,14 @@ po::options_description XilinxImpl::getUArchOptions()
     specific.add_options()("hold-fix", po::value<std::string>()->implicit_value(""),
                            "after routing, fix hold-time (min-delay) violations: small deficits by a routing "
                            "detour, larger ones by a feedthrough LUT; optional value sets the max passes (default 8)");
+    specific.add_options()("replicate", po::value<std::string>(),
+                           "off: never split a flip-flop whose sinks the placement spread apart (replicate.cc)");
+    specific.add_options()("sparse-refine", po::value<std::string>(),
+                           "off: leave DSP and block RAM sites where the placer put them");
+    specific.add_options()("carry-di-bypass", po::value<std::string>(),
+                           "off: buffer every carry DI input through the 5LUT instead of using the bypass pin");
+    specific.add_options()("ff-routethru", po::value<std::string>(),
+                           "off: never feed a main flip-flop through an idle LUT beside a bypass-fed 5FF");
     specific.add_options()("preplaced", po::value<std::string>(),
                            "before placing, pin the cells named in this file to the bels they had in a reference "
                            "build (scripts/routing_dump.py from that build's --write JSON), packer-made cells included");
@@ -92,6 +101,17 @@ po::options_description XilinxImpl::getUArchOptions()
     specific.add_options()("holdbufs", po::value<std::string>(),
                            "before placing, re-create the reference build's hold-fix feedthrough buffers listed in "
                            "this file (scripts/routing_dump.py), so -o preplaced / -o prerouted replay them too");
+    specific.add_options()("pr-window", po::value<std::string>(),
+                           "x0,y0,x1,y1 (tile grid, inclusive): a reconfigurable window. The cells named by -o pr-cells "
+                           "are placed inside it and nothing else is; a pip inside it may only be used by a net with a "
+                           "pin inside, so the static design never routes through it (pr_window.cc)");
+    specific.add_options()("pr-cells", po::value<std::string>(), "name prefix of the cells inside the -o pr-window");
+    specific.add_options()("pr-reserve", po::value<std::string>(),
+                           "one bel name per line: the wire on each bel's pin is withheld from every net "
+                           "(a window build keeps off the nodes the static design drives into the window)");
+    specific.add_options()("pr-interface", po::value<std::string>(),
+                           "after routing, write the -o pr-window boundary crossings here, one per line: "
+                           "\"<net>\\t<in|out|reentry|reexit>\\t<tile>/<wire>\" (real tile names), what a window-only build routes from");
     specific.add_options()("clock-tree", po::value<std::string>(),
                            "global clock insertion delay model: on (default; dies with measured clock delays only), "
                            "off, or force (an uncalibrated die takes the xc7vx485t's); see clock_tree.cc");
@@ -104,6 +124,10 @@ po::options_description XilinxImpl::getUArchOptions()
     specific.add_options()("hold-detour-max", po::value<double>(),
                            "hold deficit (ns) up to which a routing detour is used instead of a feedthrough LUT "
                            "(default 0.5)");
+    specific.add_options()("macro-region", po::value<std::string>(),
+                           "<prefix>:<buffer>[:<rows>][,...]: confine every cell whose name begins with <prefix> to the "
+                           "clock region of the placed regional buffer (BUFHCE/BUFR/BUFIO) <buffer>, not only its clock "
+                           "sinks; with <rows>, cells it does not clock may lie that many tile rows above or below");
     return specific;
 }
 
@@ -202,6 +226,49 @@ void XilinxImpl::init(Context *ctx)
     for (int i = 0; i < ctx->chip_info->tile_insts.ssize(); i++) {
         auto extra_data = tile_extra_data(i);
         tile_status.at(i).site_variant.resize(extra_data->sites.ssize());
+    }
+    init_pip_avail_tables();
+    // -o ff-routethru=off: never feed a main flip-flop through an idle LUT
+    // (the route-through pips stay in the graph for fabric buffering)
+    if (ctx->args.options.count("ff-routethru") && ctx->args.options.at("ff-routethru").as<std::string>() == "off")
+        ff_routethru_pips = false;
+    init_pr_window();
+}
+
+void XilinxImpl::init_pip_avail_tables()
+{
+    const auto &types = ctx->chip_info->tile_types;
+    tt_is_clk_bufg_r.assign(types.size(), 0);
+    tt_wire_bufr_path.assign(types.size(), {});
+    tt_pip_through_bufgctrl.assign(types.size(), {});
+    for (int t = 0; t < types.ssize(); t++) {
+        const auto &tt = types[t];
+        const std::string &tts = IdString(tt.type_name).str(ctx);
+        tt_is_clk_bufg_r[t] = boost::starts_with(tts, "CLK_BUFG_TOP_R") || boost::starts_with(tts, "CLK_BUFG_BOT_R");
+        auto &wb = tt_wire_bufr_path[t];
+        wb.assign(tt.wires.size(), 0);
+        for (int w = 0; w < tt.wires.ssize(); w++) {
+            const std::string &d = IdString(tt.wires[w].name).str(ctx);
+            wb[w] = d.find("CK_BUFRCLK") != std::string::npos || d.find("RCLK_BEFORE_DIV") != std::string::npos ||
+                    d.find("RCLK_OUT") != std::string::npos || d.find("RCLK2RCLK") != std::string::npos;
+        }
+        for (int p = 0; p < tt.pips.ssize() && !ff_routethru_pips; p++) {
+            const auto &pd = tt.pips[p];
+            const auto &xd = *reinterpret_cast<const XlnxPipExtraDataPOD *>(pd.extra_data.get());
+            if (pd.flags == PIP_LUT_ROUTETHRU && (xd.pip_config & 1))
+                ff_routethru_pips = true;
+        }
+        if (!tt_is_clk_bufg_r[t])
+            continue;
+        auto &pb = tt_pip_through_bufgctrl[t];
+        pb.assign(tt.pips.size(), 0);
+        for (int p = 0; p < tt.pips.ssize(); p++) {
+            const std::string &ds = IdString(tt.wires[tt.pips[p].dst_wire].name).str(ctx);
+            const std::string &ss = IdString(tt.wires[tt.pips[p].src_wire].name).str(ctx);
+            pb[p] = boost::starts_with(ds, "CLK_BUFG_BUFGCTRL") && boost::ends_with(ds, "_O") &&
+                    boost::starts_with(ss, "CLK_BUFG_BUFGCTRL") &&
+                    (boost::ends_with(ss, "_I0") || boost::ends_with(ss, "_I1"));
+        }
     }
 }
 
@@ -424,20 +491,10 @@ if (cell.second->type.in(id_BUFR, id_BUFR_BUFR)) {
                 }
             design_has_bufr_valid = true;
         }
-        if (!design_has_bufr) {
-            IdString dst = IdString(chip_tile_info(ctx->chip_info, pip.tile).wires[pip_data.dst_wire].name);
-            const std::string &d = dst.str(ctx);
-            bool drives_bufr_clock_path =
-                    d.find("CK_BUFRCLK") != std::string::npos || d.find("RCLK_BEFORE_DIV") != std::string::npos ||
-                    d.find("RCLK_OUT") != std::string::npos || d.find("RCLK2RCLK") != std::string::npos;
-            if (drives_bufr_clock_path)
-                return true;
-        }
-        IdString tt = IdString(chip_tile_info(ctx->chip_info, pip.tile).type_name);
-        std::string tts = tt.str(ctx);
-        bool tile_is_clk_bufg_r =
-                (boost::starts_with(tts, "CLK_BUFG_TOP_R") || boost::starts_with(tts, "CLK_BUFG_BOT_R"));
-        if (tile_is_clk_bufg_r) {
+        const int tile_type = ctx->chip_info->tile_insts[pip.tile].type;
+        if (!design_has_bufr && tt_wire_bufr_path[tile_type][pip_data.dst_wire])
+            return true;
+        if (tt_is_clk_bufg_r[tile_type]) {
             bool has_bound_bufgctrl = false;
             const auto &tile_data = chip_tile_info(ctx->chip_info, pip.tile);
             for (int32_t i = 0; i < tile_data.bels.ssize(); ++i) {
@@ -456,13 +513,7 @@ if (cell.second->type.in(id_BUFR, id_BUFR_BUFR)) {
             // drops that slot's IN_USE/ZINV_CE0/ZINV_S0, so the route-through comes out as a buffer that
             // passes nothing: the net is a constant on hardware (seen as stuck register bits behind a
             // data net that took the global clock spine).
-            IdString dst = IdString(tile_data.wires[pip_data.dst_wire].name);
-            IdString src = IdString(tile_data.wires[pip_data.src_wire].name);
-            const std::string &ds = dst.str(ctx), &ss = src.str(ctx);
-            bool through_bufgctrl = boost::starts_with(ds, "CLK_BUFG_BUFGCTRL") && boost::ends_with(ds, "_O") &&
-                                    boost::starts_with(ss, "CLK_BUFG_BUFGCTRL") &&
-                                    (boost::ends_with(ss, "_I0") || boost::ends_with(ss, "_I1"));
-            if (through_bufgctrl)
+            if (tt_pip_through_bufgctrl[tile_type][pip.index])
                 return true;
         }
     }
@@ -559,8 +610,7 @@ if (cell.second->type.in(id_BUFR, id_BUFR_BUFR)) {
         int dest = (extra_data.pip_config & 0x1);
         if (eight == 0)
             return true; // FIXME: conflict with ground
-        if (dest & 0x1)
-            return true; // FIXME: routethru to MUX
+        (void)dest; // bit 0: the pip ends at the flip-flop mux rather than the slice output pin; same LUT either way
         const auto &lts = tile_status[pip.tile].lts;
         if (!lts)
             return false;
@@ -885,6 +935,7 @@ void XilinxImpl::prePlace()
     apply_holdbufs();
     apply_preplaced();
     close_routed_tiles();
+    pr_window_constrain_cells();
     // Before placement, so the measured table reaches the placer (through
     // predictDelay and criticality) as well as the router's A* guidance.  On by
     // default: the measured matrix converges the router (rocket goes from 672
@@ -935,6 +986,8 @@ void XilinxImpl::postPlace()
         log_info("timing-opt: radius %d tiles, %d rounds\n", cfg.radius, cfg.iterations);
         timing_opt(ctx, cfg);
     }
+    refine_sparse_bels();
+    replicate_merged_ffs();
     fixup_placement();
     ctx->assignArchInfo();
 }
@@ -1104,6 +1157,8 @@ void XilinxImpl::preRoute()
         }
     }
     find_source_sink_locs();
+    pr_window_reserve();
+    pr_window_index_nets();
     route_clocks();
     apply_prerouted();
 }
@@ -1426,8 +1481,32 @@ void XilinxImpl::name_clocks_after_ports()
                  entry.second.c_str(ctx));
 }
 
+bool XilinxImpl::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort, DelayQuad &delay) const
+{
+    // A 5LUT and a 6LUT in one position share pins A1-A5, and fixup_routing connects both cells to every net on them, so a
+    // cell can carry nets its function does not read (even its own output, through its partner). The packer names the
+    // inputs a LUT does read X_ORIG_PORT_<pin>; when a LUT has them, a pin without one has no arc to the output.
+    if (cell->type == id_SLICE_LUTX) {
+        static const IdString pins[6] = {id_A1, id_A2, id_A3, id_A4, id_A5, id_A6};
+        static const IdString orig[6] = {ctx->id("X_ORIG_PORT_A1"), ctx->id("X_ORIG_PORT_A2"), ctx->id("X_ORIG_PORT_A3"),
+                                         ctx->id("X_ORIG_PORT_A4"), ctx->id("X_ORIG_PORT_A5"), ctx->id("X_ORIG_PORT_A6")};
+        for (int i = 0; i < 6; i++) {
+            if (fromPort != pins[i])
+                continue;
+            bool named = false;
+            for (int k = 0; k < 6 && !named; k++)
+                named = cell->attrs.count(orig[k]) > 0;
+            if (named && !cell->attrs.count(orig[i]))
+                return false;
+            break;
+        }
+    }
+    return ctx->get_cell_delay_default(cell, fromPort, toPort, delay);
+}
+
 void XilinxImpl::postRoute()
 {
+    pr_window_report();
     // Insert feedthrough buffers on hold-violating arcs and reroute, before
     // routing is finalised and FASM is written.  No-op unless -o hold-fix.
     fixup_hold();
@@ -1435,6 +1514,13 @@ void XilinxImpl::postRoute()
     // After the last timing analysis (hold-fix runs one).
     name_clocks_after_ports();
     ctx->assignArchInfo();
+    // The router's own timing report came before fixup_routing re-bound the permuted LUT inputs, so it used estimates for
+    // them; analyse again, so the logged Fmax and --report agree with the SDF.
+    if (lut_perm_rebound > 0) {
+        log_info("Timing after re-binding permuted LUT inputs:\n");
+        timing_analysis(ctx, false /*histogram*/, true /*fmax*/, ctx->detailed_timing_report /*path*/, false /*warn*/,
+                        true /*update_results*/);
+    }
     const ArchArgs &args = ctx->args;
     if (args.options.count("fasm")) {
         write_fasm(args.options["fasm"].as<std::string>());
@@ -1723,6 +1809,12 @@ void XilinxImpl::assign_cell_tags()
                 ct.carry.x_sigs[i] = nullptr;
             }
             ct.carry.x_sigs[0] = ci->getPort(id_CYINIT);
+            // DI inputs on the bypass pin (pack_carry): the pin is then this
+            // net's for the whole position
+            const int di_bypass = int_or_default(ci->params, id_DI_BYPASS, 0);
+            for (int i = 0; i < 4; i++)
+                if (di_bypass & (1 << i))
+                    ct.carry.x_sigs[i] = ci->getPort(ctx->idf("DI%d", i)); // the bel pin name by now
         } else if (ci->type == id_RAMB18E1_RAMB18E1 || ci->type == id_RAMB36E1_RAMB36E1) {
             bool read_sdp = ((ci->type == id_RAMB18E1_RAMB18E1 &&
                               int_or_default(ci->params, ctx->id("READ_WIDTH_B"), 0) == 36) ||
@@ -1772,6 +1864,8 @@ bool XilinxImpl::is_general_routing(WireId wire) const
 
 void XilinxImpl::find_source_sink_locs()
 {
+    pin_loc_idx.assign(ctx->getWireDenseCount(), -1);
+    pin_locs.clear();
     for (auto &net : ctx->nets) {
         NetInfo *ni = net.second.get();
         for (auto &usr : ni->users) {
@@ -1779,7 +1873,7 @@ void XilinxImpl::find_source_sink_locs()
             if (bel == BelId() || is_logic_tile(bel))
                 continue; // don't need to do this for logic bels, which are always next to their INT
             WireId sink = ctx->getNetinfoSinkWire(ni, usr, 0);
-            if (sink == WireId() || sink_locs.count(sink))
+            if (sink == WireId() || (pin_loc(sink) && pin_loc(sink)->has_sink))
                 continue;
             std::queue<WireId> visit;
             dict<WireId, WireId> backtrace;
@@ -1795,13 +1889,17 @@ void XilinxImpl::find_source_sink_locs()
                 if (is_general_routing(cursor)) {
                     Loc loc(0, 0, 0);
                     tile_xy(ctx->chip_info, cursor.tile, loc.x, loc.y);
-                    sink_locs[sink] = loc;
-
+                    auto set_sink = [&](WireId w) {
+                        PinLoc &pl = pin_loc_for(w);
+                        if (!pl.has_sink) {
+                            pl.has_sink = true;
+                            pl.sink = loc;
+                        }
+                    };
+                    set_sink(sink);
                     while (backtrace.count(cursor)) {
                         cursor = backtrace.at(cursor);
-                        if (!sink_locs.count(cursor)) {
-                            sink_locs[cursor] = loc;
-                        }
+                        set_sink(cursor);
                     }
 
                     break;
@@ -1821,7 +1919,7 @@ void XilinxImpl::find_source_sink_locs()
             if (bel == BelId() || is_logic_tile(bel))
                 continue; // don't need to do this for logic bels, which are always next to their INT
             WireId source = ctx->getNetinfoSourceWire(ni);
-            if (source == WireId() || source_locs.count(source))
+            if (source == WireId() || (pin_loc(source) && pin_loc(source)->has_source))
                 continue;
             std::queue<WireId> visit;
             dict<WireId, WireId> backtrace;
@@ -1840,13 +1938,17 @@ void XilinxImpl::find_source_sink_locs()
                 if (is_general_routing(cursor)) {
                     Loc loc(0, 0, 0);
                     tile_xy(ctx->chip_info, cursor.tile, loc.x, loc.y);
-                    source_locs[source] = loc;
-
+                    auto set_source = [&](WireId w) {
+                        PinLoc &pl = pin_loc_for(w);
+                        if (!pl.has_source) {
+                            pl.has_source = true;
+                            pl.source = loc;
+                        }
+                    };
+                    set_source(source);
                     while (backtrace.count(cursor)) {
                         cursor = backtrace.at(cursor);
-                        if (!source_locs.count(cursor)) {
-                            source_locs[cursor] = loc;
-                        }
+                        set_source(cursor);
                     }
 
                     break;
@@ -1869,10 +1971,10 @@ delay_t XilinxImpl::estimateDelay(WireId src, WireId dst) const
     tile_xy(ctx->chip_info, src.tile, sx, sy);
     tile_xy(ctx->chip_info, dst.tile, dx, dy);
     auto src_type = ctx->getWireType(src);
-    auto fnd_src = source_locs.find(src);
-    if (fnd_src != source_locs.end()) {
-        sx = fnd_src->second.x;
-        sy = fnd_src->second.y;
+    const PinLoc *src_pl = pin_loc_idx.empty() ? nullptr : pin_loc(src);
+    if (src_pl && src_pl->has_source) {
+        sx = src_pl->source.x;
+        sy = src_pl->source.y;
     } else {
         if (src_type.in(id_DOUBLE, id_BENTQUAD, id_HQUAD, id_VQUAD)) {
             for (auto pip : ctx->getPipsDownhill(src)) {
@@ -1881,10 +1983,11 @@ delay_t XilinxImpl::estimateDelay(WireId src, WireId dst) const
             }
         }
     }
-    auto fnd_snk = sink_locs.find(dst);
-    if (fnd_snk != sink_locs.end()) {
-        dx = fnd_snk->second.x;
-        dy = fnd_snk->second.y;
+    const PinLoc *dst_pl = pin_loc_idx.empty() ? nullptr : pin_loc(dst);
+    const bool dst_is_pin = dst_pl && dst_pl->has_sink;
+    if (dst_is_pin) {
+        dx = dst_pl->sink.x;
+        dy = dst_pl->sink.y;
     } else {
         auto dst_type = ctx->getWireType(dst);
         if (dst_type.in(id_DOUBLE, id_BENTQUAD, id_HQUAD, id_VQUAD)) {
@@ -1910,7 +2013,7 @@ delay_t XilinxImpl::estimateDelay(WireId src, WireId dst) const
                20 * std::max(dist_y - 6, 0) + 300;
         base = (base * 3) / 2; // xc7
     }
-    if (fnd_snk != sink_locs.end())
+    if (dst_is_pin)
         base += 1000;
     bool same_tile = dx == sx && dy == sy;
     if (src_type == id_NODE_PINFEED && same_tile)
@@ -1980,13 +2083,13 @@ BoundingBox XilinxImpl::getRouteBoundingBox(WireId src, WireId dst) const
     tile_xy(ctx->chip_info, dst.tile, dx, dy);
     expand(dx, dy);
 
-    auto fnd_src = source_locs.find(src);
-    if (fnd_src != source_locs.end()) {
-        expand(fnd_src->second.x, fnd_src->second.y);
-    }
-    auto fnd_snk = sink_locs.find(dst);
-    if (fnd_snk != sink_locs.end()) {
-        expand(fnd_snk->second.x, fnd_snk->second.y);
+    if (!pin_loc_idx.empty()) {
+        const PinLoc *sp = pin_loc(src);
+        if (sp && sp->has_source)
+            expand(sp->source.x, sp->source.y);
+        const PinLoc *dp = pin_loc(dst);
+        if (dp && dp->has_sink)
+            expand(dp->sink.x, dp->sink.y);
     }
     return {x0 - 2, y0 - 2, x1 + 2, y1 + 2};
 }

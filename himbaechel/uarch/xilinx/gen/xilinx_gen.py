@@ -104,6 +104,51 @@ def timing_pip_classs(pip: xilinx_device.PIP):
 seen_pip_timings = set()
 seen_node_timings = set()
 
+# --- measured timing calibration (--timing-cal) ------------------------------
+# A JSON written by a fit of nextpnr's own pip delays to silicon (synthgui runs/2026-11-09-npcal/calfit.py):
+#   classes: {class: {rise: f, fall: f}}  scale factor on nextpnr's delay for pips into that wire class
+#   per_use: {class: {rise: ps, fall: ps}} a fixed delay for pips into that class (FAN/BYP, which prjxray gives about 0 ps)
+#   lut_pin: {A1..A6: {rise: ps, fall: ps}} cost of a LUT stage entered on that physical pin, beyond its IMUX pip
+# Scaling a class's pip intrinsic delay, pip output resistance and node resistance by f scales Arch::getPipDelay's
+# (int_delay + RC) for that class by f, with no change to nextpnr itself. nextpnr times one value per pip (slow_max):
+# max takes the fall figure, min the rise figure. Without --timing-cal nothing below changes the chipdb.
+import re as _re
+TIMING_CAL = None
+LUT_CAL_BASE = 10  # ps left on the LUT cell arc; the rest of a stage's cost goes on the physical pin's permutation pip
+LUT_PIN_ARC = {}   # --timing-cal: physical pin j -> its LUT arc (LUT_CAL_BASE, or less on a pin that costs less than that)
+CAL_WIRE_CLASSES = {"sgl", "dbl", "quad", "hex", "lvb", "lv", "lh"}   # "classes" keys of a --timing-cal file
+CAL_PER_USE_CLASSES = {"fan", "byp"}                                   # "per_use" keys
+def cal_wire_class(dst):
+    """Same classes as runs/2026-11-09-npcal/npmodel.py wire_class: a pip's class is its destination wire's."""
+    for pat, c in [(r'(EE|WW|NN|SS|NE|NW|SE|SW|EL|ER|WL|WR|NL|NR|SL|SR)1BEG(_[NS])?\d', 'sgl'),
+                   (r'(EE|WW|NN|SS|NE|NW|SE|SW)2BEG\d', 'dbl'),
+                   (r'(EE|WW)4BEG\d', 'quad'),
+                   (r'(NN|SS|NE|NW|SE|SW)6BEG\d', 'hex'),
+                   (r'LVB(_L)?\d+', 'lvb'), (r'LV(_L)?\d+', 'lv'), (r'LH\d+', 'lh'),
+                   (r'(FAN_ALT|FAN_BOUNCE|GFAN)\d+', 'fan'), (r'(BYP_ALT|BYP_BOUNCE)\d+', 'byp')]:
+        if _re.fullmatch(pat, dst): return c
+    return None
+def cal_scale(c):
+    """(rise, fall) scale factors for class c, or None"""
+    if TIMING_CAL is None or c is None or c not in TIMING_CAL.get("classes", {}): return None
+    v = TIMING_CAL["classes"][c]; return (float(v["rise"]), float(v["fall"]))
+def cal_per_use(c):
+    if TIMING_CAL is None or c is None or c not in TIMING_CAL.get("per_use", {}): return None
+    v = TIMING_CAL["per_use"][c]; return (float(v["rise"]), float(v["fall"]))
+def cal_tv(lo, hi):
+    """A TimingValue from a measured (rise, fall) pair. TimingValue has no edges: its fields are min and max, and
+    nextpnr keeps one delay per pip and arc (setup analysis reads the max). So the pair goes in as min and max in
+    whichever order they fall, and the slower edge is the one timed. Negative values clamp to 0 (no negative delay)."""
+    lo, hi = int(round(max(lo, 0))), int(round(max(hi, 0)))
+    return TimingValue(min(lo, hi), max(lo, hi))
+def cal_node_class(wires):
+    """class of a node for scaling its resistance: the class of the first of its wires that has one"""
+    if TIMING_CAL is None: return None
+    for w in wires:
+        c = cal_wire_class(w.name())
+        if cal_scale(c): return c
+    return None
+
 # --- prjxray bitstream-representation lookup -------------------------------
 # A tile-routing pip is only usable if the bitstream can express it, i.e. its
 # fasm feature "<TILETYPE>.<dst_wire>.<src_wire>" appears in either
@@ -210,6 +255,27 @@ def pip_has_bits(tile_type, dst_wire, src_wire):
     nobits_by_tiletype[tile_type] = nobits_by_tiletype.get(tile_type, 0) + 1
     return False
 
+def add_pseudo_constants(ch: Chip, tt):
+    # pseudo ground bels
+    tt.create_wire(f"GND", "GND", const_value="GND")
+    tt.create_wire(f"VCC", "VCC", const_value="VCC")
+
+    gnd = tt.create_bel(f"PSEUDO_GND", f"PSEUDO_GND", z=0)
+    gnd.site = -1
+    gnd.extra_data = BelExtraData(name_in_site=ch.strs.id("PSEUDO_GND"))
+    gnd.flags |= BEL_FLAG_GLOBAL | BEL_FLAG_HIDDEN
+    tt.add_bel_pin(gnd, "Y", "GND", PinType.OUTPUT)
+
+    vcc = tt.create_bel(f"PSEUDO_VCC", f"PSEUDO_VCC", z=1)
+    vcc.site = -1
+    vcc.extra_data = BelExtraData(name_in_site=ch.strs.id("PSEUDO_VCC"))
+    vcc.flags |= BEL_FLAG_GLOBAL | BEL_FLAG_HIDDEN
+    tt.add_bel_pin(vcc, "Y", "VCC", PinType.OUTPUT)
+
+def make_pseudo_corner(ch: Chip):
+    # --window: the corner tile of the ring, with no device tile behind it
+    add_pseudo_constants(ch, ch.create_tile_type("NULL_CORNER"))
+
 def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
     tile_type = tile.tile_type()
     if tile.x == 0 and tile.y == 0:
@@ -225,21 +291,7 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
         if wire.is_vcc():
             nw.const_value = ch.strs.id("VCC")
     if tile_type == "NULL_CORNER":
-        # pseudo ground bels
-        tt.create_wire(f"GND", "GND", const_value="GND")
-        tt.create_wire(f"VCC", "VCC", const_value="VCC")
-
-        gnd = tt.create_bel(f"PSEUDO_GND", f"PSEUDO_GND", z=0)
-        gnd.site = -1
-        gnd.extra_data = BelExtraData(name_in_site=ch.strs.id("PSEUDO_GND"))
-        gnd.flags |= BEL_FLAG_GLOBAL | BEL_FLAG_HIDDEN
-        tt.add_bel_pin(gnd, "Y", "GND", PinType.OUTPUT)
-
-        vcc = tt.create_bel(f"PSEUDO_VCC", f"PSEUDO_VCC", z=1)
-        vcc.site = -1
-        vcc.extra_data = BelExtraData(name_in_site=ch.strs.id("PSEUDO_VCC"))
-        vcc.flags |= BEL_FLAG_GLOBAL | BEL_FLAG_HIDDEN
-        tt.add_bel_pin(vcc, "Y", "VCC", PinType.OUTPUT)
+        add_pseudo_constants(ch, tt)
     def add_pip(src_wire, dst_wire, pip_class=PipClass.TILE_ROUTING, timing="",
         site_key=-1, bel_name="", pip_config=0):
         np = tt.create_pip(src_wire, dst_wire, timing)
@@ -284,22 +336,39 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
                         pip_config = ("ABCDEFGH".index(swn[0]) << 8) | ((j - 1) << 4) | (i - 1)
                         if s.rel_xy()[0] == 1:
                             pip_config |= (4 << 8)
+                        # physical pin j: with --timing-cal its measured stage cost (LUTPIN<j>), else the stub
                         add_pip(s.pin(f"{swn[0]}{j}").tile_wire().name(), lookup_site_wire(pin.site_wire()),
                             pip_class=PipClass.LUT_PERMUTATION,
                             pip_config=pip_config,
                             site_key=(s.index << 8),
-                            timing="SITE_NULL"
+                            timing=(f"LUTPIN{j}" if TIMING_CAL is not None and "lut_pin" in TIMING_CAL else "SITE_NULL")
                         )
-                    # Add LUT route-through pseudo-pip
+                    # Add LUT route-through pseudo-pip: the input straight to the
+                    # 6LUT's O6 site wire, from which the site's own pips reach
+                    # the output pin (a fabric buffer) and the flip-flop mux (how
+                    # a fabric signal reaches the main FF of a position whose
+                    # bypass pin the 5FF already uses: Vivado's route-through).
+                    # Ending at the O6 wire rather than at the output pin keeps
+                    # the two uses on one resource, so one LUT never carries two
+                    # route-throughs, whose INITs could not coexist.  Bit 0 of
+                    # the config marks this form for the uarch.
                     rt_config = ("ABCDEFGH".index(swn[0]) << 8)
                     if s.rel_xy()[0] == 1:
                         rt_config |= (4 << 8)
                     rt_config |= ((i - 1) << 1)
-                    add_pip(pin.tile_wire().name(), s.pin(f"{swn[0]}").tile_wire().name(),
+                    o6 = None
+                    for b in s.bels():
+                        if b.name() == f"{swn[0]}6LUT":
+                            for bp in b.pins():
+                                if bp.name == "O6":
+                                    o6 = bp.site_wire()
+                    assert o6 is not None, f"no O6 on {swn[0]}6LUT"
+                    add_pip(pin.tile_wire().name(), lookup_site_wire(o6),
                             pip_class=PipClass.LUT_ROUTETHRU,
-                            pip_config=rt_config,
+                            pip_config=rt_config | 1,
                             site_key=(s.index << 8),
-                            timing="SITE_NULL"
+                            # with --timing-cal a route-through on physical pin i costs a stage on that pin (LUTRT<i>)
+                            timing=(f"LUTRT{i}" if TIMING_CAL is not None and "lut_pin" in TIMING_CAL else "SITE_NULL")
                         )
 
                     return
@@ -404,11 +473,21 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
         if not filters.include_pip(tile.tile_type(), pip):
             continue
         tcls = timing_pip_classs(pip)
+        ccls = cal_wire_class(pip.dst_wire().name()) if TIMING_CAL is not None else None
+        sc, pu = cal_scale(ccls), cal_per_use(ccls)
+        if sc or pu: tcls = f"{tcls}_cal{ccls}"
         if tcls not in seen_pip_timings:
+            delay = TimingValue(int(pip.min_delay()*1000), int(pip.max_delay()*1000)) # ps
+            out_res = TimingValue(int(pip.resistance())) # mohm
+            if sc:
+                delay = cal_tv(pip.min_delay()*1000*sc[0], pip.max_delay()*1000*sc[1])
+                out_res = TimingValue(int(pip.resistance()*sc[1]))
+            elif pu:
+                delay = cal_tv(pu[0], pu[1])
             ch.timing.set_pip_class(f"DEFAULT", tcls,
-                delay=TimingValue(int(pip.min_delay()*1000), int(pip.max_delay()*1000)), # ps
+                delay=delay,
                 in_cap=TimingValue(int(pip.capacitance()*1000)), # fF
-                out_res=TimingValue(int(pip.resistance())), # mohm
+                out_res=out_res,
                 is_buffered=pip.is_buffered())
             seen_pip_timings.add(tcls)
         rt = PIP_CFG_ROUTETHRU if pip.is_route_thru() else 0
@@ -474,9 +553,9 @@ def import_bram_timings(timing, sdf, is_virtex7=False):
     # WF = WRITE_FIRST), and READ_FIRST's setup and hold are shorter. DIADI and
     # DIPADIP take WRITE_MODE_A's entry, DIBDI and DIPBDIP WRITE_MODE_B's, so
     # each variant name ends in both modes; the uarch picks it per cell.
-    def import_data_in_sethold(cell, di_width, dip_width, wsdp, mode_a, mode_b):
-        # In SDP both halves of the data in are written by the port B clock.
-        clock_a = "CLKBWRCLK" if wsdp else "CLKARDCLK"
+    def import_data_in_sethold(cell, di_width, dip_width, wsdp, mode_a, mode_b, clk_sfx=""):
+        # In SDP both halves of the data in are written by the port B clock. clk_sfx: see the RAMB36 note below.
+        clock_a = ("CLKBWRCLK" if wsdp else "CLKARDCLK") + clk_sfx
         ram_mode = "RAMB18SDP" if wsdp else "RAMB18TDP"
         for port, mode in (("A", mode_a), ("B", mode_b)):
             sdfcell = sdf.cells[(f"RAMBFIFO36E1RAM_MODE_{ram_mode}_U_WRITE_MODE_U_{mode}_EN_ECC_READ_FALSE_EN_ECC_WRITE_FALSE", "RAMBFIFO36E1")]
@@ -484,8 +563,8 @@ def import_bram_timings(timing, sdf, is_virtex7=False):
                 if isinstance(entry, parse_sdf.SetupHoldCheck):
                     if port == "A" and entry.pin == "DIADIU": import_bus_sethold(cell, "DIADI", di_width, clock_a, entry)
                     if port == "A" and entry.pin == "DIPADIPU": import_bus_sethold(cell, "DIPADIP", dip_width, clock_a, entry)
-                    if port == "B" and entry.pin == "DIBDIU": import_bus_sethold(cell, "DIBDI", di_width, "CLKBWRCLK", entry)
-                    if port == "B" and entry.pin == "DIPBDIPU": import_bus_sethold(cell, "DIPBDIP", dip_width, "CLKBWRCLK", entry)
+                    if port == "B" and entry.pin == "DIBDIU": import_bus_sethold(cell, "DIBDI", di_width, "CLKBWRCLK" + clk_sfx, entry)
+                    if port == "B" and entry.pin == "DIPBDIPU": import_bus_sethold(cell, "DIPBDIP", dip_width, "CLKBWRCLK" + clk_sfx, entry)
 
     write_modes = ("NC", "RF", "WF")
     for wsdp, rsdp, mode_a, mode_b in itertools.product((False, True), (False, True), write_modes, write_modes):
@@ -515,12 +594,16 @@ def import_bram_timings(timing, sdf, is_virtex7=False):
                 if entry.to_pin == "DOPBDOPU": import_bus_clkq(bram18, "DOPBDOP", 2, "CLKARDCLK" if rsdp else "CLKBWRCLK", entry)
 
         bram36 = timing.add_cell_variant("DEFAULT", f"RAMB36E1_RAMB36E1_{variant}")
+        # The packed RAMB36 has no CLKARDCLK or CLKBWRCLK port, only the L and U halves (CLKARDCLKL/U, CLKBWRCLKL/U),
+        # which the packer connects to the same clock net. An arc that names the unsuffixed clock is dropped by the
+        # timing analyser without a word, which left every RAMB36 read (clock-to-out of DO*) and its address and
+        # data-in setup untimed. The full-width buses take the L clock; WE, EN and RSTRAM take their own half's.
 
         for u in ('L', 'U'):
             for entry in sdf.cells[("RAMBFIFO36E1", "RAMBFIFO36E1")].entries:
                 if isinstance(entry, parse_sdf.SetupHoldCheck):
-                    if entry.pin == "ADDRAU": import_bus_sethold(bram36, f"ADDRARDADDR{u}", 15 if u == 'L' else 14, "CLKARDCLK", entry)
-                    if entry.pin == "ADDRBU": import_bus_sethold(bram36, f"ADDRBWRADDR{u}", 15 if u == 'L' else 14, "CLKBWRCLK", entry)
+                    if entry.pin == "ADDRAU": import_bus_sethold(bram36, f"ADDRARDADDR{u}", 15 if u == 'L' else 14, f"CLKARDCLK{u}", entry)
+                    if entry.pin == "ADDRBU": import_bus_sethold(bram36, f"ADDRBWRADDR{u}", 15 if u == 'L' else 14, f"CLKBWRCLK{u}", entry)
                     if entry.pin == "WEAU": import_bus_sethold(bram36, f"WEA{u}", 4, f"CLKARDCLK{u}", entry)
                     if entry.pin == "WEBU": import_bus_sethold(bram36, f"WEBWE{u}", 8, f"CLKBWRCLK{u}", entry)
             for entry in sdf.cells[("RAMBFIFO36E1_ISFIFO_FALSE", "RAMBFIFO36E1")].entries:
@@ -529,15 +612,15 @@ def import_bram_timings(timing, sdf, is_virtex7=False):
                     if entry.pin == "ENBWRENU": import_pin_sethold(bram36, f"ENBWREN{u}", f"CLKBWRCLK{u}", entry)
                     if entry.pin == "RSTRAMAU": import_pin_sethold(bram36, f"RSTRAMARSTRAM{u}", f"CLKARDCLK{u}", entry)
                     if entry.pin == "RSTRAMBU": import_pin_sethold(bram36, f"RSTRAMB{u}", f"CLKBWRCLK{u}", entry)
-        import_data_in_sethold(bram36, 32, 4, wsdp, mode_a, mode_b)
+        import_data_in_sethold(bram36, 32, 4, wsdp, mode_a, mode_b, clk_sfx="L")
         for entry in sdf.cells[("RAMBFIFO36E1RAM_MODE_U_RAMB18SDP_U_DOA_REG_U_0_EN_ECC_READ_FALSE", "RAMBFIFO36E1")].entries:
             if isinstance(entry, parse_sdf.IOPath):
-                if entry.to_pin == "DOADOU": import_bus_clkq(bram36, "DOADO", 32, "CLKARDCLK", entry)
-                if entry.to_pin == "DOPADOPU": import_bus_clkq(bram36, "DOPADOP", 4, "CLKARDCLK", entry)
+                if entry.to_pin == "DOADOU": import_bus_clkq(bram36, "DOADO", 32, "CLKARDCLKL", entry)
+                if entry.to_pin == "DOPADOPU": import_bus_clkq(bram36, "DOPADOP", 4, "CLKARDCLKL", entry)
         for entry in sdf.cells[("RAMBFIFO36E1RAM_MODE_U_RAMB18TDP_U_DOB_REG_U_0_EN_ECC_READ_FALSE", "RAMBFIFO36E1")].entries:
             if isinstance(entry, parse_sdf.IOPath):
-                if entry.to_pin == "DOBDOU": import_bus_clkq(bram36, "DOBDO", 32, "CLKARDCLK" if rsdp else "CLKBWRCLK", entry)
-                if entry.to_pin == "DOPBDOPU": import_bus_clkq(bram36, "DOPBDOP", 4, "CLKARDCLK" if rsdp else "CLKBWRCLK", entry)
+                if entry.to_pin == "DOBDOU": import_bus_clkq(bram36, "DOBDO", 32, "CLKARDCLKL" if rsdp else "CLKBWRCLKL", entry)
+                if entry.to_pin == "DOPBDOPU": import_bus_clkq(bram36, "DOPBDOP", 4, "CLKARDCLKL" if rsdp else "CLKBWRCLKL", entry)
 
 def main():
     xlbase = path.join(path.dirname(path.realpath(__file__)), "..")
@@ -548,7 +631,31 @@ def main():
     parser.add_argument("--device", help="name of device to export", type=str, required=True)
     parser.add_argument("--constids", help="name of nextpnr constids file to read", type=str, default=path.join(xlbase, "constids.inc"))
     parser.add_argument("--bba", help="bba file to write", type=str, required=True)
+    parser.add_argument("--window", help="x0,y0,x1,y1 (tile grid, inclusive): write a chipdb of that window of the "
+                        "device only, ringed by border tiles that carry a PARTPIN_IN and a PARTPIN_OUT bel on every "
+                        "node crossing the window's edge (a window build's interface to the static design around it)",
+                        type=str)
+    parser.add_argument("--window-map", help="with --window: JSON of the boundary nodes, their wires and bels", type=str)
+    parser.add_argument("--timing-cal", help="JSON of measured timing: per wire class scale factors and per-use delays, "
+                        "per physical LUT pin stage costs (see TIMING_CAL above)", type=str)
     args = parser.parse_args()
+    global TIMING_CAL
+    if args.timing_cal:
+        import json
+        with open(args.timing_cal) as f:
+            TIMING_CAL = json.load(f)
+        # a key the generator does not know would leave that class at its prjxray timing while the chipdb looks
+        # calibrated: refuse it rather than skip it
+        known = {"classes": CAL_WIRE_CLASSES, "per_use": CAL_PER_USE_CLASSES, "lut_pin": {f"A{j}" for j in range(1, 7)}}
+        for section, names in known.items():
+            unknown = sorted(set(TIMING_CAL.get(section, {})) - names)
+            if unknown:
+                sys.exit(f"--timing-cal {args.timing_cal}: unknown {section} key(s) {unknown}; known: {sorted(names)}")
+        missing = sorted(known["lut_pin"] - set(TIMING_CAL.get("lut_pin", known["lut_pin"])))
+        if missing:
+            sys.exit(f"--timing-cal {args.timing_cal}: lut_pin lacks {missing}")
+        print(f"--timing-cal {args.timing_cal}: classes {sorted(TIMING_CAL.get('classes', {}))}, "
+              f"per use {sorted(TIMING_CAL.get('per_use', {}))}, lut pins {'lut_pin' in TIMING_CAL}", file=sys.stderr)
 
     # Init database paths
     metadata_root = args.metadata
@@ -571,12 +678,35 @@ def main():
     xraydb_root_for_bits = xraydb_root
     # Load prjxray device data
     d = xilinx_device.import_device(args.device, xraydb_root, metadata_root)
+    # --window: the chip is the window plus a one-tile ring of border tiles;
+    # grid (0, 0) is the pseudo-constant corner as on a whole device, and
+    # every real tile keeps its own name (TileExtraData) for the fasm.
+    win = None
+    if args.window:
+        wx0, wy0, wx1, wy1 = (int(v) for v in args.window.split(","))
+        assert 0 <= wx0 <= wx1 < d.width and 0 <= wy0 <= wy1 < d.height, "--window is off the tile grid"
+        win = (wx0, wy0, wx1, wy1)
+        chip_w, chip_h = wx1 - wx0 + 3, wy1 - wy0 + 3
+        def inside(tile): return wx0 <= tile.x <= wx1 and wy0 <= tile.y <= wy1
+        def gx(x): return x - wx0 + 1
+        def gy(y): return y - wy0 + 1
+    else:
+        chip_w, chip_h = d.width, d.height
+        def inside(tile): return True
+        def gx(x): return x
+        def gy(y): return y
     # Init constant ids
-    ch = Chip("xilinx", args.device, d.width, d.height)
+    ch = Chip("xilinx", args.device, chip_w, chip_h)
     ch.strs.read_constids(path.join(path.dirname(__file__), args.constids))
     ch.set_speed_grades(["DEFAULT", ]) # TODO: figure out how speed grades are supposed to work in prjxray
+    if win is not None:
+        make_pseudo_corner(ch)
+        ch.set_tile_type(0, 0, "NULL_CORNER").extra_data = TileExtraData(ch.strs.id("PRBORDER"), 0, 0)
+        ch.create_tile_type("PRNULL")
     # Import tile types
     for tile in d.tiles:
+        if not inside(tile):
+            continue
         tile_type = tile.tile_type()
         if tile.x == 0 and tile.y == 0:
             assert tile_type == "NULL"
@@ -584,7 +714,7 @@ def main():
             tile_type = "NULL_CORNER"
         if tile_type not in ch.tile_type_idx:
             import_tiletype(ch, tile)
-        ti = ch.set_tile_type(tile.x, tile.y, tile_type)
+        ti = ch.set_tile_type(gx(tile.x), gy(tile.y), tile_type)
         prefix, tx, ty = tile.split_name()
         ti.extra_data = TileExtraData(ch.strs.id(prefix), tx, ty)
         for site in tile.sites():
@@ -598,6 +728,18 @@ def main():
     # Import nodes
     seen_nodes = set()
     tt_used_wires = {}
+    def used_in_tile(w):
+        tt = w.tile.tile_type()
+        if tt not in tt_used_wires:
+            tt_used_wires[tt] = w.tile.used_wire_indices()
+        return w.index in tt_used_wires[tt]
+    # --window: a node with a usable wire outside the window is a boundary
+    # node.  It gets one more wire in a border tile and a PARTPIN_IN /
+    # PARTPIN_OUT bel pair on it, so a window build can drive it (an input
+    # from the static design) or consume it (an output to it).  Deferred
+    # until the border tile types exist.
+    boundary = []            # (node_wires, timing_class, canonical name, all wire names, border x, border y)
+    border_records = {}      # (bx, by) -> list of canonical names
     print("Processing nodes...")
     for row in range(d.height):
         # TODO: GND and VCC row connectivity...
@@ -608,47 +750,129 @@ def main():
                 uid = n.unique_index()
                 if uid in seen_nodes:
                     continue
+                seen_nodes.add(uid)
+                if win is not None:
+                    ins = [nw for nw in n.wires if inside(nw.tile)]
+                    if not ins:
+                        continue
+                    outs = [nw for nw in n.wires if not inside(nw.tile) and used_in_tile(nw)]
+                    wires_of_node = ins
+                else:
+                    outs = []
+                    wires_of_node = n.wires
                 if len(n.wires) > 1:
                     node_wires = []
                     node_cap = 0
                     node_res = 0
                     # Add interconnect tiles first for better delay estimates in nextpnr
                     for j in range(2):
-                        for w in n.wires:
+                        for w in wires_of_node:
                             if (w.tile.tile_type() in ("INT", "INT_L", "INT_R")) != (j == 0):
                                 continue
-                            if w.tile.tile_type() not in tt_used_wires:
-                                tt_used_wires[w.tile.tile_type()] = w.tile.used_wire_indices()
                             node_cap += int(w.capacitance() * 1000)
                             node_res += int(w.resistance())
                             # prune wires from nodes that just pass through a tile without connecting to
                             # bels/pips, because nextpnr doesn't care about these
-                            if w.index not in tt_used_wires[w.tile.tile_type()]:
+                            if not used_in_tile(w):
                                 continue
-                            node_wires.append(NodeWire(w.tile.x, w.tile.y, w.index))
-                    if len(node_wires) > 1:
-                        timing_class = f"node_c{node_cap}_c{node_res}"
+                            node_wires.append(NodeWire(gx(w.tile.x), gy(w.tile.y), w.index))
+                    timing_class = f"node_c{node_cap}_c{node_res}"
+                    ncls = cal_node_class(wires_of_node)
+                    if ncls:  # --timing-cal: the node's resistance carries its class's (fall) scale factor
+                        node_res = int(node_res * cal_scale(ncls)[1])
+                        timing_class = f"{timing_class}_cal{ncls}"
+                    is_boundary = bool(outs and node_wires)
+                    if (is_boundary or len(node_wires) > 1) and timing_class not in seen_node_timings:
+                        # only for a node that will exist: a whole-device chipdb stays as it was
+                        ch.timing.set_node_class("DEFAULT", timing_class, delay=TimingValue(0), cap=TimingValue(node_cap), res=TimingValue(node_res))
+                        seen_node_timings.add(timing_class)
+                    if is_boundary:
+                        ow = outs[0]
+                        bx = min(max(gx(ow.tile.x), 0), chip_w - 1)
+                        by = min(max(gy(ow.tile.y), 0), chip_h - 1)
+                        if (bx, by) == (0, 0):
+                            bx = 1
+                        canon = f"{n.wires[0].tile.name}/{n.wires[0].name()}"
+                        names = [f"{nw.tile.name}/{nw.name()}" for nw in n.wires]
+                        boundary.append((node_wires, timing_class, canon, names, bx, by))
+                        border_records.setdefault((bx, by), []).append(canon)
+                    elif len(node_wires) > 1:
                         ch.add_node(node_wires, timing_class=timing_class)
-                        if timing_class not in seen_node_timings:
-                            ch.timing.set_node_class("DEFAULT", timing_class, delay=TimingValue(0), cap=TimingValue(node_cap), res=TimingValue(node_res))
-                            seen_node_timings.add(timing_class)
                     del node_wires
-                seen_nodes.add(uid)
+    if win is not None:
+        window_map = {"window": list(win), "grid": [chip_w, chip_h], "nodes": {}, "wires": {}}
+        for (bx, by), canons in sorted(border_records.items()):
+            tt = ch.create_tile_type(f"PRBORDER_{bx}_{by}")
+            for k, canon in enumerate(canons):
+                dotted = canon.replace("/", ".")
+                bw = tt.create_wire(dotted, "PARTPIN")
+                bw.flags = -1 # a tile wire, not a site wire
+                for z, (kind, pin, pdir, prefix) in enumerate(((PinType.OUTPUT, "O", PinType.OUTPUT, "PIN"),
+                                                               (PinType.INPUT, "I", PinType.INPUT, "POUT"))):
+                    bel = tt.create_bel(f"{prefix}.{dotted}", "PARTPIN_IN" if prefix == "PIN" else "PARTPIN_OUT", z=2 * k + z)
+                    bel.site = -1
+                    bel.extra_data = BelExtraData(name_in_site=ch.strs.id(f"{prefix}.{dotted}"))
+                    tt.add_bel_pin(bel, pin, dotted, pdir)
+        for by in range(chip_h):
+            for bx in range(chip_w):
+                on_the_ring = bx in (0, chip_w - 1) or by in (0, chip_h - 1)
+                if not on_the_ring or (bx, by) == (0, 0):
+                    continue
+                ti = ch.set_tile_type(bx, by, f"PRBORDER_{bx}_{by}" if (bx, by) in border_records else "PRNULL")
+                ti.extra_data = TileExtraData(ch.strs.id("PRBORDER"), bx, by)
+        for node_wires, timing_class, canon, names, bx, by in boundary:
+            dotted = canon.replace("/", ".")
+            ch.add_node(node_wires + [NodeWire(bx, by, dotted)], timing_class=timing_class)
+            tile = f"X{bx}Y{by}"   # nextpnr's own tile naming is the bare grid position
+            window_map["nodes"][canon] = {"in": f"{tile}/PIN.{dotted}", "out": f"{tile}/POUT.{dotted}",
+                                          "root": f"{names[0]}", "wires": names}
+            for nm in names:
+                window_map["wires"][nm] = canon
+        print(f"--window: {len(boundary)} boundary nodes on {len(border_records)} border tiles", file=sys.stderr)
+        if args.window_map:
+            import json
+            with open(args.window_map, "w") as f:
+                json.dump(window_map, f, indent=1)
     # Stub timing class
     ch.timing.set_pip_class("DEFAULT", "SITE_NULL", delay=TimingValue(20))
+    if TIMING_CAL is not None and "lut_pin" in TIMING_CAL:
+        # a stage on pin j costs lut_pin[Aj] beyond its IMUX pip: LUTPIN<j> + the LUT arc (LUT_CAL_BASE) + what nextpnr already
+        # prices in every stage outside the fit's IMUX/wire classes (site exit stub, CLB tile pips): lut_stage_overhead, measured by
+        # comparing nextpnr's SDF with the fit's model on the same routes (runs/2026-11-09-npcal/consist.py); 20 if absent
+        ovh = float(TIMING_CAL.get("lut_stage_overhead", 20))
+        for j in range(1, 7):
+            v = TIMING_CAL["lut_pin"][f"A{j}"]
+            # what this pin's stage costs beyond the overhead, per edge; the LUT arc takes up to LUT_CAL_BASE of it and the
+            # permutation pip the rest, so a pin cheaper than LUT_CAL_BASE + overhead (A6, about 0-16 ps measured) is not
+            # charged the full arc. Below the overhead itself nothing here can take it lower: say how much is left over.
+            beyond = [float(v["rise"]) - ovh, float(v["fall"]) - ovh]
+            arc = [min(max(b, 0.0), LUT_CAL_BASE) for b in beyond]
+            LUT_PIN_ARC[j] = cal_tv(*arc)
+            ch.timing.set_pip_class("DEFAULT", f"LUTPIN{j}", delay=cal_tv(beyond[0] - arc[0], beyond[1] - arc[1]))
+            excess = max(-b for b in beyond)
+            if excess > 0:
+                print(f"--timing-cal: A{j} measures {v['rise']}/{v['fall']} ps, below the {ovh:g} ps stage overhead; "
+                      f"its stage is modelled {excess:.0f} ps slow", file=sys.stderr)
+            # a LUT route-through goes from pin j's tile wire straight to O6, skipping the permutation pip and the LUT arc,
+            # and costs the same as a stage on pin j (measured: windows 1 and 2 of 2026-11-05, runs/2026-11-09-npcal/layouts.py)
+            ch.timing.set_pip_class("DEFAULT", f"LUTRT{j}",
+                delay=cal_tv(float(v["rise"]) - ovh, float(v["fall"]) - ovh))
     # Stub bel timings. On virtex7 the LUT comb delay and the FF D/CK->Q
     # figures are replaced by the VC707 Vivado-oracle calibration
     # (docs/extracted-timing.md): nextpnr's generic guesses of 0.30 ns
     # clk->Q and 0.20 ns FF hold measured as low by 3x and 2x respectively
     # against Vivado's own probed paths.
     lut_delay = TimingValue(45, 124) if is_virtex7 else None
+    if TIMING_CAL is not None and "lut_pin" in TIMING_CAL:
+        lut_delay = TimingValue(LUT_CAL_BASE, LUT_CAL_BASE)  # the pin-dependent part is on the permutation pips (and LUT_PIN_ARC)
     ff_d_setup = TimingValue(34) if is_virtex7 else TimingValue(100, 100)
     ff_d_hold = TimingValue(87) if is_virtex7 else TimingValue(200, 200)
     ff_clk_q = TimingValue(100, 303) if is_virtex7 else TimingValue(300, 350)
     def add_lut_timing(lut):
         for i in range(1, 6+1):
-            lut.add_comb_arc(f"A{i}", "O6", lut_delay or TimingValue(100, 125))
-            if i <= 5: lut.add_comb_arc(f"A{i}", "O5", lut_delay or TimingValue(120, 150))
+            arc = LUT_PIN_ARC.get(i, lut_delay)   # --timing-cal: per physical pin, else one value for all
+            lut.add_comb_arc(f"A{i}", "O6", arc or TimingValue(100, 125))
+            if i <= 5: lut.add_comb_arc(f"A{i}", "O5", arc or TimingValue(120, 150))
         for i in range(1, 8+1):
             lut.add_setup_hold("CLK", f"WA{i}", ClockEdge.RISING, TimingValue(100, 500), TimingValue(100, 200))
         lut.add_setup_hold("CLK", "WE", ClockEdge.RISING, TimingValue(100, 600), TimingValue(100, 100))
@@ -701,9 +925,11 @@ def main():
         pkg = ch.create_package(package_name)
         for pin, site in sorted(package.pin_map.items(), key=lambda x:x[0]):
             site_data = d.sites_by_name[site]
+            if not inside(site_data.tile):
+                continue
             bel_name = gen_bel_name(site_data, "PAD")
-            tile_type = ch.tile_type_at(site_data.tile.x, site_data.tile.y)
-            pkg.create_pad(pin, f"X{site_data.tile.x}Y{site_data.tile.y}",
+            tile_type = ch.tile_type_at(gx(site_data.tile.x), gy(site_data.tile.y))
+            pkg.create_pad(pin, f"X{gx(site_data.tile.x)}Y{gy(site_data.tile.y)}",
             f"{site_data.rel_name()}.{bel_name}",
             "", 0) # TODO: bank
     # Report the bitstream-representation census.  A non-zero "no bits" count
