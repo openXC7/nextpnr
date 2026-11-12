@@ -1774,43 +1774,31 @@ struct Router2
         }
         if (ctx->verbose)
             log_info("%d/%d nets not multi-threadable\n", int(tcs.at(N).route_nets.size()), int(route_queue.size()));
-#ifdef NPNR_DISABLE_THREADS
-        // Singlethreaded routing - quadrants
-        for (int i = 0; i < Nq; i++) {
-            router_thread(tcs.at(i), /*is_mt=*/false);
-        }
-        // Vertical splits
-        for (int i = Nq; i < Nq + Nv; i++) {
-            router_thread(tcs.at(i), /*is_mt=*/false);
-        }
-        // Horizontal splits
-        for (int i = Nq + Nv; i < Nq + Nv + Nh; i++) {
-            router_thread(tcs.at(i), /*is_mt=*/false);
-        }
-#else
-        // Multithreaded part of routing - quadrants
-        std::vector<boost::thread> threads;
-        for (int i = 0; i < Nq; i++) {
-            threads.emplace_back([this, &tcs, i]() { router_thread(tcs.at(i), /*is_mt=*/true); });
-        }
-        for (auto &t : threads)
-            t.join();
-        threads.clear();
-        // Vertical splits
-        for (int i = Nq; i < Nq + Nv; i++) {
-            threads.emplace_back([this, &tcs, i]() { router_thread(tcs.at(i), /*is_mt=*/true); });
-        }
-        for (auto &t : threads)
-            t.join();
-        threads.clear();
-        // Horizontal splits
-        for (int i = Nq + Nv; i < Nq + Nv + Nh; i++) {
-            threads.emplace_back([this, &tcs, i]() { router_thread(tcs.at(i), /*is_mt=*/true); });
-        }
-        for (auto &t : threads)
-            t.join();
-        threads.clear();
+        // Route the partition groups: the four quadrants, then the two vertical
+        // halves, then the two horizontal halves. Nets in one partition only touch
+        // wires inside that partition (thread_test_wire), so the partitions of a
+        // group are independent and may run concurrently. Routing them one after
+        // another gives the same semantics (an arc that cannot be routed inside
+        // its partition falls through to the single-threaded pass below) and a
+        // result that does not depend on thread scheduling, so this is what
+        // `--threads 1` (and a build without thread support) does.
+        auto route_group = [&](int begin, int end) {
+#ifndef NPNR_DISABLE_THREADS
+            if (cfg.threads > 1) {
+                std::vector<boost::thread> threads;
+                for (int i = begin; i < end; i++)
+                    threads.emplace_back([this, &tcs, i]() { router_thread(tcs.at(i), /*is_mt=*/true); });
+                for (auto &t : threads)
+                    t.join();
+                return;
+            }
 #endif
+            for (int i = begin; i < end; i++)
+                router_thread(tcs.at(i), /*is_mt=*/true);
+        };
+        route_group(0, Nq);
+        route_group(Nq, Nq + Nv);
+        route_group(Nq + Nv, Nq + Nv + Nh);
         // Singlethreaded part of routing - nets that cross partitions
         // or don't fit within bounding box
         for (auto st_net : tcs.at(N).route_nets)
@@ -2492,6 +2480,7 @@ void router2(Context *ctx, const Router2Cfg &cfg)
 
 Router2Cfg::Router2Cfg(Context *ctx)
 {
+    threads = ctx->setting<int>("threads", 8);
     backwards_max_iter = ctx->setting<int>("router2/bwdMaxIter", 20);
     global_backwards_max_iter = ctx->setting<int>("router2/glbBwdMaxIter", 200);
     bb_margin_x = ctx->setting<int>("router2/bbMargin/x", 3);
