@@ -1060,14 +1060,17 @@ void XilinxImpl::fixup_routing()
             NetInfo *ni = net.second.get();
             for (auto &wire : ni->wires) {
                 PipId pip = wire.second.pip;
-                if (pip == PipId())
+                const bool no_pip = pip == PipId();
+                if (no_pip)
                     continue;
                 auto &pd = chip_pip_info(ctx->chip_info, pip);
-                if (pd.flags != PIP_LUT_PERMUTATION)
+                const bool not_permutation = pd.flags != PIP_LUT_PERMUTATION;
+                if (not_permutation)
                     continue;
                 int cfg = reinterpret_cast<const XlnxPipExtraDataPOD *>(pd.extra_data.get())->pip_config;
-                if (((cfg >> 4) & 0xF) == (cfg & 0xF))
-                    continue; // already the identity
+                const bool already_identity = ((cfg >> 4) & 0xF) == (cfg & 0xF);
+                if (already_identity)
+                    continue;
                 swaps.push_back({ni, {pip, wire.second.strength}});
             }
         }
@@ -1086,16 +1089,20 @@ void XilinxImpl::fixup_routing()
             PipId ident;
             for (PipId p : ctx->getPipsDownhill(ctx->getPipSrcWire(pip))) {
                 auto &qd = chip_pip_info(ctx->chip_info, p);
-                if (qd.flags != PIP_LUT_PERMUTATION)
+                const bool not_permutation = qd.flags != PIP_LUT_PERMUTATION;
+                if (not_permutation)
                     continue;
                 int qc = reinterpret_cast<const XlnxPipExtraDataPOD *>(qd.extra_data.get())->pip_config;
-                if ((qc >> 8) == (cfg >> 8) && ((qc >> 4) & 0xF) == ((cfg >> 4) & 0xF) &&
-                    (qc & 0xF) == ((cfg >> 4) & 0xF)) {
+                const bool is_identity_of_same_pin = (qc >> 8) == (cfg >> 8) &&
+                                                     ((qc >> 4) & 0xF) == ((cfg >> 4) & 0xF) &&
+                                                     (qc & 0xF) == ((cfg >> 4) & 0xF);
+                if (is_identity_of_same_pin) {
                     ident = p;
                     break;
                 }
             }
-            if (ident == PipId()) {
+            const bool no_identity = ident == PipId();
+            if (no_identity) {
                 unmatched++;
                 continue;
             }
@@ -1108,12 +1115,14 @@ void XilinxImpl::fixup_routing()
         int shared = 0, conflict = 0;
         for (auto &b : binds) {
             NetInfo *pn = ctx->getBoundPipNet(b.new_pip);
-            if (pn == b.net) {
+            const bool net_holds_it_already = pn == b.net;
+            if (net_holds_it_already) {
                 shared++;
                 continue;
             }
             NetInfo *wn = ctx->getBoundWireNet(ctx->getPipDstWire(b.new_pip));
-            if (pn != nullptr || wn != nullptr) {
+            const bool held_by_another_net = pn != nullptr || wn != nullptr;
+            if (held_by_another_net) {
                 conflict++;
                 log_warning("permuted LUT input of net '%s': identity pip %s is held by net '%s', not re-bound\n",
                             b.net->name.c_str(ctx), ctx->nameOfPip(b.new_pip), (pn ? pn : wn)->name.c_str(ctx));
