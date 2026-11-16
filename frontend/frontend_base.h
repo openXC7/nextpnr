@@ -122,6 +122,29 @@ struct ModuleInfo
     pool<IdString> instantiated_celltypes;
 };
 
+// A name from the netlist as it is written in an error message: a control character is shown as \xNN, so that a name
+// cannot forge lines of the log or move the cursor of a terminal, and a name of more than 100 characters is cut
+std::string printable_name(const std::string &name)
+{
+    static const size_t max_length = 100;
+    static const char *hex = "0123456789abcdef";
+    std::string result;
+    for (unsigned char c : name) {
+        if (result.size() >= max_length) {
+            result += "...";
+            break;
+        }
+        if (c < 0x20 || c == 0x7f) {
+            result += "\\x";
+            result += hex[c >> 4];
+            result += hex[c & 15];
+        } else {
+            result += char(c);
+        }
+    }
+    return result;
+}
+
 template <typename FrontendType> struct GenericFrontend
 {
     GenericFrontend(Context *ctx, const FrontendType &impl, bool split_io) : ctx(ctx), impl(impl), split_io(split_io) {}
@@ -140,8 +163,7 @@ template <typename FrontendType> struct GenericFrontend
 
         // Importing flattens the hierarchy, which never ends if a module instantiates itself: look for that before
         // anything is imported
-        std::unordered_set<std::string> in_progress, checked;
-        check_for_recursive_instantiation(top.str(ctx), in_progress, checked);
+        check_for_recursive_instantiation(top.str(ctx));
 
         ctx->top_module = top;
         // Do the actual import, starting from the top level module
@@ -232,23 +254,47 @@ template <typename FrontendType> struct GenericFrontend
     // A module that instantiates itself, directly or through other modules, has no finite hierarchy to flatten: the
     // import would recurse until the stack is exhausted. Look for such a cycle among the modules that the import
     // reaches (the cells of the top module, and of the modules below it, whose type is a module that is not a box)
-    // before anything is imported. The walk goes by the names of the modules and does not create any ID string
-    void check_for_recursive_instantiation(const std::string &module, std::unordered_set<std::string> &in_progress,
-                                           std::unordered_set<std::string> &checked)
+    // before anything is imported. The walk goes by the names of the modules, creates no ID string, and keeps its path
+    // in a vector, not on the stack, so that the depth of the hierarchy does not limit it
+    void check_for_recursive_instantiation(const std::string &top_module)
     {
-        in_progress.insert(module);
-        impl.foreach_cell(mod_refs.at(module), [&](const std::string &cellname, const cell_dat_t &cd) {
-            std::string type = impl.get_cell_type(cd);
-            if (!mod_refs.count(type) || box_modules.count(type))
-                return; // imported as a leaf cell
+        struct Frame
+        {
+            std::string module;
+            std::vector<std::pair<std::string, std::string>> submodules; // the cell name and the module of each
+            size_t next = 0;
+        };
+        std::unordered_set<std::string> in_progress, checked;
+        std::vector<Frame> path;
+        auto enter = [&](const std::string &module) {
+            Frame frame;
+            frame.module = module;
+            impl.foreach_cell(mod_refs.at(module), [&](const std::string &cellname, const cell_dat_t &cd) {
+                std::string type = impl.get_cell_type(cd);
+                if (mod_refs.count(type) && !box_modules.count(type)) // else imported as a leaf cell
+                    frame.submodules.emplace_back(cellname, type);
+            });
+            in_progress.insert(module);
+            path.push_back(std::move(frame));
+        };
+        enter(top_module);
+        while (!path.empty()) {
+            Frame &frame = path.back();
+            if (frame.next == frame.submodules.size()) {
+                in_progress.erase(frame.module);
+                checked.insert(frame.module);
+                path.pop_back();
+                continue;
+            }
+            const std::string cellname = frame.submodules.at(frame.next).first;
+            const std::string type = frame.submodules.at(frame.next).second;
+            frame.next++;
             if (in_progress.count(type))
-                log_error("Module '%s' instantiates itself (cell '%s' in module '%s')\n", type.c_str(),
-                          cellname.c_str(), module.c_str());
+                log_error("Module '%s' instantiates itself (cell '%s' in module '%s')\n", printable_name(type).c_str(),
+                          printable_name(cellname).c_str(), printable_name(frame.module).c_str());
             if (!checked.count(type))
-                check_for_recursive_instantiation(type, in_progress, checked);
-        });
-        in_progress.erase(module);
-        checked.insert(module);
+                enter(type);
+        }
     }
 
     // Create a unique name (guaranteed collision free) for a net or a cell; based on
