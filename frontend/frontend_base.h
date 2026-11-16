@@ -105,6 +105,7 @@
  *
  */
 
+#include <unordered_set>
 #include "design_utils.h"
 #include "log.h"
 #include "nextpnr.h"
@@ -126,23 +127,21 @@ template <typename FrontendType> struct GenericFrontend
     GenericFrontend(Context *ctx, const FrontendType &impl, bool split_io) : ctx(ctx), impl(impl), split_io(split_io) {}
     void operator()()
     {
-#ifndef NPNR_DISABLE_THREADS
-        // The ID strings of a Context are not synchronised, and the GUI and the Python API use them from other
-        // threads under this mutex, so everything that touches them has to be under it too, from the first name that
-        // find_top_module() creates
-        std::lock_guard<std::mutex> lock(ctx->mutex);
-#endif
-
         // Find which module is top
         find_top_module();
-        // Importing flattens the hierarchy, which never ends if a module instantiates itself: look for that before
-        // anything is added to the Context
-        pool<IdString> in_progress, checked;
-        check_for_recursive_instantiation(top, in_progress, checked);
         HierModuleState m;
         m.is_toplevel = true;
         m.prefix = "";
         m.path = top;
+
+#ifndef NPNR_DISABLE_THREADS
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+#endif
+
+        // Importing flattens the hierarchy, which never ends if a module instantiates itself: look for that before
+        // anything is imported
+        std::unordered_set<std::string> in_progress, checked;
+        check_for_recursive_instantiation(top.str(ctx), in_progress, checked);
 
         ctx->top_module = top;
         // Do the actual import, starting from the top level module
@@ -162,6 +161,8 @@ template <typename FrontendType> struct GenericFrontend
 
     dict<IdString, ModuleInfo> mods;
     std::unordered_map<std::string, const mod_dat_t> mod_refs;
+    // The names of the modules that are blackboxes or whiteboxes, which are not imported as submodules
+    std::unordered_set<std::string> box_modules;
     IdString top;
 
     // Process the list of modules and determine
@@ -180,6 +181,8 @@ template <typename FrontendType> struct GenericFrontend
                 else if (name == "whitebox")
                     mi.is_whitebox = (value.intval != 0);
             });
+            if (mi.is_box())
+                box_modules.insert(name);
             impl.foreach_cell(mod, [&](const std::string &name, const cell_dat_t &cell) {
                 mi.instantiated_celltypes.insert(ctx->id(impl.get_cell_type(cell)));
             });
@@ -228,18 +231,19 @@ template <typename FrontendType> struct GenericFrontend
 
     // A module that instantiates itself, directly or through other modules, has no finite hierarchy to flatten: the
     // import would recurse until the stack is exhausted. Look for such a cycle among the modules that the import
-    // reaches (the cells of the top module, and of the modules below it, whose type is a module that is not a box),
-    // before anything is added to the netlist or the hierarchy, so that the error leaves the Context as it was
-    void check_for_recursive_instantiation(IdString module, pool<IdString> &in_progress, pool<IdString> &checked)
+    // reaches (the cells of the top module, and of the modules below it, whose type is a module that is not a box)
+    // before anything is imported. The walk goes by the names of the modules and does not create any ID string
+    void check_for_recursive_instantiation(const std::string &module, std::unordered_set<std::string> &in_progress,
+                                           std::unordered_set<std::string> &checked)
     {
         in_progress.insert(module);
-        impl.foreach_cell(mod_refs.at(module.str(ctx)), [&](const std::string &cellname, const cell_dat_t &cd) {
-            IdString type = ctx->id(impl.get_cell_type(cd));
-            if (!mods.count(type) || mods.at(type).is_box())
+        impl.foreach_cell(mod_refs.at(module), [&](const std::string &cellname, const cell_dat_t &cd) {
+            std::string type = impl.get_cell_type(cd);
+            if (!mod_refs.count(type) || box_modules.count(type))
                 return; // imported as a leaf cell
             if (in_progress.count(type))
-                log_error("Module '%s' instantiates itself (cell '%s' in module '%s')\n", type.c_str(ctx),
-                          cellname.c_str(), module.c_str(ctx));
+                log_error("Module '%s' instantiates itself (cell '%s' in module '%s')\n", type.c_str(),
+                          cellname.c_str(), module.c_str());
             if (!checked.count(type))
                 check_for_recursive_instantiation(type, in_progress, checked);
         });

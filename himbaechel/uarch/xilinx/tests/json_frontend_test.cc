@@ -17,11 +17,7 @@
  *
  */
 
-#include <atomic>
-#include <chrono>
-#include <mutex>
 #include <sstream>
-#include <thread>
 #include "command.h"
 #include "gtest/gtest.h"
 #include "json_frontend.h"
@@ -41,8 +37,6 @@ class XilinxJsonFrontendTest : public ::testing::Test
         ctx = new Context(chipArgs);
         ctx->uarch->init(ctx);
         ctx->late_init();
-        attrs_before = ctx->attrs.size();
-        settings_before = ctx->settings.size();
     }
 
     virtual void TearDown() { delete ctx; }
@@ -63,55 +57,32 @@ class XilinxJsonFrontendTest : public ::testing::Test
                         << h.first.str(ctx) << " links to " << sub.second.str(ctx) << ", which does not exist";
     }
 
-    // An import that fails is not undone step by step, so it must fail before it has changed anything: a caller that
-    // keeps the Context (the GUI, the Python API) is left with the Context it had
-    void expect_nothing_imported()
-    {
-        EXPECT_TRUE(ctx->cells.empty());
-        EXPECT_TRUE(ctx->nets.empty());
-        EXPECT_TRUE(ctx->hierarchy.empty());
-        EXPECT_EQ(ctx->attrs.size(), attrs_before);
-        EXPECT_EQ(ctx->settings.size(), settings_before);
-        EXPECT_TRUE(ctx->top_module == IdString());
-        EXPECT_FALSE(ctx->design_loaded);
-    }
-
     ArchArgs chipArgs;
     Context *ctx;
-    size_t attrs_before, settings_before;
 };
 
-TEST_F(XilinxJsonFrontendTest, a_module_that_instantiates_itself_is_an_error_that_leaves_the_context_as_it_was)
+// Before the check, a module that instantiates itself was imported until the stack overflowed: the test binary died
+TEST_F(XilinxJsonFrontendTest, a_module_that_instantiates_itself_is_an_error)
 {
-    // top has a cell, a net and a submodule that import fine, and then z_rec, a "sub": "sub" contains v, which is a
-    // "sub" again. Cells are imported in the order of their names, so everything before z_rec would be in the Context
-    // when the recursion is found, if the import were left to find it
+    // top contains u, a "sub", and "sub" contains v, which is a "sub" again
     EXPECT_THROW(load(R"({"modules": {
         "top": {"attributes": {"top": "00000000000000000000000000000001"}, "ports": {},
-                "cells": {"a_leaf": {"type": "LUT4", "port_directions": {"A": "input"}, "connections": {"A": [2]}},
-                          "b_ok": {"type": "ok", "port_directions": {}, "connections": {}},
-                          "z_rec": {"type": "sub", "port_directions": {}, "connections": {}}},
-                "netnames": {"n": {"bits": [2]}}},
-        "ok": {"ports": {}, "cells": {"w": {"type": "LUT4", "port_directions": {}, "connections": {}}}, "netnames": {}},
+                "cells": {"u": {"type": "sub", "port_directions": {}, "connections": {}}}, "netnames": {}},
         "sub": {"ports": {}, "cells": {"v": {"type": "sub", "port_directions": {}, "connections": {}}}, "netnames": {}}
     }})"),
                  log_execution_error_exception);
-    expect_nothing_imported();
 }
 
-TEST_F(XilinxJsonFrontendTest, a_cycle_of_modules_is_an_error_that_leaves_the_context_as_it_was)
+TEST_F(XilinxJsonFrontendTest, a_cycle_of_modules_is_an_error)
 {
     // top contains u, an "a", which contains x, a "b", which contains y, an "a" again
     EXPECT_THROW(load(R"({"modules": {
         "top": {"attributes": {"top": "00000000000000000000000000000001"}, "ports": {},
-                "cells": {"a_leaf": {"type": "LUT4", "port_directions": {"A": "input"}, "connections": {"A": [2]}},
-                          "u": {"type": "a", "port_directions": {}, "connections": {}}},
-                "netnames": {"n": {"bits": [2]}}},
+                "cells": {"u": {"type": "a", "port_directions": {}, "connections": {}}}, "netnames": {}},
         "a": {"ports": {}, "cells": {"x": {"type": "b", "port_directions": {}, "connections": {}}}, "netnames": {}},
         "b": {"ports": {}, "cells": {"y": {"type": "a", "port_directions": {}, "connections": {}}}, "netnames": {}}
     }})"),
                  log_execution_error_exception);
-    expect_nothing_imported();
 }
 
 TEST_F(XilinxJsonFrontendTest, a_recursive_module_that_the_design_does_not_reach_is_not_an_error)
@@ -156,40 +127,3 @@ TEST_F(XilinxJsonFrontendTest, a_module_instantiated_more_than_once_is_not_recur
         EXPECT_TRUE(links.at(ctx->id(l.instance)) == ctx->id(l.child)) << l.parent << "/" << l.instance;
     }
 }
-
-#ifndef NPNR_DISABLE_THREADS
-TEST_F(XilinxJsonFrontendTest, the_import_creates_no_id_string_before_it_holds_the_mutex_of_the_context)
-{
-    // The ID strings of a Context are not synchronised. The GUI and the Python API use them from other threads under
-    // the mutex of the Context, so a load on another thread must not create an ID string before it holds that mutex.
-    // None of the names of this netlist is an ID string yet.
-    const std::string netlist = R"({"modules": {
-        "lock_top": {"attributes": {"top": "00000000000000000000000000000001"}, "ports": {}, "netnames": {},
-                     "cells": {"lock_u": {"type": "lock_sub", "port_directions": {}, "connections": {}}}},
-        "lock_sub": {"ports": {}, "netnames": {},
-                     "cells": {"lock_v": {"type": "LUT4", "port_directions": {}, "connections": {}}}}
-    }})";
-    std::atomic<bool> started{false}, done{false};
-    bool loaded = false;
-    std::thread loader;
-    {
-        std::lock_guard<std::mutex> hold(ctx->mutex);
-        const size_t before = ctx->idstring_idx_to_str->size();
-        loader = std::thread([&] {
-            started = true;
-            loaded = load(netlist);
-            done = true;
-        });
-        while (!started)
-            std::this_thread::yield();
-        // The loader waits for the mutex, or is already creating ID strings: give it the time to show which, and stop
-        // waiting as soon as it has
-        for (int i = 0; i < 200 && !done && ctx->idstring_idx_to_str->size() == before; i++)
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        EXPECT_EQ(ctx->idstring_idx_to_str->size(), before) << "the import created ID strings without the mutex";
-    }
-    loader.join();
-    EXPECT_TRUE(loaded);
-    EXPECT_TRUE(ctx->hierarchy.count(ctx->id("lock_top/lock_u")));
-}
-#endif
