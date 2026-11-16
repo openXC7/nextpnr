@@ -17,7 +17,11 @@
  *
  */
 
+#include <atomic>
+#include <chrono>
+#include <mutex>
 #include <sstream>
+#include <thread>
 #include "command.h"
 #include "gtest/gtest.h"
 #include "json_frontend.h"
@@ -152,3 +156,40 @@ TEST_F(XilinxJsonFrontendTest, a_module_instantiated_more_than_once_is_not_recur
         EXPECT_TRUE(links.at(ctx->id(l.instance)) == ctx->id(l.child)) << l.parent << "/" << l.instance;
     }
 }
+
+#ifndef NPNR_DISABLE_THREADS
+TEST_F(XilinxJsonFrontendTest, the_import_creates_no_id_string_before_it_holds_the_mutex_of_the_context)
+{
+    // The ID strings of a Context are not synchronised. The GUI and the Python API use them from other threads under
+    // the mutex of the Context, so a load on another thread must not create an ID string before it holds that mutex.
+    // None of the names of this netlist is an ID string yet.
+    const std::string netlist = R"({"modules": {
+        "lock_top": {"attributes": {"top": "00000000000000000000000000000001"}, "ports": {}, "netnames": {},
+                     "cells": {"lock_u": {"type": "lock_sub", "port_directions": {}, "connections": {}}}},
+        "lock_sub": {"ports": {}, "netnames": {},
+                     "cells": {"lock_v": {"type": "LUT4", "port_directions": {}, "connections": {}}}}
+    }})";
+    std::atomic<bool> started{false}, done{false};
+    bool loaded = false;
+    std::thread loader;
+    {
+        std::lock_guard<std::mutex> hold(ctx->mutex);
+        const size_t before = ctx->idstring_idx_to_str->size();
+        loader = std::thread([&] {
+            started = true;
+            loaded = load(netlist);
+            done = true;
+        });
+        while (!started)
+            std::this_thread::yield();
+        // The loader waits for the mutex, or is already creating ID strings: give it the time to show which, and stop
+        // waiting as soon as it has
+        for (int i = 0; i < 200 && !done && ctx->idstring_idx_to_str->size() == before; i++)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        EXPECT_EQ(ctx->idstring_idx_to_str->size(), before) << "the import created ID strings without the mutex";
+    }
+    loader.join();
+    EXPECT_TRUE(loaded);
+    EXPECT_TRUE(ctx->hierarchy.count(ctx->id("lock_top/lock_u")));
+}
+#endif

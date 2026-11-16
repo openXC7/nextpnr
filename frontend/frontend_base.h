@@ -126,6 +126,13 @@ template <typename FrontendType> struct GenericFrontend
     GenericFrontend(Context *ctx, const FrontendType &impl, bool split_io) : ctx(ctx), impl(impl), split_io(split_io) {}
     void operator()()
     {
+#ifndef NPNR_DISABLE_THREADS
+        // The ID strings of a Context are not synchronised, and the GUI and the Python API use them from other
+        // threads under this mutex, so everything that touches them has to be under it too, from the first name that
+        // find_top_module() creates
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+#endif
+
         // Find which module is top
         find_top_module();
         // Importing flattens the hierarchy, which never ends if a module instantiates itself: look for that before
@@ -136,10 +143,6 @@ template <typename FrontendType> struct GenericFrontend
         m.is_toplevel = true;
         m.prefix = "";
         m.path = top;
-
-#ifndef NPNR_DISABLE_THREADS
-        std::lock_guard<std::mutex> lock(ctx->mutex);
-#endif
 
         ctx->top_module = top;
         // Do the actual import, starting from the top level module
