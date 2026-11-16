@@ -682,7 +682,9 @@ static int setup_multicycle(const Context *ctx, IdString cell, IdString clock)
     delay_t limit = std::numeric_limits<delay_t>::max() / 4;
     if (period > 0 && cycles - 1 > limit / period)
         cycles = 1 + int64_t(limit / period);
-    return int(cycles);
+    // N can still be beyond the range of int when the period is not positive: the residue modulo 2^32, as the plain
+    // conversion has always given, but defined
+    return wrap_to_signed<int>(static_cast<unsigned>(cycles));
 }
 
 void TimingAnalyser::walk_backward()

@@ -184,8 +184,22 @@ TEST(DelayWrapTest, the_histogram_slack_of_a_wrapped_sentinel_is_in_range)
 
 TEST(DelayWrapTest, scale_delay_takes_a_multicycle_count_beyond_the_range_of_int)
 {
-    // 2 * (N - 1) + h for N = 2^31 does not fit an int, and it is not the period that bounds N when the period is 0
+    // 2 * (N - 1) + h for N = 2^31 does not fit an int, and it is not the period that bounds N when the period is 0.
+    // The denominator is 2^32 here, which an int would turn into 0
     const int64_t n = int64_t{1} << 31;
-    EXPECT_EQ(scale_delay<int32_t>(5000, 0, 2, 2 + 2 * (n - 1)), 0);
-    EXPECT_EQ(scale_delay<int32_t>(kMax, 0, 2, 2 + 2 * (n - 1)), 0);
+    const int64_t denominator = 2 + 2 * (n - 1);
+    ASSERT_EQ(denominator, int64_t{1} << 32);
+    EXPECT_EQ(scale_delay<int32_t>(kMax, 0, 3, denominator), 1);      // 2147483647 * 3 / 2^32 = 1.49
+    EXPECT_EQ(scale_delay<int32_t>(kMax, 0, 2000, denominator), 999); // 2147483647 * 2000 / 2^32 = 999.99
+    EXPECT_EQ(scale_delay<int32_t>(kMin, 0, 2000, denominator), -1000);
+    EXPECT_EQ(scale_delay<int32_t>(5000, 0, 2, denominator), 0);
+}
+
+TEST(DelayWrapTest, a_64_bit_count_narrowed_to_int_gives_the_residue_of_the_plain_conversion)
+{
+    // setup_multicycle() returns its count through wrap_to_signed<int>(unsigned): the value that the plain conversion
+    // of the 64-bit count has always given, but defined
+    for (int64_t cycles : {int64_t{1}, int64_t{kMax}, int64_t{1} << 31, (int64_t{1} << 32) + 5, int64_t{3} << 31,
+                           std::numeric_limits<int64_t>::max()})
+        EXPECT_EQ(wrap_to_signed<int>(static_cast<unsigned>(cycles)), static_cast<int>(cycles)) << cycles;
 }
