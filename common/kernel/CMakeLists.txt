@@ -16,6 +16,7 @@ target_sources(nextpnr_kernel PUBLIC
     command.h
     context.cc
     context.h
+    delay_wrap.h
     design_utils.cc
     design_utils.h
     deterministic_rng.h

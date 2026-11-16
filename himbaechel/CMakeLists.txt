@@ -17,6 +17,7 @@ set(HIMBAECHEL_SOURCES
 
 set(HIMBAECHEL_TEST_SOURCES
   test_main.cc
+  delay_wrap_test.cc
 )
 
 if (HIMBAECHEL_SPLIT)

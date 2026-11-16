@@ -26,52 +26,13 @@
 #include <deque>
 #include <limits>
 #include <map>
-#include <type_traits>
 #include <utility>
+#include "delay_wrap.h"
 #include "util.h"
 
 NEXTPNR_NAMESPACE_BEGIN
 
 namespace {
-// Arrival and required times that nothing has set yet are (INT_MAX, INT_MIN), and walk_forward()/walk_backward() add
-// delays to them as well. The wrapped sum is what the analysis has always used for these entries, so keep it, but
-// compute it without undefined or implementation-defined behaviour: the sum is taken modulo 2^N in unsigned arithmetic
-// (a signed overflow is undefined), and the residue is mapped back to the signed range explicitly (converting an
-// out-of-range unsigned value is implementation-defined before C++20).
-template <typename T> T wrap_to_signed(std::make_unsigned_t<T> value)
-{
-    using U = std::make_unsigned_t<T>;
-    // The wrapped values only exist if the signed type has as many values as the unsigned one, which is two's
-    // complement (the only one that C++20 allows, and the only one in use). Other representations do not compile
-    static_assert(std::numeric_limits<T>::min() == -std::numeric_limits<T>::max() - 1,
-                  "delay_t must be two's complement");
-    constexpr U max = static_cast<U>(std::numeric_limits<T>::max());
-    // [0, max] is the same number; [max + 1, 2^N - 1] stands for the negative numbers min .. -1
-    if (value <= max)
-        return static_cast<T>(value);
-    return static_cast<T>(value - max - 1) + std::numeric_limits<T>::min();
-}
-
-template <typename T> T wrap_add(T a, T b)
-{
-    if constexpr (std::is_integral_v<T>) {
-        using U = std::make_unsigned_t<T>;
-        return wrap_to_signed<T>(static_cast<U>(static_cast<U>(a) + static_cast<U>(b)));
-    } else {
-        return a + b;
-    }
-}
-
-template <typename T> T wrap_sub(T a, T b)
-{
-    if constexpr (std::is_integral_v<T>) {
-        using U = std::make_unsigned_t<T>;
-        return wrap_to_signed<T>(static_cast<U>(static_cast<U>(a) - static_cast<U>(b)));
-    } else {
-        return a - b;
-    }
-}
-
 DelayPair add_delay(const DelayPair &time, const DelayPair &delay)
 {
     return DelayPair(wrap_add(time.min_delay, delay.min_delay), wrap_add(time.max_delay, delay.max_delay));
@@ -80,6 +41,20 @@ DelayPair add_delay(const DelayPair &time, const DelayPair &delay)
 DelayPair subtract_delay(const DelayPair &time, const DelayPair &delay)
 {
     return DelayPair(wrap_sub(time.min_delay, delay.min_delay), wrap_sub(time.max_delay, delay.max_delay));
+}
+
+// What the setup check makes of the arrival and required times at a port: the latest arrival, minus the earliest
+// required time, plus the offset between the clocks of the two domains. The setup slack is what that leaves of the
+// period
+delay_t setup_path_delay(const DelayPair &arrival, const DelayPair &required, delay_t clock_to_clock)
+{
+    return wrap_add(wrap_sub(arrival.maxDelay(), required.minDelay()), clock_to_clock);
+}
+
+// and the hold check: the earliest arrival, minus the latest required time, plus the offset between the clocks
+delay_t hold_path_slack(const DelayPair &arrival, const DelayPair &required, delay_t clock_to_clock)
+{
+    return wrap_add(wrap_sub(arrival.minDelay(), required.maxDelay()), clock_to_clock);
 }
 } // namespace
 
@@ -796,7 +771,7 @@ dict<domain_id_t, delay_t> TimingAnalyser::max_delay_by_domain_pairs()
                     clock_to_clock = clock_delays.at(clocks);
                 }
 
-                auto delay = arr.value.maxDelay() - req.value.minDelay() + clock_to_clock;
+                auto delay = setup_path_delay(arr.value, req.value, clock_to_clock);
 
                 // If domains are unrelated or not the same clock we need to make sure
                 // to remove the clock delays from the arrival and required times
@@ -866,12 +841,13 @@ void TimingAnalyser::compute_slack()
 
             auto &arr = pd.arrival.at(dp.key.launch);
             auto &req = pd.required.at(dp.key.capture);
-            pdp.second.setup_slack = 0 - (arr.value.maxDelay() - req.value.minDelay() + clock_to_clock);
+            pdp.second.setup_slack = wrap_sub(delay_t(0), setup_path_delay(arr.value, req.value, clock_to_clock));
             if (!setup_only)
-                pdp.second.hold_slack = arr.value.minDelay() - req.value.maxDelay() + clock_to_clock;
+                pdp.second.hold_slack = hold_path_slack(arr.value, req.value, clock_to_clock);
             pdp.second.max_path_length = arr.path_length + req.path_length;
             if (dp.key.launch == dp.key.capture)
-                pd.worst_setup_slack = std::min(pd.worst_setup_slack, dp.period.minDelay() + pdp.second.setup_slack);
+                pd.worst_setup_slack =
+                        std::min(pd.worst_setup_slack, wrap_add(dp.period.minDelay(), pdp.second.setup_slack));
             dp.worst_setup_slack = std::min(dp.worst_setup_slack, pdp.second.setup_slack);
             if (!setup_only) {
                 pd.worst_hold_slack = std::min(pd.worst_hold_slack, pdp.second.hold_slack);
@@ -891,8 +867,8 @@ void TimingAnalyser::compute_criticality()
             if (domains.at(dp.key.launch).key.is_async() || domains.at(dp.key.capture).key.is_async())
                 continue;
 
-            float crit =
-                    1.0f - (float(pdp.second.setup_slack) - float(dp.worst_setup_slack)) / float(-dp.worst_setup_slack);
+            float crit = 1.0f - (float(pdp.second.setup_slack) - float(dp.worst_setup_slack)) /
+                                        float(wrap_sub(delay_t(0), dp.worst_setup_slack));
             crit = std::min(crit, 1.0f);
             crit = std::max(crit, 0.0f);
             pdp.second.criticality = crit;
@@ -1300,7 +1276,7 @@ void TimingAnalyser::build_slack_histogram_report()
                     if (launch.edge != capture.edge)
                         clk_period = clk_period / 2;
 
-                    delay_t delay = arr.second.value.maxDelay() - req.second.value.minDelay();
+                    delay_t delay = setup_path_delay(arr.second.value, req.second.value, 0);
                     delay_t slack = clk_period - delay;
 
                     int slack_ps = ctx->getDelayNS(slack) * 1000;
@@ -1347,7 +1323,7 @@ std::vector<CriticalPath> TimingAnalyser::get_min_delay_violations()
                     clock_to_clock = clock_delays.at(clocks);
                 }
 
-                auto hold_slack = arr.value.minDelay() - req.value.maxDelay() + clock_to_clock;
+                auto hold_slack = hold_path_slack(arr.value, req.value, clock_to_clock);
 
                 if (hold_slack <= 0) {
                     auto report = build_critical_path_report(dom_pair_id, ep.first, false);
