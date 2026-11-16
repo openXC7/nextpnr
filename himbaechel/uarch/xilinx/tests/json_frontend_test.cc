@@ -87,4 +87,15 @@ TEST_F(XilinxJsonFrontendTest, a_module_instantiated_more_than_once_is_not_recur
     for (const char *path : {"top", "top/u1", "top/u1/w", "top/u2", "top/u2/w"})
         EXPECT_TRUE(ctx->hierarchy.count(ctx->id(path))) << path;
     expect_links_resolve();
+    // and every submodule is linked from its parent, under the name of the instance
+    struct Link
+    {
+        const char *parent, *instance, *child;
+    };
+    for (const Link &l : {Link{"top", "u1", "top/u1"}, Link{"top", "u2", "top/u2"}, Link{"top/u1", "w", "top/u1/w"},
+                          Link{"top/u2", "w", "top/u2/w"}}) {
+        const auto &links = ctx->hierarchy.at(ctx->id(l.parent)).hier_cells;
+        ASSERT_TRUE(links.count(ctx->id(l.instance))) << l.parent << " has no link for " << l.instance;
+        EXPECT_TRUE(links.at(ctx->id(l.instance)) == ctx->id(l.child)) << l.parent << "/" << l.instance;
+    }
 }
