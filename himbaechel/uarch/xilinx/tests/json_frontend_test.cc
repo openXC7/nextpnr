@@ -102,6 +102,27 @@ TEST_F(XilinxJsonFrontendTest, a_cycle_at_the_end_of_a_very_deep_hierarchy_is_an
     EXPECT_THROW(load(netlist), log_execution_error_exception);
 }
 
+TEST_F(XilinxJsonFrontendTest, a_module_with_very_many_instances_of_one_module_loads)
+{
+    // The check lists a module type once per module, however many cells use it. The test only shows that such a
+    // netlist loads and is linked completely: the memory of the check is not asserted
+    const int instances = 200000;
+    std::string cells;
+    for (int i = 0; i < instances; i++)
+        cells += std::string(i ? "," : "") + "\"u" + std::to_string(i) +
+                 "\": {\"type\": \"sub\", \"port_directions\": {}, \"connections\": {}}";
+    ASSERT_TRUE(load(R"({"modules": {
+        "top": {"attributes": {"top": "00000000000000000000000000000001"}, "ports": {}, "netnames": {},
+                "cells": {)" +
+                     cells + R"(}},
+        "sub": {"ports": {}, "cells": {}, "netnames": {}}
+    }})"));
+    EXPECT_EQ(ctx->hierarchy.at(ctx->id("top")).hier_cells.size(), size_t(instances));
+    EXPECT_TRUE(ctx->hierarchy.count(ctx->id("top/u0")));
+    EXPECT_TRUE(ctx->hierarchy.count(ctx->id("top/u" + std::to_string(instances - 1))));
+    expect_links_resolve();
+}
+
 TEST_F(XilinxJsonFrontendTest, the_names_in_the_error_of_a_recursive_module_are_escaped)
 {
     // A module name with a newline, an escape sequence, a C1 control (U+0085), a line separator (U+2028) and a

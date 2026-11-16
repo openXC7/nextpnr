@@ -259,13 +259,14 @@ template <typename FrontendType> struct GenericFrontend
     // import would recurse until the stack is exhausted. Look for such a cycle among the modules that the import
     // reaches (the cells of the top module, and of the modules below it, whose type is a module that is not a box)
     // before anything is imported. The walk goes by the names of the modules, creates no ID string, and keeps its path
-    // in a vector, not on the stack, so that the depth of the hierarchy does not limit it
+    // in a vector, not on the stack, so that the depth of the hierarchy does not limit it. A frame of the path lists
+    // every module type once, with its first cell, so a module with very many cells does not make a copy of each
     void check_for_recursive_instantiation(const std::string &top_module)
     {
         struct Frame
         {
             std::string module;
-            std::vector<std::pair<std::string, std::string>> submodules; // the cell name and the module of each
+            std::vector<std::pair<std::string, std::string>> submodules; // a module type and its first cell
             size_t next = 0;
         };
         std::unordered_set<std::string> in_progress, checked;
@@ -273,10 +274,11 @@ template <typename FrontendType> struct GenericFrontend
         auto enter = [&](const std::string &module) {
             Frame frame;
             frame.module = module;
+            std::unordered_set<std::string> listed;
             impl.foreach_cell(mod_refs.at(module), [&](const std::string &cellname, const cell_dat_t &cd) {
                 std::string type = impl.get_cell_type(cd);
-                if (mod_refs.count(type) && !box_modules.count(type)) // else imported as a leaf cell
-                    frame.submodules.emplace_back(cellname, type);
+                if (mod_refs.count(type) && !box_modules.count(type) && listed.insert(type).second) // else a leaf cell
+                    frame.submodules.emplace_back(type, cellname);
             });
             in_progress.insert(module);
             path.push_back(std::move(frame));
@@ -290,8 +292,8 @@ template <typename FrontendType> struct GenericFrontend
                 path.pop_back();
                 continue;
             }
-            const std::string cellname = frame.submodules.at(frame.next).first;
-            const std::string type = frame.submodules.at(frame.next).second;
+            const std::string type = frame.submodules.at(frame.next).first;
+            const std::string cellname = frame.submodules.at(frame.next).second;
             frame.next++;
             if (in_progress.count(type))
                 log_error("Module '%s' instantiates itself (cell '%s' in module '%s')\n", printable_name(type).c_str(),
