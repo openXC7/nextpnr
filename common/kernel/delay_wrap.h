@@ -82,8 +82,8 @@ template <typename T> T wrap_neg(T a) { return wrap_sub(T(0), a); }
 
 // (value + offset) * numerator / denominator, for scaling a delay by a ratio. Exact in 64 bits and clamped to the
 // range of T, where the plain expression overflows for a delay that is a wrapped sentinel. The values of an integer T
-// have to be narrower than 64 bits.
-template <typename T> T scale_delay(T value, T offset, int numerator, int denominator)
+// have to be narrower than 64 bits, and the numerator small (|value + offset| * |numerator| has to fit 64 bits).
+template <typename T> T scale_delay(T value, T offset, int64_t numerator, int64_t denominator)
 {
     if constexpr (std::is_integral_v<T>) {
         static_assert(sizeof(T) < sizeof(int64_t), "scale_delay() computes in 64 bits");
@@ -110,6 +110,11 @@ template <typename T, typename F> T saturating_cast(F value)
         return static_cast<T>(value);
     }
 }
+
+// The slack of a path against a period, as the slack histogram has always taken it: the delay is subtracted from the
+// period in float (a delay of more than 2^24 ticks is rounded first), and the result is converted to the delay type,
+// to its smallest or largest value where it is out of range.
+template <typename T> T slack_from_period(float period, T delay) { return saturating_cast<T>(period - delay); }
 
 NEXTPNR_NAMESPACE_END
 

@@ -804,7 +804,7 @@ dict<domain_id_t, delay_t> TimingAnalyser::max_delay_by_domain_pairs()
                 if (mcp > 1) {
                     delay_t period = ctx->nets.at(capture.key.clock)->clkconstr->period.minDelay();
                     int h = domains.at(launch_id).key.edge == capture.key.edge ? 2 : 1;
-                    delay = scale_delay(delay, delay_t(period * (mcp - 1)), h, h + 2 * (mcp - 1));
+                    delay = scale_delay(delay, delay_t(period * (mcp - 1)), h, int64_t(h) + 2 * (int64_t(mcp) - 1));
                 }
 
                 if (!domain_delay.count(dp) || domain_delay.at(dp) < delay) {
@@ -1278,7 +1278,7 @@ void TimingAnalyser::build_slack_histogram_report()
 
                     delay_t delay = setup_path_delay(arr.second.value, req.second.value, 0);
                     // a delay that is a wrapped sentinel is anywhere in the range of delay_t, and so is the slack
-                    delay_t slack = saturating_cast<delay_t>(clk_period - delay);
+                    delay_t slack = slack_from_period(clk_period, delay);
 
                     int slack_ps = saturating_cast<int>(ctx->getDelayNS(slack) * 1000);
                     slack_histogram[slack_ps]++;

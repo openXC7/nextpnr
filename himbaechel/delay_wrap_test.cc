@@ -153,11 +153,27 @@ TEST(DelayWrapTest, scale_delay_does_not_overflow_for_a_wrapped_sentinel)
 
 TEST(DelayWrapTest, the_histogram_slack_is_still_subtracted_in_float)
 {
-    // build_slack_histogram_report() subtracts a delay from the period, which is a float: the delay is rounded to float
-    // first, and the slack stays what it always was. 16777217 is not a float, so against a period of 16777216 the slack
+    // The slack histogram takes its slack from slack_from_period(): the delay is rounded to float before it is
+    // subtracted from the period, as it always was. 16777217 is not a float, so against a period of 16777216 the slack
     // is 0 (a subtraction in double would give -1)
-    const float period = 16777216.0f;
-    const int32_t delay = 16777217;
-    EXPECT_EQ(saturating_cast<int32_t>(period - delay), 0);
-    EXPECT_EQ(saturating_cast<int32_t>(period - (delay + 1)), -2); // 16777218 is a float
+    EXPECT_EQ(slack_from_period<int32_t>(16777216.0f, 16777217), 0);
+    EXPECT_EQ(slack_from_period<int32_t>(16777216.0f, 16777218), -2);
+    EXPECT_EQ(slack_from_period<int32_t>(10000.0f, 3000), 7000);
+    EXPECT_EQ(slack_from_period<int32_t>(5000.5f, 3000), 2000); // truncated, as in a conversion
+}
+
+TEST(DelayWrapTest, the_histogram_slack_of_a_wrapped_sentinel_is_in_range)
+{
+    EXPECT_EQ(slack_from_period<int32_t>(10000.0f, kMin + 599), kMax);
+    EXPECT_EQ(slack_from_period<int32_t>(10000.0f, kMin), kMax);
+    EXPECT_EQ(slack_from_period<int32_t>(-10000.0f, kMax), kMin);
+    EXPECT_FLOAT_EQ(slack_from_period<float>(10000.0f, 3000.0f), 7000.0f);
+}
+
+TEST(DelayWrapTest, scale_delay_takes_a_multicycle_count_beyond_the_range_of_int)
+{
+    // 2 * (N - 1) + h for N = 2^31 does not fit an int, and it is not the period that bounds N when the period is 0
+    const int64_t n = int64_t{1} << 31;
+    EXPECT_EQ(scale_delay<int32_t>(5000, 0, 2, 2 + 2 * (n - 1)), 0);
+    EXPECT_EQ(scale_delay<int32_t>(kMax, 0, 2, 2 + 2 * (n - 1)), 0);
 }
