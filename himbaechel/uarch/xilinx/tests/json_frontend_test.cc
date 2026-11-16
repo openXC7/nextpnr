@@ -104,28 +104,26 @@ TEST_F(XilinxJsonFrontendTest, a_cycle_at_the_end_of_a_very_deep_hierarchy_is_an
 
 TEST_F(XilinxJsonFrontendTest, the_names_in_the_error_of_a_recursive_module_are_escaped)
 {
-    // names with a newline, a terminal escape sequence, a bell, a C1 control (U+0085) and a Unicode line separator
-    // (U+2028) must not reach the log as they are: a name could forge a line of the log, or move the cursor of a
-    // terminal
+    // A module name with a newline, an escape sequence, a C1 control (U+0085), a line separator (U+2028) and a
+    // backslash, and a cell name with a bell: nothing that is not printable ASCII reaches the log as it is, and the
+    // backslash is doubled, so that an escape in the message is never a name that spells one
     std::string logged;
     log_write_function = [&](std::string text) { logged += text; };
     EXPECT_THROW(load(R"({"modules": {
         "top": {"attributes": {"top": "00000000000000000000000000000001"}, "ports": {}, "netnames": {},
-                "cells": {"u": {"type": "evil\nERROR: forged\u001b[2J\u0085\u2028", "port_directions": {},
+                "cells": {"u": {"type": "a\nb\u001b[2J\u0085\u2028\\x", "port_directions": {},
                                "connections": {}}}},
-        "evil\nERROR: forged\u001b[2J\u0085\u2028": {"ports": {}, "netnames": {},
-                "cells": {"v\u0007": {"type": "evil\nERROR: forged\u001b[2J\u0085\u2028", "port_directions": {},
+        "a\nb\u001b[2J\u0085\u2028\\x": {"ports": {}, "netnames": {},
+                "cells": {"v\u0007": {"type": "a\nb\u001b[2J\u0085\u2028\\x", "port_directions": {},
                                       "connections": {}}}}
     }})"),
                  log_execution_error_exception);
     log_write_function = nullptr;
-    EXPECT_NE(logged.find("instantiates itself"), std::string::npos);
-    EXPECT_NE(logged.find("evil\\x0aERROR: forged\\x1b[2J\\xc2\\x85\\xe2\\x80\\xa8"), std::string::npos) << logged;
-    EXPECT_NE(logged.find("(cell 'v\\x07'"), std::string::npos) << logged;
+    const std::string name = "a\\x0ab\\x1b[2J\\xc2\\x85\\xe2\\x80\\xa8\\\\x";
+    const std::string message =
+            "ERROR: Module '" + name + "' instantiates itself (cell 'v\\x07' in module '" + name + "')\n";
+    EXPECT_NE(logged.find(message), std::string::npos) << logged;
     EXPECT_EQ(logged.find('\x1b'), std::string::npos);
-    EXPECT_EQ(logged.find("\xc2\x85"), std::string::npos);
-    EXPECT_EQ(logged.find("\xe2\x80\xa8"), std::string::npos);
-    EXPECT_EQ(logged.find("\nERROR: forged"), std::string::npos);
 }
 
 TEST_F(XilinxJsonFrontendTest, a_very_long_name_is_cut_in_the_error_of_a_recursive_module)
