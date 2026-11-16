@@ -841,7 +841,7 @@ void TimingAnalyser::compute_slack()
 
             auto &arr = pd.arrival.at(dp.key.launch);
             auto &req = pd.required.at(dp.key.capture);
-            pdp.second.setup_slack = wrap_neg(setup_path_delay(arr.value, req.value, clock_to_clock));
+            pdp.second.setup_slack = wrap_sub(delay_t(0), setup_path_delay(arr.value, req.value, clock_to_clock));
             if (!setup_only)
                 pdp.second.hold_slack = hold_path_slack(arr.value, req.value, clock_to_clock);
             pdp.second.max_path_length = arr.path_length + req.path_length;

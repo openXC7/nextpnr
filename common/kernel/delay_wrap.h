@@ -78,7 +78,16 @@ template <typename T> T wrap_sub(T a, T b)
     }
 }
 
-template <typename T> T wrap_neg(T a) { return wrap_sub(T(0), a); }
+// The negation, as the unary minus does it: modulo 2^N for an integer, and -a for a floating-point value, where the
+// sign of a zero matters (-(+0.0f) is -0.0f, and a division by it is not the same as a division by 0.0f - 0.0f)
+template <typename T> T wrap_neg(T a)
+{
+    if constexpr (std::is_integral_v<T>) {
+        return wrap_sub(T(0), a);
+    } else {
+        return -a;
+    }
+}
 
 // (value + offset) * numerator / denominator, for scaling a delay by a ratio. Exact in 64 bits and clamped to the
 // range of T, where the plain expression overflows for a delay that is a wrapped sentinel. The values of an integer T

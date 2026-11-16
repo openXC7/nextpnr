@@ -17,6 +17,7 @@
  *
  */
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include "delay_wrap.h"
@@ -131,6 +132,17 @@ TEST(DelayWrapTest, wrap_neg_negates_and_leaves_the_smallest_delay_alone)
     EXPECT_EQ(wrap_neg<int32_t>(kMax), kMin + 1);
     EXPECT_EQ(wrap_neg<int32_t>(kMin), kMin);
     EXPECT_FLOAT_EQ(wrap_neg<float>(2.5f), -2.5f);
+}
+
+TEST(DelayWrapTest, wrap_neg_of_a_floating_point_zero_keeps_the_sign_that_the_unary_minus_gives)
+{
+    // compute_criticality() divides by the negated worst slack: -(+0.0f) is -0.0f, a division by it gives -infinity and
+    // not +infinity, and a negation that came out as +0.0f would turn the criticality of a path with positive slack
+    // from the largest into the smallest
+    EXPECT_TRUE(std::signbit(wrap_neg<float>(0.0f)));
+    EXPECT_FALSE(std::signbit(wrap_neg<float>(-0.0f)));
+    EXPECT_EQ(5.0f / wrap_neg<float>(0.0f), -std::numeric_limits<float>::infinity());
+    EXPECT_EQ(wrap_neg<int32_t>(0), 0);
 }
 
 TEST(DelayWrapTest, scale_delay_is_the_plain_expression_where_that_does_not_overflow)
