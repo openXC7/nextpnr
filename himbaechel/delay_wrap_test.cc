@@ -81,3 +81,72 @@ TEST(DelayWrapTest, floating_point_delays_are_added_as_they_are)
     EXPECT_FLOAT_EQ(wrap_sub<float>(1.0f, 0.25f), 0.75f);
     EXPECT_DOUBLE_EQ(wrap_sub<double>(0.0, 0.5), -0.5);
 }
+
+// The slack that follows from a time that is a wrapped sentinel can be out of the range of delay_t (and of int, in
+// picoseconds) even though it is a number: converting it has to give the nearest value in range, not an undefined one.
+TEST(DelayWrapTest, a_floating_point_value_in_range_is_truncated_as_in_a_conversion)
+{
+    EXPECT_EQ(saturating_cast<int32_t>(1234.9), 1234);
+    EXPECT_EQ(saturating_cast<int32_t>(-5.5), -5);
+    EXPECT_EQ(saturating_cast<int32_t>(0.0f), 0);
+    EXPECT_EQ(saturating_cast<int32_t>(static_cast<double>(kMax)), kMax);
+    EXPECT_EQ(saturating_cast<int32_t>(static_cast<double>(kMin)), kMin);
+    EXPECT_EQ(saturating_cast<int32_t>(2147483520.0f), 2147483520);
+}
+
+TEST(DelayWrapTest, a_floating_point_value_out_of_range_is_saturated)
+{
+    EXPECT_EQ(saturating_cast<int32_t>(3.0e9), kMax);
+    EXPECT_EQ(saturating_cast<int32_t>(-3.0e9), kMin);
+    EXPECT_EQ(saturating_cast<int32_t>(2147483648.0f), kMax); // float(INT32_MAX) rounds up to this
+    EXPECT_EQ(saturating_cast<int32_t>(-2147483904.0f), kMin);
+    EXPECT_EQ(saturating_cast<int32_t>(std::numeric_limits<double>::infinity()), kMax);
+    EXPECT_EQ(saturating_cast<int32_t>(-std::numeric_limits<double>::infinity()), kMin);
+    EXPECT_EQ(saturating_cast<int32_t>(std::numeric_limits<double>::quiet_NaN()), kMin);
+    EXPECT_EQ(saturating_cast<int64_t>(1.0e30), std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(saturating_cast<int16_t>(40000.0), std::numeric_limits<int16_t>::max());
+}
+
+TEST(DelayWrapTest, a_floating_point_target_takes_the_value_as_it_is)
+{
+    EXPECT_FLOAT_EQ(saturating_cast<float>(1.5), 1.5f);
+    EXPECT_DOUBLE_EQ(saturating_cast<double>(-2.25f), -2.25);
+}
+
+TEST(DelayWrapTest, wrap_to_signed_maps_the_residues_to_the_two_halves_of_the_range)
+{
+    EXPECT_EQ(wrap_to_signed<int32_t>(0u), 0);
+    EXPECT_EQ(wrap_to_signed<int32_t>(static_cast<uint32_t>(kMax)), kMax);
+    EXPECT_EQ(wrap_to_signed<int32_t>(static_cast<uint32_t>(kMax) + 1u), kMin);
+    EXPECT_EQ(wrap_to_signed<int32_t>(0xffffffffu), -1);
+    EXPECT_EQ(wrap_to_signed<int16_t>(0x8000u), std::numeric_limits<int16_t>::min());
+    EXPECT_EQ(wrap_to_signed<int64_t>(std::numeric_limits<uint64_t>::max()), -1);
+}
+
+TEST(DelayWrapTest, wrap_neg_negates_and_leaves_the_smallest_delay_alone)
+{
+    EXPECT_EQ(wrap_neg<int32_t>(1234), -1234);
+    EXPECT_EQ(wrap_neg<int32_t>(-1234), 1234);
+    EXPECT_EQ(wrap_neg<int32_t>(0), 0);
+    EXPECT_EQ(wrap_neg<int32_t>(kMax), kMin + 1);
+    EXPECT_EQ(wrap_neg<int32_t>(kMin), kMin);
+    EXPECT_FLOAT_EQ(wrap_neg<float>(2.5f), -2.5f);
+}
+
+TEST(DelayWrapTest, scale_delay_is_the_plain_expression_where_that_does_not_overflow)
+{
+    // (delay + (N - 1) periods) * h / (h + 2 * (N - 1)) for a path of 3000 ps, a period of 10000 ps, N = 2 and h = 2
+    EXPECT_EQ(scale_delay<int32_t>(3000, 10000, 2, 4), (3000 + 10000) * 2 / 4);
+    EXPECT_EQ(scale_delay<int32_t>(-3000, 10000, 1, 3), (-3000 + 10000) * 1 / 3);
+    EXPECT_EQ(scale_delay<int32_t>(0, 0, 2, 3), 0);
+    EXPECT_FLOAT_EQ(scale_delay<float>(3.0f, 1.0f, 3, 2), 6.0f);
+}
+
+TEST(DelayWrapTest, scale_delay_does_not_overflow_for_a_wrapped_sentinel)
+{
+    // the plain int expression overflows for both of these; exact in 64 bits, then clamped
+    EXPECT_EQ(scale_delay<int32_t>(kMin + 599, 10000, 2, 4),
+              static_cast<int32_t>((int64_t{kMin} + 599 + 10000) * 2 / 4));
+    EXPECT_EQ(scale_delay<int32_t>(kMax, 10000, 2, 1), kMax);
+    EXPECT_EQ(scale_delay<int32_t>(kMin, -10000, 2, 1), kMin);
+}

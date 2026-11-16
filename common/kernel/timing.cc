@@ -780,7 +780,7 @@ dict<domain_id_t, delay_t> TimingAnalyser::max_delay_by_domain_pairs()
                     for (auto &fanin : ep_port.cell_arcs) {
                         if (fanin.type == CellArc::SETUP) {
                             auto clock_delay = ports.at(CellPortKey(ep.first.cell, fanin.other_port)).route_delay;
-                            delay += clock_delay.minDelay();
+                            delay = wrap_add(delay, clock_delay.minDelay());
                         }
                     }
 
@@ -793,7 +793,7 @@ dict<domain_id_t, delay_t> TimingAnalyser::max_delay_by_domain_pairs()
                     for (auto &fanin : sp_port.cell_arcs) {
                         if (fanin.type == CellArc::CLK_TO_Q) {
                             auto clock_delay = ports.at(CellPortKey(sp.cell->name, fanin.other_port)).route_delay;
-                            delay -= clock_delay.maxDelay();
+                            delay = wrap_sub(delay, clock_delay.maxDelay());
                         }
                     }
                 }
@@ -804,7 +804,7 @@ dict<domain_id_t, delay_t> TimingAnalyser::max_delay_by_domain_pairs()
                 if (mcp > 1) {
                     delay_t period = ctx->nets.at(capture.key.clock)->clkconstr->period.minDelay();
                     int h = domains.at(launch_id).key.edge == capture.key.edge ? 2 : 1;
-                    delay = (delay + period * (mcp - 1)) * h / (h + 2 * (mcp - 1));
+                    delay = scale_delay(delay, delay_t(period * (mcp - 1)), h, h + 2 * (mcp - 1));
                 }
 
                 if (!domain_delay.count(dp) || domain_delay.at(dp) < delay) {
@@ -841,7 +841,7 @@ void TimingAnalyser::compute_slack()
 
             auto &arr = pd.arrival.at(dp.key.launch);
             auto &req = pd.required.at(dp.key.capture);
-            pdp.second.setup_slack = wrap_sub(delay_t(0), setup_path_delay(arr.value, req.value, clock_to_clock));
+            pdp.second.setup_slack = wrap_neg(setup_path_delay(arr.value, req.value, clock_to_clock));
             if (!setup_only)
                 pdp.second.hold_slack = hold_path_slack(arr.value, req.value, clock_to_clock);
             pdp.second.max_path_length = arr.path_length + req.path_length;
@@ -868,7 +868,7 @@ void TimingAnalyser::compute_criticality()
                 continue;
 
             float crit = 1.0f - (float(pdp.second.setup_slack) - float(dp.worst_setup_slack)) /
-                                        float(wrap_sub(delay_t(0), dp.worst_setup_slack));
+                                        float(wrap_neg(dp.worst_setup_slack));
             crit = std::min(crit, 1.0f);
             crit = std::max(crit, 0.0f);
             pdp.second.criticality = crit;
@@ -1277,9 +1277,10 @@ void TimingAnalyser::build_slack_histogram_report()
                         clk_period = clk_period / 2;
 
                     delay_t delay = setup_path_delay(arr.second.value, req.second.value, 0);
-                    delay_t slack = clk_period - delay;
+                    // a delay that is a wrapped sentinel is anywhere in the range of delay_t, and so is the slack
+                    delay_t slack = saturating_cast<delay_t>(double(clk_period) - double(delay));
 
-                    int slack_ps = ctx->getDelayNS(slack) * 1000;
+                    int slack_ps = saturating_cast<int>(ctx->getDelayNS(slack) * 1000);
                     slack_histogram[slack_ps]++;
                 }
             }

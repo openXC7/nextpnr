@@ -20,6 +20,8 @@
  */
 
 #include <algorithm>
+#include <cstdint>
+#include "delay_wrap.h"
 #include "log.h"
 #include "nextpnr.h"
 #include "util.h"
@@ -379,14 +381,17 @@ static void log_histogram(Context *ctx, TimingResult &result)
             max_slack = i.first;
     }
 
-    auto bin_size = std::max<unsigned>(1, ceil((max_slack - min_slack + 1) / float(num_bins)));
+    // The slack of a port whose times are wrapped sentinels is anywhere in the range of int, so the span of the slacks
+    // and the offset of a slack from the smallest one are taken in 64 bits
+    const int64_t span = int64_t(max_slack) - min_slack + 1;
+    auto bin_size = std::max<unsigned>(1, saturating_cast<unsigned>(ceil(span / double(num_bins))));
     std::vector<unsigned> bins(num_bins);
     unsigned max_freq = 0;
     for (const auto &i : result.slack_histogram) {
-        int bin_idx = int((i.first - min_slack) / bin_size);
+        int64_t bin_idx = (int64_t(i.first) - min_slack) / bin_size;
         if (bin_idx < 0)
             bin_idx = 0;
-        else if (bin_idx >= int(num_bins))
+        else if (bin_idx >= int64_t(num_bins))
             bin_idx = num_bins - 1;
         auto &bin = bins.at(bin_idx);
         bin += i.second;
@@ -399,7 +404,8 @@ static void log_histogram(Context *ctx, TimingResult &result)
     log_info(" legend: * represents %d endpoint(s)\n", max_freq / bar_width);
     log_info("         + represents [1,%d) endpoint(s)\n", max_freq / bar_width);
     for (unsigned i = 0; i < num_bins; ++i)
-        log_info("[%6d, %6d) |%s%c\n", min_slack + bin_size * i, min_slack + bin_size * (i + 1),
+        log_info("[%6lld, %6lld) |%s%c\n", (long long)(int64_t(min_slack) + int64_t(bin_size) * i),
+                 (long long)(int64_t(min_slack) + int64_t(bin_size) * (i + 1)),
                  std::string(bins[i] * bar_width / max_freq, '*').c_str(),
                  (bins[i] * bar_width) % max_freq > 0 ? '+' : ' ');
 }

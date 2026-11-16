@@ -20,6 +20,8 @@
 #ifndef DELAY_WRAP_H
 #define DELAY_WRAP_H
 
+#include <algorithm>
+#include <cstdint>
 #include <limits>
 #include <type_traits>
 
@@ -27,17 +29,21 @@
 
 NEXTPNR_NAMESPACE_BEGIN
 
-// Sums and differences of delays that wrap around instead of overflowing.
+// Arithmetic on delays that can be derived from the sentinels of the timing analysis.
 //
-// The timing analysis starts every arrival and required time at (INT_MAX, INT_MIN), "no time has reached this port
-// yet", and goes on adding delays to those, subtracting them from each other and negating the difference: for the
-// half of the times that the analysis does not update (the hold half, when only the setup analysis runs), for ports
-// that nothing reaches, and for what the sentinels turn into along a combinational loop. The wrapped value is what the
-// analysis has always used for these entries, and what the placers and routers read, so it is kept; but it is computed
-// without undefined or implementation-defined behaviour: the operation is done modulo 2^N on the unsigned type (a
-// signed overflow is undefined), and the residue is mapped back to the signed range explicitly (converting an
-// out-of-range unsigned value is implementation-defined before C++20). A floating-point delay has no sentinels to
-// overflow, and is taken as it is.
+// The contract. TimingAnalyser::reset_times() starts every arrival and required time at (INT_MAX, INT_MIN), "no time
+// has reached this port yet". The analysis goes on combining those with real times, and with each other: for the half
+// of the times that it does not update (the hold half, when only the setup analysis runs), for ports that nothing
+// reaches, and for what the sentinels turn into along a combinational loop (nextpnr times one with --force only).
+// What comes out is a number without a meaning, but it is what the placers, the routers and the reports have always
+// been given, so it is kept. What is required is that computing it is defined, and that is done in one way:
+//  - a sum, a difference or a negation of delays is wrap_add(), wrap_sub() or wrap_neg(): modulo 2^N on the unsigned
+//    type (a signed overflow is undefined), with the residue mapped back to the signed range explicitly by
+//    wrap_to_signed() (converting an out-of-range unsigned value is implementation-defined before C++20);
+//  - a delay scaled by a ratio, as the multicycle paths do, is scale_delay(): exact in 64 bits, clamped to the type;
+//  - a floating-point value converted to an integer, as the slack histogram does, is saturating_cast(): out of range
+//    becomes the smallest or the largest value (a plain conversion of those is undefined).
+// A floating-point delay (the generic architecture) has no sentinels to overflow, and is taken as it is.
 template <typename T> T wrap_to_signed(std::make_unsigned_t<T> value)
 {
     using U = std::make_unsigned_t<T>;
@@ -69,6 +75,39 @@ template <typename T> T wrap_sub(T a, T b)
         return wrap_to_signed<T>(static_cast<U>(static_cast<U>(a) - static_cast<U>(b)));
     } else {
         return a - b;
+    }
+}
+
+template <typename T> T wrap_neg(T a) { return wrap_sub(T(0), a); }
+
+// (value + offset) * numerator / denominator, for scaling a delay by a ratio. Exact in 64 bits and clamped to the
+// range of T, where the plain expression overflows for a delay that is a wrapped sentinel. The values of an integer T
+// have to be narrower than 64 bits.
+template <typename T> T scale_delay(T value, T offset, int numerator, int denominator)
+{
+    if constexpr (std::is_integral_v<T>) {
+        static_assert(sizeof(T) < sizeof(int64_t), "scale_delay() computes in 64 bits");
+        const int64_t scaled = (int64_t(value) + int64_t(offset)) * numerator / denominator;
+        return T(std::clamp<int64_t>(scaled, std::numeric_limits<T>::lowest(), std::numeric_limits<T>::max()));
+    } else {
+        return (value + offset) * numerator / denominator;
+    }
+}
+
+// A floating-point value converted to an integer type. Converting a value that is out of the range of the integer type
+// is undefined, and the slack that follows from a time that is a wrapped sentinel can be anywhere in the range of
+// delay_t and beyond: such a value becomes the smallest or the largest value of the type (NaN the smallest), and any
+// other value is truncated, as in a plain conversion. A floating-point target type takes the value as it is.
+template <typename T, typename F> T saturating_cast(F value)
+{
+    if constexpr (std::is_integral_v<T>) {
+        if (!(value > static_cast<F>(std::numeric_limits<T>::min())))
+            return std::numeric_limits<T>::min();
+        if (value >= static_cast<F>(std::numeric_limits<T>::max()))
+            return std::numeric_limits<T>::max();
+        return static_cast<T>(value);
+    } else {
+        return static_cast<T>(value);
     }
 }
 
