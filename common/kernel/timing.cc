@@ -41,6 +41,10 @@ namespace {
 template <typename T> T wrap_to_signed(std::make_unsigned_t<T> value)
 {
     using U = std::make_unsigned_t<T>;
+    // The wrapped values only exist if the signed type has as many values as the unsigned one, which is two's
+    // complement (the only one that C++20 allows, and the only one in use). Other representations do not compile
+    static_assert(std::numeric_limits<T>::min() == -std::numeric_limits<T>::max() - 1,
+                  "delay_t must be two's complement");
     constexpr U max = static_cast<U>(std::numeric_limits<T>::max());
     // [0, max] is the same number; [max + 1, 2^N - 1] stands for the negative numbers min .. -1
     if (value <= max)
