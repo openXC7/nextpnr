@@ -26,10 +26,46 @@
 #include <deque>
 #include <limits>
 #include <map>
+#include <type_traits>
 #include <utility>
 #include "util.h"
 
 NEXTPNR_NAMESPACE_BEGIN
+
+namespace {
+// Arrival and required times that nothing has set yet are (INT_MAX, INT_MIN), and walk_forward()/walk_backward() add
+// delays to them as well. The wrapped sum is what the analysis has always used for these entries, so keep it, but
+// compute it in unsigned arithmetic: the signed overflow is undefined behaviour.
+template <typename T> T wrap_add(T a, T b)
+{
+    if constexpr (std::is_integral_v<T>) {
+        using U = std::make_unsigned_t<T>;
+        return static_cast<T>(static_cast<U>(a) + static_cast<U>(b));
+    } else {
+        return a + b;
+    }
+}
+
+template <typename T> T wrap_sub(T a, T b)
+{
+    if constexpr (std::is_integral_v<T>) {
+        using U = std::make_unsigned_t<T>;
+        return static_cast<T>(static_cast<U>(a) - static_cast<U>(b));
+    } else {
+        return a - b;
+    }
+}
+
+DelayPair add_delay(const DelayPair &time, const DelayPair &delay)
+{
+    return DelayPair(wrap_add(time.min_delay, delay.min_delay), wrap_add(time.max_delay, delay.max_delay));
+}
+
+DelayPair subtract_delay(const DelayPair &time, const DelayPair &delay)
+{
+    return DelayPair(wrap_sub(time.min_delay, delay.min_delay), wrap_sub(time.max_delay, delay.max_delay));
+}
+} // namespace
 
 TimingAnalyser::TimingAnalyser(Context *ctx) : ctx(ctx)
 {
@@ -605,7 +641,7 @@ void TimingAnalyser::walk_forward()
                     for (auto &usr : net->users) {
                         CellPortKey usr_key(usr);
                         auto &usr_pd = ports.at(usr_key);
-                        auto next_arr = arr.second.value + usr_pd.route_delay;
+                        auto next_arr = add_delay(arr.second.value, usr_pd.route_delay);
                         set_arrival_time(usr_key, arr.first, next_arr, arr.second.path_length, p);
                     }
             } else if (pd.type == PORT_IN) {
@@ -614,7 +650,7 @@ void TimingAnalyser::walk_forward()
                     if (fanout.type != CellArc::COMBINATIONAL)
                         continue;
 
-                    auto next_arr = arr.second.value + fanout.value.delayPair();
+                    auto next_arr = add_delay(arr.second.value, fanout.value.delayPair());
                     set_arrival_time(CellPortKey(p.cell, fanout.other_port), arr.first, next_arr,
                                      arr.second.path_length + 1, p);
                 }
@@ -702,16 +738,16 @@ void TimingAnalyser::walk_backward()
                 NetInfo *net = port_info(p).net;
                 if (net != nullptr && net->driver.cell != nullptr)
                     set_required_time(CellPortKey(net->driver), req.first,
-                                      req.second.value - DelayPair(pd.route_delay.maxDelay()), req.second.path_length,
-                                      p);
+                                      subtract_delay(req.second.value, DelayPair(pd.route_delay.maxDelay())),
+                                      req.second.path_length, p);
             } else if (pd.type == PORT_OUT) {
                 // Output port : propagate delay back through cell, subtracting combinational delay
                 for (auto &fanin : pd.cell_arcs) {
                     if (fanin.type != CellArc::COMBINATIONAL)
                         continue;
                     set_required_time(CellPortKey(p.cell, fanin.other_port), req.first,
-                                      req.second.value - DelayPair(fanin.value.maxDelay()), req.second.path_length + 1,
-                                      p);
+                                      subtract_delay(req.second.value, DelayPair(fanin.value.maxDelay())),
+                                      req.second.path_length + 1, p);
                 }
             }
         }
