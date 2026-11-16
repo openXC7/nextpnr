@@ -35,12 +35,24 @@ NEXTPNR_NAMESPACE_BEGIN
 namespace {
 // Arrival and required times that nothing has set yet are (INT_MAX, INT_MIN), and walk_forward()/walk_backward() add
 // delays to them as well. The wrapped sum is what the analysis has always used for these entries, so keep it, but
-// compute it in unsigned arithmetic: the signed overflow is undefined behaviour.
+// compute it without undefined or implementation-defined behaviour: the sum is taken modulo 2^N in unsigned arithmetic
+// (a signed overflow is undefined), and the residue is mapped back to the signed range explicitly (converting an
+// out-of-range unsigned value is implementation-defined before C++20).
+template <typename T> T wrap_to_signed(std::make_unsigned_t<T> value)
+{
+    using U = std::make_unsigned_t<T>;
+    constexpr U max = static_cast<U>(std::numeric_limits<T>::max());
+    // [0, max] is the same number; [max + 1, 2^N - 1] stands for the negative numbers min .. -1
+    if (value <= max)
+        return static_cast<T>(value);
+    return static_cast<T>(value - max - 1) + std::numeric_limits<T>::min();
+}
+
 template <typename T> T wrap_add(T a, T b)
 {
     if constexpr (std::is_integral_v<T>) {
         using U = std::make_unsigned_t<T>;
-        return static_cast<T>(static_cast<U>(a) + static_cast<U>(b));
+        return wrap_to_signed<T>(static_cast<U>(static_cast<U>(a) + static_cast<U>(b)));
     } else {
         return a + b;
     }
@@ -50,7 +62,7 @@ template <typename T> T wrap_sub(T a, T b)
 {
     if constexpr (std::is_integral_v<T>) {
         using U = std::make_unsigned_t<T>;
-        return static_cast<T>(static_cast<U>(a) - static_cast<U>(b));
+        return wrap_to_signed<T>(static_cast<U>(static_cast<U>(a) - static_cast<U>(b)));
     } else {
         return a - b;
     }
