@@ -104,23 +104,27 @@ TEST_F(XilinxJsonFrontendTest, a_cycle_at_the_end_of_a_very_deep_hierarchy_is_an
 
 TEST_F(XilinxJsonFrontendTest, the_names_in_the_error_of_a_recursive_module_are_escaped)
 {
-    // names with a newline, a terminal escape sequence and a bell must not reach the log as they are: a name could
-    // forge a line of the log, or move the cursor of a terminal
+    // names with a newline, a terminal escape sequence, a bell, a C1 control (U+0085) and a Unicode line separator
+    // (U+2028) must not reach the log as they are: a name could forge a line of the log, or move the cursor of a
+    // terminal
     std::string logged;
     log_write_function = [&](std::string text) { logged += text; };
     EXPECT_THROW(load(R"({"modules": {
         "top": {"attributes": {"top": "00000000000000000000000000000001"}, "ports": {}, "netnames": {},
-                "cells": {"u": {"type": "evil\nERROR: forged\u001b[2J", "port_directions": {}, "connections": {}}}},
-        "evil\nERROR: forged\u001b[2J": {"ports": {}, "netnames": {},
-                "cells": {"v\u0007": {"type": "evil\nERROR: forged\u001b[2J", "port_directions": {},
+                "cells": {"u": {"type": "evil\nERROR: forged\u001b[2J\u0085\u2028", "port_directions": {},
+                               "connections": {}}}},
+        "evil\nERROR: forged\u001b[2J\u0085\u2028": {"ports": {}, "netnames": {},
+                "cells": {"v\u0007": {"type": "evil\nERROR: forged\u001b[2J\u0085\u2028", "port_directions": {},
                                       "connections": {}}}}
     }})"),
                  log_execution_error_exception);
     log_write_function = nullptr;
     EXPECT_NE(logged.find("instantiates itself"), std::string::npos);
-    EXPECT_NE(logged.find("evil\\x0aERROR: forged\\x1b[2J"), std::string::npos) << logged;
+    EXPECT_NE(logged.find("evil\\x0aERROR: forged\\x1b[2J\\xc2\\x85\\xe2\\x80\\xa8"), std::string::npos) << logged;
     EXPECT_NE(logged.find("(cell 'v\\x07'"), std::string::npos) << logged;
     EXPECT_EQ(logged.find('\x1b'), std::string::npos);
+    EXPECT_EQ(logged.find("\xc2\x85"), std::string::npos);
+    EXPECT_EQ(logged.find("\xe2\x80\xa8"), std::string::npos);
     EXPECT_EQ(logged.find("\nERROR: forged"), std::string::npos);
 }
 

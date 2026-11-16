@@ -122,8 +122,10 @@ struct ModuleInfo
     pool<IdString> instantiated_celltypes;
 };
 
-// A name from the netlist as it is written in an error message: a control character is shown as \xNN, so that a name
-// cannot forge lines of the log or move the cursor of a terminal, and a name of more than 100 characters is cut
+// A name from the netlist as it is written in an error message: whatever is not printable ASCII is shown as \xNN, so
+// that a name cannot forge lines of the log or move the cursor of a terminal, whichever bytes or characters the
+// terminal or the viewer of the log takes for controls or line breaks (control characters, the C1 controls, the Unicode
+// line and paragraph separators, and so on), and a name of more than 100 characters is cut
 std::string printable_name(const std::string &name)
 {
     static const size_t max_length = 100;
@@ -134,7 +136,7 @@ std::string printable_name(const std::string &name)
             result += "...";
             break;
         }
-        if (c < 0x20 || c == 0x7f) {
+        if (c < 0x20 || c >= 0x7f) {
             result += "\\x";
             result += hex[c >> 4];
             result += hex[c & 15];
