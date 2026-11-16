@@ -37,6 +37,8 @@ class XilinxJsonFrontendTest : public ::testing::Test
         ctx = new Context(chipArgs);
         ctx->uarch->init(ctx);
         ctx->late_init();
+        attrs_before = ctx->attrs.size();
+        settings_before = ctx->settings.size();
     }
 
     virtual void TearDown() { delete ctx; }
@@ -57,19 +59,70 @@ class XilinxJsonFrontendTest : public ::testing::Test
                         << h.first.str(ctx) << " links to " << sub.second.str(ctx) << ", which does not exist";
     }
 
+    // An import that fails is not undone step by step, so it must fail before it has changed anything: a caller that
+    // keeps the Context (the GUI, the Python API) is left with the Context it had
+    void expect_nothing_imported()
+    {
+        EXPECT_TRUE(ctx->cells.empty());
+        EXPECT_TRUE(ctx->nets.empty());
+        EXPECT_TRUE(ctx->hierarchy.empty());
+        EXPECT_EQ(ctx->attrs.size(), attrs_before);
+        EXPECT_EQ(ctx->settings.size(), settings_before);
+        EXPECT_TRUE(ctx->top_module == IdString());
+        EXPECT_FALSE(ctx->design_loaded);
+    }
+
     ArchArgs chipArgs;
     Context *ctx;
+    size_t attrs_before, settings_before;
 };
 
-TEST_F(XilinxJsonFrontendTest, a_module_that_instantiates_itself_is_an_error_and_leaves_the_hierarchy_consistent)
+TEST_F(XilinxJsonFrontendTest, a_module_that_instantiates_itself_is_an_error_that_leaves_the_context_as_it_was)
 {
-    // top contains u (a "sub"), and "sub" contains v, which is a "sub" again
+    // top has a cell, a net and a submodule that import fine, and then z_rec, a "sub": "sub" contains v, which is a
+    // "sub" again. Cells are imported in the order of their names, so everything before z_rec would be in the Context
+    // when the recursion is found, if the import were left to find it
     EXPECT_THROW(load(R"({"modules": {
         "top": {"attributes": {"top": "00000000000000000000000000000001"}, "ports": {},
-                "cells": {"u": {"type": "sub", "port_directions": {}, "connections": {}}}, "netnames": {}},
+                "cells": {"a_leaf": {"type": "LUT4", "port_directions": {"A": "input"}, "connections": {"A": [2]}},
+                          "b_ok": {"type": "ok", "port_directions": {}, "connections": {}},
+                          "z_rec": {"type": "sub", "port_directions": {}, "connections": {}}},
+                "netnames": {"n": {"bits": [2]}}},
+        "ok": {"ports": {}, "cells": {"w": {"type": "LUT4", "port_directions": {}, "connections": {}}}, "netnames": {}},
         "sub": {"ports": {}, "cells": {"v": {"type": "sub", "port_directions": {}, "connections": {}}}, "netnames": {}}
     }})"),
                  log_execution_error_exception);
+    expect_nothing_imported();
+}
+
+TEST_F(XilinxJsonFrontendTest, a_cycle_of_modules_is_an_error_that_leaves_the_context_as_it_was)
+{
+    // top contains u, an "a", which contains x, a "b", which contains y, an "a" again
+    EXPECT_THROW(load(R"({"modules": {
+        "top": {"attributes": {"top": "00000000000000000000000000000001"}, "ports": {},
+                "cells": {"a_leaf": {"type": "LUT4", "port_directions": {"A": "input"}, "connections": {"A": [2]}},
+                          "u": {"type": "a", "port_directions": {}, "connections": {}}},
+                "netnames": {"n": {"bits": [2]}}},
+        "a": {"ports": {}, "cells": {"x": {"type": "b", "port_directions": {}, "connections": {}}}, "netnames": {}},
+        "b": {"ports": {}, "cells": {"y": {"type": "a", "port_directions": {}, "connections": {}}}, "netnames": {}}
+    }})"),
+                 log_execution_error_exception);
+    expect_nothing_imported();
+}
+
+TEST_F(XilinxJsonFrontendTest, a_recursive_module_that_the_design_does_not_reach_is_not_an_error)
+{
+    // "orphan" instantiates itself but nothing below top uses it, so it is never imported
+    ASSERT_TRUE(load(R"({"modules": {
+        "top": {"attributes": {"top": "00000000000000000000000000000001"}, "ports": {},
+                "cells": {"u": {"type": "sub", "port_directions": {}, "connections": {}}}, "netnames": {}},
+        "sub": {"ports": {}, "cells": {}, "netnames": {}},
+        "orphan": {"ports": {}, "netnames": {},
+                   "cells": {"o": {"type": "orphan", "port_directions": {}, "connections": {}}}}
+    }})"));
+    EXPECT_TRUE(ctx->hierarchy.count(ctx->id("top")));
+    EXPECT_TRUE(ctx->hierarchy.count(ctx->id("top/u")));
+    EXPECT_FALSE(ctx->hierarchy.count(ctx->id("orphan")));
     expect_links_resolve();
 }
 

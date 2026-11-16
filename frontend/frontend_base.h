@@ -128,6 +128,10 @@ template <typename FrontendType> struct GenericFrontend
     {
         // Find which module is top
         find_top_module();
+        // Importing flattens the hierarchy, which never ends if a module instantiates itself: look for that before
+        // anything is added to the Context
+        pool<IdString> in_progress, checked;
+        check_for_recursive_instantiation(top, in_progress, checked);
         HierModuleState m;
         m.is_toplevel = true;
         m.prefix = "";
@@ -217,6 +221,27 @@ template <typename FrontendType> struct GenericFrontend
             log_error("Failed to autodetect top module, please specify using --top.\n");
         }
         top = *(candidate_top.begin());
+    }
+
+    // A module that instantiates itself, directly or through other modules, has no finite hierarchy to flatten: the
+    // import would recurse until the stack is exhausted. Look for such a cycle among the modules that the import
+    // reaches (the cells of the top module, and of the modules below it, whose type is a module that is not a box),
+    // before anything is added to the netlist or the hierarchy, so that the error leaves the Context as it was
+    void check_for_recursive_instantiation(IdString module, pool<IdString> &in_progress, pool<IdString> &checked)
+    {
+        in_progress.insert(module);
+        impl.foreach_cell(mod_refs.at(module.str(ctx)), [&](const std::string &cellname, const cell_dat_t &cd) {
+            IdString type = ctx->id(impl.get_cell_type(cd));
+            if (!mods.count(type) || mods.at(type).is_box())
+                return; // imported as a leaf cell
+            if (in_progress.count(type))
+                log_error("Module '%s' instantiates itself (cell '%s' in module '%s')\n", type.c_str(ctx),
+                          cellname.c_str(), module.c_str(ctx));
+            if (!checked.count(type))
+                check_for_recursive_instantiation(type, in_progress, checked);
+        });
+        in_progress.erase(module);
+        checked.insert(module);
     }
 
     // Create a unique name (guaranteed collision free) for a net or a cell; based on
@@ -508,13 +533,6 @@ template <typename FrontendType> struct GenericFrontend
     // Import a submodule cell
     void import_submodule_cell(HierModuleState &m, const std::string &name, const cell_dat_t &cd)
     {
-        auto type = impl.get_cell_type(cd);
-        // A module that instantiates itself, directly or through other modules, would be imported forever. Check
-        // before anything is added to the netlist or the hierarchy, so that the error leaves both consistent
-        for (IdString anc = m.path; anc != IdString(); anc = ctx->hierarchy.at(anc).parent)
-            if (ctx->hierarchy.at(anc).type == ctx->id(type))
-                log_error("Module '%s' instantiates itself (cell '%s' in '%s')\n", type.c_str(), name.c_str(),
-                          m.path.c_str(ctx));
         HierModuleState submod;
         submod.is_toplevel = false;
         // Create mapping from submodule port to nets (referenced by index in flatindex)
@@ -548,6 +566,7 @@ template <typename FrontendType> struct GenericFrontend
         submod.path = ctx->id(m.path.str(ctx) + "/" + name);
         ctx->hierarchy[m.path].hier_cells[ctx->id(name)] = submod.path;
         // Do the submodule import
+        auto type = impl.get_cell_type(cd);
         import_module(submod, name, type, mod_refs.at(type));
         // Add current cell attributes to the imported module
         impl.foreach_attr(cd, [&](const std::string &name, const Property &value) {
