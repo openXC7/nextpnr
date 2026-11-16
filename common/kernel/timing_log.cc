@@ -384,7 +384,7 @@ static void log_histogram(Context *ctx, TimingResult &result)
     // The slack of a port whose times are wrapped sentinels is anywhere in the range of int, so the span of the slacks
     // and the offset of a slack from the smallest one are taken in 64 bits
     const int64_t span = int64_t(max_slack) - min_slack + 1;
-    auto bin_size = std::max<unsigned>(1, saturating_cast<unsigned>(ceil(span / double(num_bins))));
+    auto bin_size = std::max<unsigned>(1, saturating_cast<unsigned>(ceil(float(span) / float(num_bins))));
     std::vector<unsigned> bins(num_bins);
     unsigned max_freq = 0;
     for (const auto &i : result.slack_histogram) {

@@ -1278,7 +1278,7 @@ void TimingAnalyser::build_slack_histogram_report()
 
                     delay_t delay = setup_path_delay(arr.second.value, req.second.value, 0);
                     // a delay that is a wrapped sentinel is anywhere in the range of delay_t, and so is the slack
-                    delay_t slack = saturating_cast<delay_t>(double(clk_period) - double(delay));
+                    delay_t slack = saturating_cast<delay_t>(clk_period - delay);
 
                     int slack_ps = saturating_cast<int>(ctx->getDelayNS(slack) * 1000);
                     slack_histogram[slack_ps]++;
