@@ -542,6 +542,11 @@ template <typename FrontendType> struct GenericFrontend
         ctx->hierarchy[m.path].hier_cells[ctx->id(name)] = submod.path;
         // Do the submodule import
         auto type = impl.get_cell_type(cd);
+        // A module that instantiates itself, directly or through other modules, would be imported forever
+        for (IdString anc = m.path; anc != IdString(); anc = ctx->hierarchy.at(anc).parent)
+            if (ctx->hierarchy.at(anc).type == ctx->id(type))
+                log_error("Module '%s' instantiates itself (cell '%s' in '%s')\n", type.c_str(), name.c_str(),
+                          m.path.c_str(ctx));
         import_module(submod, name, type, mod_refs.at(type));
         // Add current cell attributes to the imported module
         impl.foreach_attr(cd, [&](const std::string &name, const Property &value) {
