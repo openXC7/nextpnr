@@ -147,6 +147,7 @@ void Context::writeSVG(const std::string &filename, const std::string &flags) co
 {
     auto out = open_ofstream_and_log_error(filename, "SVG file");
     SVGWriter(this, out)(flags);
+    close_ofstream_and_log_error(out, filename, "SVG file");
 }
 
 NEXTPNR_NAMESPACE_END

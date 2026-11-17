@@ -17,6 +17,9 @@
  *
  */
 
+#include <cstdio>
+#include <fstream>
+#include <string>
 #include <vector>
 #include "command.h"
 #include "gtest/gtest.h"
@@ -165,6 +168,71 @@ TEST_F(XilinxPackTest, cells_ibufgds_alias)
     EXPECT_NE(ci->ports.count(id_I), size_t(0));
     EXPECT_NE(ci->ports.count(id_IB), size_t(0));
     EXPECT_NE(ci->ports.count(id_O), size_t(0));
+}
+
+// An IBUFGDS on two top-level ports, clk_p and clk_n, as yosys leaves them.
+static std::pair<CellInfo *, CellInfo *> create_diff_input(Context *ctx)
+{
+    auto top_port = [&](const char *name) {
+        CellInfo *io = ctx->createCell(ctx->id(name), ctx->id("$nextpnr_ibuf"));
+        io->addOutput(id_O);
+        io->connectPort(id_O, ctx->createNet(ctx->id(name)));
+        return io;
+    };
+    CellInfo *p_port = top_port("clk_p");
+    CellInfo *n_port = top_port("clk_n");
+    CellInfo *buf = ctx->createCell(ctx->id("ib"), id_IBUFGDS);
+    buf->addInput(id_I);
+    buf->addInput(id_IB);
+    buf->addOutput(id_O);
+    buf->connectPort(id_I, ctx->nets.at(ctx->id("clk_p")).get());
+    buf->connectPort(id_IB, ctx->nets.at(ctx->id("clk_n")).get());
+    return std::make_pair(p_port, n_port);
+}
+
+// The two ports of a differential pair share one standard, and the XDC may give
+// it to either of them, as Vivado takes it. Here only the N port has it: with
+// the P port alone on a package pin, the N port goes on the other pin of the
+// pair, and the P port takes the N port's standard (every pad needs one).
+TEST_F(XilinxPackTest, diff_pair_takes_the_standard_of_the_port_without_a_pin)
+{
+    auto ports = create_diff_input(ctx);
+    ports.first->attrs[id_PACKAGE_PIN] = std::string("E3");
+    ports.second->attrs[id_IOSTANDARD] = std::string("DIFF_SSTL15");
+    XC7Packer p(ctx, xil);
+    p.pack_constants();
+    p.pack_io();
+    const CellInfo *pad_p = ctx->cells.at(ctx->id("clk_p")).get();
+    const CellInfo *pad_n = ctx->cells.at(ctx->id("clk_n")).get();
+    EXPECT_EQ(str_or_default(pad_n->attrs, id_PACKAGE_PIN, ""), "D3");
+    EXPECT_EQ(str_or_default(pad_p->attrs, id_IOSTANDARD, ""), "DIFF_SSTL15");
+    EXPECT_EQ(str_or_default(pad_n->attrs, id_IOSTANDARD, ""), "DIFF_SSTL15");
+}
+
+// The same with both ports on their pins.
+TEST_F(XilinxPackTest, diff_pair_on_two_pins_takes_the_standard_of_either_port)
+{
+    auto ports = create_diff_input(ctx);
+    ports.first->attrs[id_PACKAGE_PIN] = std::string("E3");
+    ports.second->attrs[id_PACKAGE_PIN] = std::string("D3");
+    ports.second->attrs[id_IOSTANDARD] = std::string("DIFF_SSTL15");
+    XC7Packer p(ctx, xil);
+    p.pack_constants();
+    p.pack_io();
+    EXPECT_EQ(str_or_default(ctx->cells.at(ctx->id("clk_p"))->attrs, id_IOSTANDARD, ""), "DIFF_SSTL15");
+}
+
+// Two different standards on the two ports are an error: decomposing the buffer
+// mixed them, and Vivado keeps the one set last, which the netlist cannot say.
+TEST_F(XilinxPackTest, diff_pair_with_two_standards_is_an_error)
+{
+    auto ports = create_diff_input(ctx);
+    ports.first->attrs[id_PACKAGE_PIN] = std::string("E3");
+    ports.first->attrs[id_IOSTANDARD] = std::string("DIFF_SSTL15");
+    ports.second->attrs[id_IOSTANDARD] = std::string("DIFF_HSTL_I");
+    XC7Packer p(ctx, xil);
+    p.pack_constants();
+    EXPECT_THROW(p.pack_io(), log_execution_error_exception);
 }
 
 // Helper: create an SRLC32E with the ports a real (yosys) design carries.
@@ -348,4 +416,118 @@ TEST_F(XilinxPackTest, pack_bram_ramb36_width18_parity_untouched)
 
     EXPECT_EQ(ci->getPort(id_DIPADIP0), p0);
     EXPECT_EQ(ci->getPort(id_DIPADIP1), p1);
+}
+
+// A BEL attribute may name a bel the way NEXTPNR_BEL has it in a routed JSON,
+// "<site>/<bel>", where an IOB's bel has dots of its own (IOB33M.PAD). Each
+// such name resolves to the bel it names: here every site bel of the first
+// tile of each tile type. A bel of an alternative site type has the same name
+// in the site as its primary one (CE1USED and CE1USED~ILOGICE2), so that form
+// cannot tell the two apart: those names are left out.
+TEST_F(XilinxPackTest, user_bel_in_site_form_resolves_to_its_bel)
+{
+    pool<IdString> tile_types_seen;
+    std::vector<std::pair<std::string, BelId>> names;
+    dict<std::string, int> uses;
+    int last_tile = -1;
+    bool tile_is_taken = false;
+    for (auto bel : ctx->getBels()) {
+        const bool new_tile = bel.tile != last_tile;
+        if (new_tile) {
+            last_tile = bel.tile;
+            const IdString type = ctx->get_tile_type(bel.tile);
+            tile_is_taken = tile_types_seen.count(type) == 0;
+            tile_types_seen.insert(type);
+        }
+        if (!tile_is_taken)
+            continue;
+        const SiteIndex site = xil->get_bel_site(bel);
+        const bool bel_has_a_site = site.site >= 0 && site.site < xil->tile_extra_data(site.tile)->sites.ssize();
+        if (!bel_has_a_site)
+            continue;
+        const std::string site_form = xil->get_site_bel_name(bel).str(ctx);
+        names.emplace_back(site_form, bel);
+        uses[site_form]++;
+    }
+    std::vector<std::pair<CellInfo *, BelId>> expected;
+    int dotted = 0;
+    for (const auto &name : names) {
+        const bool name_is_shared = uses.at(name.first) > 1;
+        if (name_is_shared)
+            continue;
+        const bool bel_part_has_a_dot = name.first.find('.') != std::string::npos;
+        if (bel_part_has_a_dot)
+            dotted++;
+        CellInfo *ci = ctx->createCell(ctx->idf("c%d", int(expected.size())), id_SLICE_FFX);
+        ci->attrs[id_BEL] = name.first;
+        expected.emplace_back(ci, name.second);
+    }
+    xil->resolve_user_bels();
+    for (const auto &entry : expected)
+        EXPECT_EQ(entry.first->attrs.at(id_BEL).as_string(), ctx->getBelName(entry.second).str(ctx))
+                << xil->get_site_bel_name(entry.second).str(ctx);
+    EXPECT_GT(int(expected.size()), 100);
+    EXPECT_GT(dotted, 0);
+}
+
+// A coordinate with a byte over 0x7f is not a site name: the BEL is left as
+// written (and the placer reports "No Bel named").
+TEST_F(XilinxPackTest, user_bel_with_a_non_ascii_coordinate_is_left_as_written)
+{
+    const std::string name = "SLICE_X\xe9"
+                             "0Y0/AFF";
+    CellInfo *ci = ctx->createCell(ctx->id("ff"), id_SLICE_FFX);
+    ci->attrs[id_BEL] = name;
+    xil->resolve_user_bels();
+    EXPECT_EQ(ci->attrs.at(id_BEL).as_string(), name);
+}
+
+// -o preplaced reads what scripts/routing_dump.py writes, NEXTPNR_BEL as the
+// routed JSON has it: a site's bel is "<site>/<bel>". It is resolved like a
+// BEL attribute and recorded for the check after placement.
+TEST_F(XilinxPackTest, preplaced_bel_in_site_form_is_resolved)
+{
+    BelId ff_bel;
+    BelId pad_bel;
+    for (auto bel : ctx->getBels()) {
+        const std::string in_site = xil->bel_name_in_site(bel).str(ctx);
+        const bool first_aff = in_site == "AFF" && ff_bel == BelId();
+        if (first_aff)
+            ff_bel = bel;
+        const bool first_pad = in_site == "IOB33M.PAD" && pad_bel == BelId();
+        if (first_pad)
+            pad_bel = bel;
+    }
+    ASSERT_NE(ff_bel, BelId());
+    ASSERT_NE(pad_bel, BelId());
+    const std::string path = ::testing::TempDir() + "xilinx_preplaced_test.txt";
+    {
+        std::ofstream out(path);
+        out << "ff\t" << xil->get_site_bel_name(ff_bel).str(ctx) << "\n";
+        out << "pad\t" << xil->get_site_bel_name(pad_bel).str(ctx) << "\n";
+    }
+    CellInfo *ff = ctx->createCell(ctx->id("ff"), id_SLICE_FFX);
+    CellInfo *pad = ctx->createCell(ctx->id("pad"), id_PAD);
+    ctx->args.options.insert(std::make_pair("preplaced", po::variable_value(path, false)));
+    xil->apply_preplaced(false);
+    std::remove(path.c_str());
+    EXPECT_EQ(ff->attrs.at(id_BEL).as_string(), ctx->getBelName(ff_bel).str(ctx));
+    EXPECT_EQ(pad->attrs.at(id_BEL).as_string(), ctx->getBelName(pad_bel).str(ctx));
+    EXPECT_EQ(xil->user_bels.count(ff->name), 1u);
+    EXPECT_EQ(xil->user_bels.count(pad->name), 1u);
+}
+
+// A LUT6_2 with a BEL and neither output used is split into no cell at all,
+// which would take the BEL away unchecked: that is an error, as a BEL with
+// both outputs used is.
+TEST_F(XilinxPackTest, lut6_2_with_a_bel_and_no_output_is_an_error)
+{
+    CellInfo *ci = ctx->createCell(ctx->id("l"), id_LUT6_2);
+    for (auto p : {"I0", "I1", "I2", "I3", "I4", "I5"})
+        ci->addInput(ctx->id(p));
+    ci->addOutput(id_O5);
+    ci->addOutput(id_O6);
+    ci->attrs[id_BEL] = std::string("X0Y0/SLICE_X0Y0.C6LUT");
+    XC7Packer p(ctx, xil);
+    EXPECT_THROW(p.split_lut6_2(), log_execution_error_exception);
 }

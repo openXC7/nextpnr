@@ -973,6 +973,17 @@ struct FasmBackend
                 pop();
             }
         }
+        const bool tile_has_no_cells = !lts;
+        if (tile_has_no_cells) {
+            // A tile with no cells at all can still hold route-throughs.  Their site
+            // exit (the [A-D]MUX OUTMUX pip, e.g. BMUX <- B6LUT_O6) is written with the
+            // LUT logic below, which needs tile status; without this the LUT carried the
+            // signal and the OUTMUX never selected it, an open on the net.
+            BelId bel_in_half =
+                    ctx->getBelByLocation(Loc(tile % ctx->chip_info->width, tile / ctx->chip_info->width, half << 6));
+            for (int i = 0; i < 4; i++)
+                write_routing_bel(get_site_wire(bel_in_half, stringf("%cMUX", "ABCD"[i])));
+        }
         if (lts) {
             // Write logic
             BelId bel_in_half =
@@ -1657,6 +1668,24 @@ struct FasmBackend
                     write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVDS_25_LVTTL_SSTL135_SSTL15_TMDS_33.IN_"
                               "ONLY");
             }
+
+            // IBUFDISABLE.I and INTERMDISABLE.I are site features, not pips.
+            // The route into the IOI does not set them. Vivado sets each on
+            // every half whose input buffer has that port connected.
+            CellInfo *pad_inbuf = nullptr;
+            for (auto &usr : pad_net->users) {
+                const bool user_is_inbuf = boost::contains(usr.cell->type.str(ctx), "INBUF");
+                const bool on_pad_port = usr.port == id_PAD;
+                const bool this_pad_inbuf = user_is_inbuf && on_pad_port;
+                if (this_pad_inbuf)
+                    pad_inbuf = usr.cell;
+            }
+            const bool disable_is_used = pad_inbuf != nullptr && pad_inbuf->getPort(id_IBUFDISABLE) != nullptr;
+            if (disable_is_used)
+                write_bit("IBUFDISABLE.I");
+            const bool interm_is_used = pad_inbuf != nullptr && pad_inbuf->getPort(id_INTERMDISABLE) != nullptr;
+            if (interm_is_used)
+                write_bit("INTERMDISABLE.I");
         }
 
         // STEPDOWN is a left-hand HP feature: segbits_riob18.db defines no
@@ -5478,6 +5507,12 @@ struct FasmBackend
 
 } // namespace
 
+void XilinxImpl::write_fasm(std::ostream &out)
+{
+    FasmBackend be(this->ctx, this, out);
+    be.write_fasm();
+}
+
 void XilinxImpl::write_fasm(const std::string &filename)
 {
     // A log_error during the walk throws, and anything already flushed would
@@ -5505,8 +5540,7 @@ void XilinxImpl::write_fasm(const std::string &filename)
 
     {
         auto out = open_ofstream_and_log_error(tmp, "FASM file");
-        FasmBackend be(this->ctx, this, out);
-        be.write_fasm();
+        write_fasm(out);
         out.flush();
         const bool write_failed = !out.good();
         if (write_failed)
@@ -5625,6 +5659,7 @@ void XilinxImpl::write_placement(const std::string &filename)
     for (const auto &kv : idelay_orig)
         emit(kv.first, kv.second);
     out << (first ? "" : "\n") << "}\n";
+    close_ofstream_and_log_error(out, filename, "placement file");
     log_info("Wrote placement of %d cells to %s\n", int(ctx->cells.size()), filename.c_str());
 }
 

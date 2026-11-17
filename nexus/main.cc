@@ -64,6 +64,7 @@ void NexusCommandHandler::customBitstream(Context *ctx)
         std::string filename = vm["fasm"].as<std::string>();
         auto out = open_ofstream_and_log_error(filename, "output FASM file");
         ctx->write_fasm(out);
+        close_ofstream_and_log_error(out, filename, "output FASM file");
     }
 }
 

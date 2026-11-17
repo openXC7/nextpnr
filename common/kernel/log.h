@@ -96,6 +96,10 @@ std::ifstream open_ifstream_and_log_error(std::string filename, const char *file
 /// open `filename`, if error log "Failed to open {file_description} '{filename}' for writing" with cause
 std::ofstream open_ofstream_and_log_error(std::string filename, const char *file_description);
 
+/// close a stream returned by `open_ofstream_and_log_error`, if writing it failed (e.g. disk full) log "Failed to write
+/// {file_description} '{filename}'"
+void close_ofstream_and_log_error(std::ofstream &file, const std::string &filename, const char *file_description);
+
 NEXTPNR_NAMESPACE_END
 
 #endif

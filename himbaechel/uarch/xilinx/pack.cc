@@ -226,6 +226,13 @@ std::vector<std::pair<IdString, IdString>> XilinxPacker::split_lut6_2()
             log_error("LUT6_2 cell '%s' has a BEL constraint but drives both O5 and O6; splitting it in two "
                       "would leave that constraint ambiguous\n",
                       ci->name.c_str(ctx));
+        // With neither output used no half is made, and the BEL would go away with the cell unchecked.
+        const bool bel_constrained_with_no_output_used =
+                (ci->attrs.count(id_BEL) != 0) && o5 == nullptr && o6 == nullptr;
+        if (bel_constrained_with_no_output_used)
+            log_error("LUT6_2 cell '%s' has a BEL constraint but drives neither O5 nor O6; splitting it leaves no "
+                      "cell to place on that bel\n",
+                      ci->name.c_str(ctx));
 
         // One LUT<n_in> cell driving `out`, its INIT the 2^n_in-bit slice of
         // the LUT6_2 INIT starting at bit `lo`.
@@ -259,6 +266,13 @@ std::vector<std::pair<IdString, IdString>> XilinxPacker::split_lut6_2()
             const bool bel_constrained = (ci->attrs.count(id_BEL) != 0);
             if (bel_constrained)
                 half->attrs[id_BEL] = ci->attrs.at(id_BEL);
+            // The design's BEL now belongs to the half, which check_user_bels() checks.
+            auto user_bel = uarch->user_bels.find(ci->name);
+            const bool design_gave_the_bel = user_bel != uarch->user_bels.end();
+            if (design_gave_the_bel) {
+                const auto names = user_bel->second;
+                uarch->user_bels[half->name] = names;
+            }
         };
 
         if (o5 != nullptr)
@@ -290,6 +304,7 @@ std::vector<std::pair<IdString, IdString>> XilinxPacker::split_lut6_2()
         if (the_two_halves_can_share_a_site)
             pairs.emplace_back(ctx->id(ci->name.str(ctx) + "$LUT6"), ctx->id(ci->name.str(ctx) + "$LUT5"));
 
+        uarch->user_bels.erase(ci->name);
         packed_cells.insert(ci->name);
     }
 
@@ -465,6 +480,11 @@ void XilinxPacker::pack_lutffs()
         if (ci->cluster != ClusterId() || !ci->constr_children.empty())
             continue;
         if (ci->type != id_SLICE_FFX)
+            continue;
+        // A flip-flop with a BEL attribute stays out of its driver's cluster: as a member it moved with
+        // the LUT or the CARRY4 wherever the placer put that, and its BEL was ignored.
+        const bool ff_has_a_bel_attribute = ci->attrs.count(id_BEL) != 0;
+        if (ff_has_a_bel_attribute)
             continue;
         NetInfo *d = ci->getPort(id_D);
         const bool d_is_undriven = (d == nullptr || d->driver.cell == nullptr);
@@ -1714,6 +1734,7 @@ void XilinxImpl::pack()
     if (args.options.count("xdc")) {
         parse_xdc(args.options["xdc"].as<std::string>());
     }
+    resolve_user_bels();
     // The reference placement first for the cells that exist before packing
     // (prePlace pins the packer's own afterwards), so the packer's single-site
     // primitives leave a pinned cell's site alone.

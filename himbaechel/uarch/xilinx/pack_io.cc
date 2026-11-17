@@ -223,21 +223,26 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
     }
 
     bool is_diff_ibuf = xil_iob->type.in(id_IBUFDS, id_IBUFGDS, id_IBUFDS_INTERMDISABLE, id_IBUFDS);
+    // Complementary output OB is the N-side input buffer of the same pair.
+    // These three are not IBUFDS: packing only the master leaves OB undriven
+    // and the flow used to exit 0 with no input buffer in the bitstream.
+    const bool is_diff_out_ibuf =
+            xil_iob->type.in(id_IBUFDS_DIFF_OUT, id_IBUFDS_DIFF_OUT_IBUFDISABLE, id_IBUFDS_DIFF_OUT_INTERMDISABLE);
     bool is_diff_iobuf = xil_iob->type.in(id_IOBUFDS, id_IOBUFDS_DCIEN);
-    bool is_diff_out_iobuf =
-            xil_iob->type.in(id_IOBUFDS_DIFF_OUT, id_IOBUFDS_DIFF_OUT_DCIEN, id_IOBUFDS_DIFF_OUT_INTERMDISABLE);
     bool is_diff_obuf = xil_iob->type.in(id_OBUFDS, id_OBUFTDS);
 
-    if (is_diff_ibuf || is_diff_iobuf) {
-        NetInfo *pad_p_net = xil_iob->getPort((is_diff_iobuf || is_diff_out_iobuf) ? id_IO : id_I);
+    const bool packs_diff_input = is_diff_ibuf || is_diff_out_ibuf || is_diff_iobuf;
+    if (packs_diff_input) {
+        NetInfo *pad_p_net = xil_iob->getPort(is_diff_iobuf ? id_IO : id_I);
         NPNR_ASSERT(pad_p_net != nullptr);
         auto site_p = pad_site(pad_p_net);
-        NetInfo *pad_n_net = xil_iob->getPort((is_diff_iobuf || is_diff_out_iobuf) ? id_IOB : id_IB);
+        NetInfo *pad_n_net = xil_iob->getPort(is_diff_iobuf ? id_IOB : id_IB);
         NPNR_ASSERT(pad_n_net != nullptr);
         std::string tile_p = ctx->get_tile_type(site_p.tile).str(ctx);
         bool is_iob18 = boost::contains(tile_p, "IOB18");
 
-        if (!is_diff_iobuf && !is_diff_out_iobuf) {
+        const bool disconnect_diff_inputs = !is_diff_iobuf;
+        if (disconnect_diff_inputs) {
             xil_iob->disconnectPort(id_I);
             xil_iob->disconnectPort(id_IB);
         }
@@ -245,7 +250,12 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
         NetInfo *top_out = xil_iob->getPort(id_O);
         xil_iob->disconnectPort(id_O);
 
-        IdString ibuf_type = id_IBUFDS;
+        // Stay on IBUFDS for every DIFF_OUT variant. That rule maps IB to
+        // DIFFI_IN. IBUFDS_INTERMDISABLE_INT's rule does not, so the N pad
+        // would not reach the differential input. IBUFDISABLE and
+        // INTERMDISABLE are bel ports of those names and survive the IBUFDS
+        // transform. There is no constid for an IBUFDISABLE-only diff cell.
+        const IdString ibuf_type = id_IBUFDS;
         CellInfo *inbuf = insert_diffibuf(int_name(xil_iob->name, "IBUF", is_se_iobuf), ibuf_type,
                                           {pad_p_net, pad_n_net}, top_out);
         if (is_iob18) {
@@ -255,14 +265,86 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
             ctx->bindBel(uarch->get_site_bel(site_p, ctx->id("IOB33M.INBUF_EN")), inbuf, STRENGTH_LOCKED);
             inbuf->attrs[id_X_IOB_SITE_TYPE] = std::string("IOB33M");
         }
+
+        // OB is a second differential receiver on the N site, with I and IB
+        // swapped against the master. Vivado expands IBUFDS_DIFF_OUT that way
+        // (master IOB33M.INBUF_EN I=P IB=N, slave IOB33S.INBUF_EN I=N IB=P)
+        // and the complement leaves the tile on IOB_IBUF1. A single-ended
+        // buffer on the N pad is not that receiver. The bel names below are
+        // created only on this path: an unconditional id would shift every
+        // later id and move place and route of every design.
+        const bool has_complement = is_diff_out_ibuf;
+        if (has_complement) {
+            // IOB18 INBUF_DCIEN has IBUFDISABLE and no INTERMDISABLE port.
+            // Dropping the port would build a buffer that ignores it.
+            const bool hp_interm_unsupported = is_iob18 && xil_iob->type == id_IBUFDS_DIFF_OUT_INTERMDISABLE;
+            if (hp_interm_unsupported)
+                log_error("%s '%s' has no packer on a high-performance bank: the IOB18 input buffer has no "
+                          "INTERMDISABLE port.\n",
+                          xil_iob->type.c_str(ctx), ctx->nameOf(xil_iob));
+            NetInfo *top_ob = xil_iob->getPort(id_OB);
+            xil_iob->disconnectPort(id_OB);
+            const bool complement_drives = top_ob != nullptr && top_ob->users.entries() > 0;
+            log_info("Generating complementary input buffer for '%s'\n", xil_iob->name.c_str(ctx));
+            auto site_n = pad_site(pad_n_net);
+            const bool same_tile = site_p.tile == site_n.tile;
+            IdString slave_bel_name;
+            const bool n_side_is_hp = is_iob18;
+            if (n_side_is_hp)
+                slave_bel_name = ctx->id("IOB18S.INBUF_DCIEN");
+            else
+                slave_bel_name = ctx->id("IOB33S.INBUF_EN");
+            BelId slave_bel = uarch->get_site_bel(site_n, slave_bel_name);
+            const bool slave_inbuf_present = slave_bel != BelId();
+            const bool complement_placeable = same_tile && slave_inbuf_present;
+            const bool complement_unplaceable = !complement_placeable;
+            if (complement_unplaceable)
+                log_error("%s '%s' cannot be placed: OB is the input buffer of the N pin, and %s.\n"
+                          "       Constrain I to an IO_L<n>P_... pin and IB to the matching IO_L<n>N_... pin\n"
+                          "       of the same pair (see package_pins.csv for the part).\n",
+                          xil_iob->type.c_str(ctx), ctx->nameOf(xil_iob),
+                          !same_tile ? "the two pins are not the two halves of one differential pair"
+                                     : "its N side is constrained to a P (master) pin");
+            // I = N pad, IB = P pad. insert_diffibuf takes {I, IB}.
+            // An unused OB still has the N-site receiver; its OUT stays open,
+            // which is how Vivado leaves the cell when nothing reads OB.
+            NetInfo *slave_out = complement_drives ? top_ob : nullptr;
+            CellInfo *slave = insert_diffibuf(int_name(xil_iob->name, "IBUF_N", true), ibuf_type,
+                                              {pad_n_net, pad_p_net}, slave_out);
+            ctx->bindBel(slave_bel, slave, STRENGTH_LOCKED);
+            const bool slave_attr_is_hp = is_iob18;
+            if (slave_attr_is_hp)
+                slave->attrs[id_X_IOB_SITE_TYPE] = std::string("IOB18S");
+            else
+                slave->attrs[id_X_IOB_SITE_TYPE] = std::string("IOB33S");
+            // Vivado ties IBUFDISABLE and INTERMDISABLE to both halves.
+            // One half alone leaves IBUFDISABLE.I / INTERMDISABLE.I off the other.
+            xil_iob->movePortTo(id_IBUFDISABLE, inbuf, id_IBUFDISABLE);
+            xil_iob->movePortTo(id_INTERMDISABLE, inbuf, id_INTERMDISABLE);
+            auto share_input = [&](IdString port) {
+                NetInfo *net = inbuf->getPort(port);
+                const bool no_net = net == nullptr;
+                if (no_net)
+                    return;
+                const bool slave_missing_port = !slave->ports.count(port);
+                if (slave_missing_port) {
+                    slave->ports[port].name = port;
+                    slave->ports[port].type = PORT_IN;
+                }
+                slave->connectPort(port, net);
+            };
+            share_input(id_IBUFDISABLE);
+            share_input(id_INTERMDISABLE);
+        }
     }
 
-    if (is_diff_obuf || is_diff_out_iobuf || is_diff_iobuf) {
+    const bool packs_diff_output = is_diff_obuf || is_diff_iobuf;
+    if (packs_diff_output) {
         // FIXME: true diff outputs
-        NetInfo *pad_p_net = xil_iob->getPort((is_diff_iobuf || is_diff_out_iobuf) ? id_IO : id_O);
+        NetInfo *pad_p_net = xil_iob->getPort(is_diff_iobuf ? id_IO : id_O);
         NPNR_ASSERT(pad_p_net != nullptr);
         auto site_p = pad_site(pad_p_net);
-        NetInfo *pad_n_net = xil_iob->getPort((is_diff_iobuf || is_diff_out_iobuf) ? id_IOB : id_OB);
+        NetInfo *pad_n_net = xil_iob->getPort(is_diff_iobuf ? id_IOB : id_OB);
         NPNR_ASSERT(pad_n_net != nullptr);
         auto site_n = pad_site(pad_n_net);
         std::string tile_p = ctx->get_tile_type(site_p.tile).str(ctx);
@@ -323,8 +405,8 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
 
         check_diff_pair(pad_p_net, pad_n_net, site_p, site_n);
 
-        xil_iob->disconnectPort((is_diff_iobuf || is_diff_out_iobuf) ? id_IO : id_O);
-        xil_iob->disconnectPort((is_diff_iobuf || is_diff_out_iobuf) ? id_IOB : id_OB);
+        xil_iob->disconnectPort(is_diff_iobuf ? id_IO : id_O);
+        xil_iob->disconnectPort(is_diff_iobuf ? id_IOB : id_OB);
 
         NetInfo *inv_i = create_internal_net(xil_iob->name, is_diff_obuf ? "I_B" : "OBUFTDS$subnet$I_B");
         CellInfo *inv = insert_outinv(int_name(xil_iob->name, is_diff_obuf ? "INV" : "OBUFTDS$subcell$INV"),
@@ -339,11 +421,10 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
 
         bool has_dci = xil_iob->type.in(id_IOBUFDS_DCIEN, id_IOBUFDSE3);
 
-        CellInfo *obuf_p = insert_obuf(int_name(xil_iob->name, is_diff_obuf ? "P" : "OBUFTDS$subcell$P"),
-                                       (is_diff_iobuf || is_diff_out_iobuf || (xil_iob->type == id_OBUFTDS))
-                                               ? (has_dci ? id_OBUFT_DCIEN : id_OBUFT)
-                                               : id_OBUF,
-                                       xil_iob->getPort(id_I), pad_p_net, xil_iob->getPort(id_T));
+        CellInfo *obuf_p = insert_obuf(
+                int_name(xil_iob->name, is_diff_obuf ? "P" : "OBUFTDS$subcell$P"),
+                (is_diff_iobuf || (xil_iob->type == id_OBUFTDS)) ? (has_dci ? id_OBUFT_DCIEN : id_OBUFT) : id_OBUF,
+                xil_iob->getPort(id_I), pad_p_net, xil_iob->getPort(id_T));
 
         if (is_iob18) {
             ctx->bindBel(uarch->get_site_bel(site_p, ctx->id("IOB18M.OUTBUF_DCIEN")), obuf_p, STRENGTH_LOCKED);
@@ -354,11 +435,10 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
         }
         obuf_p->connectPort(id_DCITERMDISABLE, xil_iob->getPort(id_DCITERMDISABLE));
 
-        CellInfo *obuf_n = insert_obuf(int_name(xil_iob->name, is_diff_obuf ? "N" : "OBUFTDS$subcell$N"),
-                                       (is_diff_iobuf || is_diff_out_iobuf || (xil_iob->type == id_OBUFTDS))
-                                               ? (has_dci ? id_OBUFT_DCIEN : id_OBUFT)
-                                               : id_OBUF,
-                                       inv_i, pad_n_net, xil_iob->getPort(id_T));
+        CellInfo *obuf_n = insert_obuf(
+                int_name(xil_iob->name, is_diff_obuf ? "N" : "OBUFTDS$subcell$N"),
+                (is_diff_iobuf || (xil_iob->type == id_OBUFTDS)) ? (has_dci ? id_OBUFT_DCIEN : id_OBUFT) : id_OBUF,
+                inv_i, pad_n_net, xil_iob->getPort(id_T));
 
         if (is_iob18) {
             ctx->bindBel(uarch->get_site_bel(site_n, ctx->id("IOB18S.OUTBUF_DCIEN")), obuf_n, STRENGTH_LOCKED);
@@ -371,6 +451,17 @@ void XC7Packer::decompose_iob(CellInfo *xil_iob, bool is_hr, const std::string &
 
         xil_iob->disconnectPort(id_DCITERMDISABLE);
     }
+
+    // pins.cc accepts several primitives this function does not decompose.
+    // Deleting the cell afterwards used to leave a bitstream with no buffer
+    // and a zero exit status.  Say so instead.
+    const bool iob_was_decomposed = is_se_ibuf || is_se_iobuf || is_se_obuf || is_diff_ibuf || is_diff_out_ibuf ||
+                                    is_diff_iobuf || is_diff_obuf;
+    const bool primitive_is_unpacked = !iob_was_decomposed;
+    if (primitive_is_unpacked)
+        log_error("%s '%s' has no packer. The design would otherwise build with this primitive deleted and no "
+                  "buffer in the bitstream.\n",
+                  xil_iob->type.c_str(ctx), ctx->nameOf(xil_iob));
 }
 
 // The fabric clock buffers an IBUFDS_GTE2 output can drive, through the
@@ -449,6 +540,141 @@ void XC7Packer::pack_io()
             }
             used_io_bels.insert(ctx->getBelByNameStr(bel_name));
         }
+    }
+    // A differential buffer with only one of its two ports on a package pin:
+    // the other port goes on the other pin of the pair, as Vivado does (with P
+    // alone, and with N alone). A pair is the master (P) and the slave (N) site
+    // of one IOB tile, as check_diff_pair() below has it. Only a pad nothing
+    // constrained gets here, so a design that sets both ports, or has no
+    // differential buffer, is not affected.
+    auto is_n_port = [&](const PortRef &buf) {
+        const bool is_ibuf_n = buf.port == id_IB && buf.cell->type.in(id_IBUFDS, id_IBUFGDS, id_IBUFDS_INTERMDISABLE);
+        const bool is_iobuf_n =
+                buf.port == id_IOB && buf.cell->type.in(id_IOBUFDS, id_IOBUFDS_DCIEN, id_IOBUFDS_DIFF_OUT,
+                                                        id_IOBUFDS_DIFF_OUT_DCIEN, id_IOBUFDS_DIFF_OUT_INTERMDISABLE);
+        const bool is_obuf_n = buf.port == id_OB && buf.cell->type.in(id_OBUFDS, id_OBUFTDS);
+        return is_ibuf_n || is_iobuf_n || is_obuf_n;
+    };
+    auto is_p_port = [&](const PortRef &buf) {
+        const bool is_ibuf_p = buf.port == id_I && buf.cell->type.in(id_IBUFDS, id_IBUFGDS, id_IBUFDS_INTERMDISABLE);
+        const bool is_iobuf_p =
+                buf.port == id_IO && buf.cell->type.in(id_IOBUFDS, id_IOBUFDS_DCIEN, id_IOBUFDS_DIFF_OUT,
+                                                       id_IOBUFDS_DIFF_OUT_DCIEN, id_IOBUFDS_DIFF_OUT_INTERMDISABLE);
+        const bool is_obuf_p = buf.port == id_O && buf.cell->type.in(id_OBUFDS, id_OBUFTDS);
+        return is_ibuf_p || is_iobuf_p || is_obuf_p;
+    };
+    auto other_port = [&](IdString port) {
+        return port == id_IB    ? id_I
+               : port == id_IOB ? id_IO
+               : port == id_OB  ? id_O
+               : port == id_I   ? id_IB
+               : port == id_IO  ? id_IOB
+                                : id_OB;
+    };
+    auto package_pin_of = [&](BelId bel) {
+        const PadInfoPOD *pin = ctx->get_bel_package_pin(bel);
+        return pin ? IdString(pin->package_pin).str(ctx) : std::string();
+    };
+    for (auto &iob : pad_and_buf) {
+        CellInfo *pad = iob.first;
+        const bool pad_is_placed = pad->attrs.count(id_BEL) != 0;
+        const bool pad_is_n = !pad_is_placed && is_n_port(iob.second);
+        const bool pad_is_p = !pad_is_placed && !pad_is_n && is_p_port(iob.second);
+        const bool pad_is_half_of_a_pair = pad_is_n || pad_is_p;
+        if (!pad_is_half_of_a_pair)
+            continue;
+        const IdString partner_port = other_port(iob.second.port);
+        CellInfo *partner = nullptr;
+        for (auto &other : pad_and_buf) {
+            const bool is_the_partner = other.second.cell == iob.second.cell && other.second.port == partner_port;
+            if (is_the_partner)
+                partner = other.first;
+        }
+        const bool partner_is_placed = partner != nullptr && partner->attrs.count(id_BEL) != 0;
+        if (!partner_is_placed)
+            continue; // reported below as an unconstrained IO
+        const char *side = pad_is_n ? "N" : "P";
+        const char *partner_side = pad_is_n ? "P" : "N";
+        const BelId partner_bel = ctx->getBelByNameStr(partner->attrs.at(id_BEL).as_string());
+        const std::string partner_pin = package_pin_of(partner_bel);
+        const std::string partner_bel_in_site = uarch->bel_name_in_site(partner_bel).str(ctx);
+        const std::string bank = partner_bel_in_site.substr(0, 5); // IOB33 or IOB18
+        const std::string partner_wants = bank + (pad_is_n ? "M.PAD" : "S.PAD");
+        const bool partner_is_on_its_side_of_a_pair = partner_bel_in_site == partner_wants;
+        if (!partner_is_on_its_side_of_a_pair)
+            log_error("%s '%s': the %s port '%s' has no package pin, and the %s port '%s' is on %s, which is not the "
+                      "%s pin of a differential pair. Give the %s port its pin, or put the %s port on an "
+                      "IO_L<n>%s_... pin.\n",
+                      iob.second.cell->type.c_str(ctx), ctx->nameOf(iob.second.cell), side, ctx->nameOf(pad),
+                      partner_side, ctx->nameOf(partner), partner_pin.c_str(), partner_side, side, partner_side,
+                      partner_side);
+        const std::string wanted_bel_in_site = bank + (pad_is_n ? "S.PAD" : "M.PAD");
+        BelId bel;
+        const auto &tile_data = chip_tile_info(ctx->chip_info, partner_bel.tile);
+        for (int32_t i = 0; i < tile_data.bels.ssize(); i++) {
+            const BelId candidate(partner_bel.tile, i);
+            const bool is_the_other_pad = uarch->bel_name_in_site(candidate).str(ctx) == wanted_bel_in_site;
+            if (is_the_other_pad)
+                bel = candidate;
+        }
+        const std::string pin = bel != BelId() ? package_pin_of(bel) : std::string();
+        const bool package_bonds_the_pin = !pin.empty();
+        if (!package_bonds_the_pin)
+            log_error("%s '%s': the %s port '%s' has no package pin, and the %s site of the pair of '%s' on %s has "
+                      "no pin in this package. Give the %s port its pin.\n",
+                      iob.second.cell->type.c_str(ctx), ctx->nameOf(iob.second.cell), side, ctx->nameOf(pad), side,
+                      ctx->nameOf(partner), partner_pin.c_str(), side);
+        const bool pin_is_taken = used_io_bels.count(bel) != 0;
+        if (pin_is_taken)
+            log_error("%s '%s': the %s port '%s' has no package pin, and %s, the %s pin of the pair of '%s' on %s, "
+                      "is already used by IO '%s'.\n",
+                      iob.second.cell->type.c_str(ctx), ctx->nameOf(iob.second.cell), side, ctx->nameOf(pad),
+                      pin.c_str(), side, ctx->nameOf(partner), partner_pin.c_str(),
+                      io_bel_owner.at(ctx->nameOfBel(bel)).c_str());
+        log_info("    Constraining '%s' to pad '%s' (%s, the %s pin of the pair of '%s' on %s)\n", ctx->nameOf(pad),
+                 ctx->nameOfBel(bel), pin.c_str(), side, ctx->nameOf(partner), partner_pin.c_str());
+        pad->attrs[id_PACKAGE_PIN] = pin;
+        pad->attrs[id_LOC] = pin;
+        pad->attrs[id_BEL] = std::string(ctx->nameOfBel(bel));
+        used_io_bels.insert(bel);
+        io_bel_owner.emplace(ctx->nameOfBel(bel), pad->name.str(ctx));
+    }
+    // The two ports of a differential buffer share one standard, and the XDC
+    // may give it to either of them, as Vivado takes it: a port without one
+    // takes its partner's (every pad needs one, check_valid_pad). Two
+    // different standards are an error: decomposing the buffer mixed them,
+    // and Vivado keeps the one set last, an order the netlist does not have.
+    for (auto &iob : pad_and_buf) {
+        const bool pad_is_n = is_n_port(iob.second);
+        if (!pad_is_n)
+            continue;
+        CellInfo *pad = iob.first;
+        const IdString partner_port = other_port(iob.second.port);
+        CellInfo *partner = nullptr;
+        for (auto &other : pad_and_buf) {
+            const bool is_the_partner = other.second.cell == iob.second.cell && other.second.port == partner_port;
+            if (is_the_partner)
+                partner = other.first;
+        }
+        const bool pair_has_no_p_port = partner == nullptr;
+        if (pair_has_no_p_port)
+            continue;
+        const bool pad_has_an_iostandard = pad->attrs.count(id_IOSTANDARD) != 0;
+        const bool partner_has_an_iostandard = partner->attrs.count(id_IOSTANDARD) != 0;
+        const bool only_the_partner_has_one = partner_has_an_iostandard && !pad_has_an_iostandard;
+        if (only_the_partner_has_one)
+            pad->attrs[id_IOSTANDARD] = partner->attrs.at(id_IOSTANDARD);
+        const bool only_the_pad_has_one = pad_has_an_iostandard && !partner_has_an_iostandard;
+        if (only_the_pad_has_one)
+            partner->attrs[id_IOSTANDARD] = pad->attrs.at(id_IOSTANDARD);
+        const bool standards_differ = pad_has_an_iostandard && partner_has_an_iostandard &&
+                                      pad->attrs.at(id_IOSTANDARD) != partner->attrs.at(id_IOSTANDARD);
+        if (standards_differ)
+            log_error("%s '%s': its P port '%s' has IOSTANDARD %s and its N port '%s' has %s; the two ports of a "
+                      "differential pair have one standard.\n",
+                      iob.second.cell->type.c_str(ctx), ctx->nameOf(iob.second.cell), ctx->nameOf(partner),
+                      partner->attrs.at(id_IOSTANDARD).as_string().c_str(), ctx->nameOf(pad),
+                      pad->attrs.at(id_IOSTANDARD).as_string().c_str());
     }
     // Constrain unconstrained IO
     for (auto &iob : pad_and_buf) {

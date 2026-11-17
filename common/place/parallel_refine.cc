@@ -320,8 +320,8 @@ struct ThreadState : DetailPlacerThreadState
             int x = t.first, y = t.second;
             int lx = std::max(x - g.radius, p.x0), rx = std::min(x + g.radius, p.x1);
             int by = std::max(y - g.radius, p.y0), ty = std::min(y + g.radius, p.y1);
-            int xn = lx + ctx->rng((rx - lx) + 1);
-            int yn = by + ctx->rng((ty - by) + 1);
+            int xn = lx + rng.rng((rx - lx) + 1);
+            int yn = by + rng.rng((ty - by) + 1);
             ++n_move;
             if (do_tile_swap(x, y, xn, yn)) {
                 ++n_accept;
@@ -378,6 +378,10 @@ struct ParallelRefine
         // Setup per thread context
         for (int i = 0; i < cfg.threads; i++) {
             t.emplace_back(ctx, g, i);
+            // Every worker gets its own random stream, derived from the context seed (--seed) in worker order, so the
+            // result follows the seed but not the scheduling of the threads. Left alone, all workers start from the
+            // same default state and draw the same sequence.
+            t.back().rng.rngseed(ctx->rng64());
         }
         // Setup region bounds
         for (auto &region : ctx->region) {

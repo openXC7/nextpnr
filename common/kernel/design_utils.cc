@@ -31,7 +31,15 @@ void print_utilisation(const Context *ctx)
     // Sort by Bel type
     std::map<IdString, int> used_types;
     for (auto &cell : ctx->cells) {
-        used_types[ctx->getBelBucketName(ctx->getBelBucketForCellType(cell.second.get()->type))]++;
+        // Same rule as the JSON report. Packing has already bound the IO cells.
+        const CellInfo *ci = cell.second.get();
+        const bool cell_is_placed = ci->bel != BelId();
+        IdString bucket;
+        if (cell_is_placed)
+            bucket = ctx->getBelBucketForBel(ci->bel);
+        else
+            bucket = ctx->getBelBucketForCellType(ci->type);
+        used_types[ctx->getBelBucketName(bucket)]++;
     }
     std::map<IdString, int> available_types;
     for (auto bel : ctx->getBels()) {

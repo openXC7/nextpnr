@@ -371,7 +371,36 @@ void XilinxImpl::parse_xdc(const std::string &filename)
             // All remaining arguments are supposed to designate cells
             std::vector<CellInfo *> dest;
             for (int cursor = 3; cursor < int(arguments.size()); cursor++) {
-                std::vector<CellInfo *> dest_loc = get_cells(arguments.at(cursor));
+                // A property on get_nets or get_pins (MARK_DEBUG, CLOCK_DEDICATED_ROUTE: an XDC
+                // shared with Vivado has many) is skipped with a warning, as an unsupported
+                // command is. Vivado applies neither LOC nor BEL on get_pins, nor PACKAGE_PIN on
+                // get_nets. Not IS_INVERTED, which Vivado applies on get_pins: skipping it would
+                // build another circuit.
+                const std::string &target = arguments.at(cursor);
+                const bool target_is_a_command = target.size() >= 2 && target.front() == '[' && target.back() == ']';
+                const std::vector<std::string> target_words = target_is_a_command
+                                                                      ? tcl_words(target.substr(1, target.size() - 2))
+                                                                      : std::vector<std::string>();
+                const bool targets_get_nets_or_get_pins =
+                        !target_words.empty() &&
+                        (target_words.front() == "get_nets" || target_words.front() == "get_pins");
+                if (targets_get_nets_or_get_pins) {
+                    std::string names;
+                    for (const auto &pair : arg_pairs) {
+                        const std::string property = boost::algorithm::to_upper_copy(pair.first);
+                        const bool skipping_it_changes_the_logic = property == "IS_INVERTED";
+                        if (skipping_it_changes_the_logic)
+                            log_error("set_property %s on %s is not supported: set the cell's IS_*_INVERTED "
+                                      "parameter instead (on line %d)\n",
+                                      pair.first.c_str(), target.c_str(), lineno);
+                        names += (names.empty() ? "" : " ") + pair.first;
+                    }
+                    log_warning("ignoring set_property %s on %s: only get_ports and get_cells targets are supported "
+                                "(on line %d)\n",
+                                names.c_str(), target.c_str(), lineno);
+                    continue;
+                }
+                std::vector<CellInfo *> dest_loc = get_cells(target);
                 // misses are reported (verbose-only) inside get_cells now
                 dest.insert(dest.end(), dest_loc.begin(), dest_loc.end());
             }

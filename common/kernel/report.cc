@@ -30,14 +30,42 @@ dict<IdString, std::pair<int, int>> get_utilization(const Context *ctx)
     // Sort by Bel type
     dict<IdString, std::pair<int, int>> result;
     for (auto &cell : ctx->cells) {
-        result[ctx->getBelBucketName(ctx->getBelBucketForCellType(cell.second.get()->type))].first++;
+        // Count a placed cell on the bel it occupies. The packer renames an
+        // IDDR to ILOGICE3_IFF and binds it to the site's IFF bel; on a High
+        // Performance bank that bel is ILOGICE2, so the cell type and the bel
+        // type are not the same resource. An unplaced cell still counts as its
+        // type: the report test creates the constant drivers and does not
+        // place them.
+        const CellInfo *ci = cell.second.get();
+        const bool cell_is_placed = ci->bel != BelId();
+        IdString bucket;
+        if (cell_is_placed)
+            bucket = ctx->getBelBucketForBel(ci->bel);
+        else
+            bucket = ctx->getBelBucketForCellType(ci->type);
+        result[ctx->getBelBucketName(bucket)].first++;
     }
     for (auto bel : ctx->getBels()) {
         if (!ctx->getBelHidden(bel)) {
             result[ctx->getBelBucketName(ctx->getBelBucketForBel(bel))].second++;
         }
     }
-    return result;
+    // A type whose bels are all hidden is not a resource the part offers.
+    // Counting its cells anyway reports used with nothing available: the
+    // constant drivers sit on the hidden PSEUDO_GND and PSEUDO_VCC bels.
+    // The log already skips these, because it walks the available types
+    // only. Copy rather than erase: this dict walks last-inserted first,
+    // and erasing in place reorders the types that stay.
+    std::vector<std::pair<IdString, std::pair<int, int>>> kept;
+    for (const auto &entry : result) {
+        const bool part_offers_this_type = entry.second.second > 0;
+        if (part_offers_this_type)
+            kept.push_back(entry);
+    }
+    dict<IdString, std::pair<int, int>> visible;
+    for (auto it = kept.rbegin(); it != kept.rend(); ++it)
+        visible[it->first] = it->second;
+    return visible;
 }
 } // namespace
 

@@ -20,6 +20,7 @@
 #ifndef HIMBAECHEL_XILINX_H
 #define HIMBAECHEL_XILINX_H
 
+#include <iosfwd>
 #include "extra_data.h"
 #include "himbaechel_api.h"
 #include "log.h"
@@ -188,6 +189,11 @@ struct XilinxImpl : HimbaechelAPI
     void parse_xdc(const std::string &filename);
     void pack() override;
     void apply_loc_constraints(const pool<IdString> &only_types = {});
+    std::string bel_name_from_site_form(const CellInfo *ci, const std::string &name) const;
+    void resolve_user_bels();
+    void check_user_bels() const;
+    // cell -> (its BEL attribute as written, the himbaechel bel name), recorded before packing
+    dict<IdString, std::pair<std::string, std::string>> user_bels;
     void prePlace() override;
     void preRoute() override;
     void apply_prerouted();
@@ -199,6 +205,7 @@ struct XilinxImpl : HimbaechelAPI
     void postRoute() override;
     void postRouteArchInfo() override;
     void write_fasm(const std::string &filename);
+    void write_fasm(std::ostream &out); // the walk itself, for a test to read back
     void write_placement(const std::string &filename);
 
     void configurePlacerHeap(PlacerHeapCfg &cfg) override;

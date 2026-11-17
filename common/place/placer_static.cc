@@ -70,6 +70,10 @@ struct PlacerGroup
     FFTArray density_fft;
     FFTArray electro_phi;
     FFTArray electro_fx, electro_fy;
+    // Work area and cosine/sine table of the FFT routines. They are filled in by the first transform, so every group
+    // needs its own copy as the groups are transformed in parallel
+    std::vector<float> cs_table_fft;
+    std::vector<int> work_area_fft;
 
     double init_potential = 0;
     double curr_potential = 0;
@@ -685,9 +689,6 @@ class StaticPlacer
     int m;
     double bin_w, bin_h;
 
-    std::vector<float> cs_table_fft;
-    std::vector<int> work_area_fft;
-
     void prepare_density_bins()
     {
         // TODO: a m x m grid follows the paper and makes the DCTs easier, but is it actually ideal for non-square
@@ -702,10 +703,10 @@ class StaticPlacer
             g.electro_phi.reset(m, m, 0);
             g.electro_fx.reset(m, m, 0);
             g.electro_fy.reset(m, m, 0);
+            g.cs_table_fft.resize(m * 3 / 2, 0);
+            g.work_area_fft.resize(std::round(std::sqrt(m)) + 2, 0);
+            g.work_area_fft.at(0) = 0;
         }
-        cs_table_fft.resize(m * 3 / 2, 0);
-        work_area_fft.resize(std::round(std::sqrt(m)) + 2, 0);
-        work_area_fft.at(0) = 0;
     }
 
     template <typename TFunc> void iter_slithers(RealPair pos, StaticRect rect, TFunc func)
@@ -821,7 +822,7 @@ class StaticPlacer
         // Based on
         // https://github.com/ALIGN-analoglayout/ALIGN-public/blob/master/PlaceRouteHierFlow/EA_placer/FFT/fft.cpp
         // initial DCT for coefficients
-        ddct2d(m, m, -1, g.density_fft.data(), nullptr, work_area_fft.data(), cs_table_fft.data());
+        ddct2d(m, m, -1, g.density_fft.data(), nullptr, g.work_area_fft.data(), g.cs_table_fft.data());
         // postprocess coefficients
         for (int x = 0; x < m; x++)
             g.density_fft.at(x, 0) *= 0.5f;
@@ -853,9 +854,9 @@ class StaticPlacer
             }
         }
         // IDCT for potential; 2D derivatives for field
-        ddct2d(m, m, 1, g.electro_phi.data(), nullptr, work_area_fft.data(), cs_table_fft.data());
-        ddsct2d(m, m, 1, g.electro_fx.data(), nullptr, work_area_fft.data(), cs_table_fft.data());
-        ddcst2d(m, m, 1, g.electro_fy.data(), nullptr, work_area_fft.data(), cs_table_fft.data());
+        ddct2d(m, m, 1, g.electro_phi.data(), nullptr, g.work_area_fft.data(), g.cs_table_fft.data());
+        ddsct2d(m, m, 1, g.electro_fx.data(), nullptr, g.work_area_fft.data(), g.cs_table_fft.data());
+        ddcst2d(m, m, 1, g.electro_fy.data(), nullptr, g.work_area_fft.data(), g.cs_table_fft.data());
         if (fft_debug) {
             g.electro_phi.write_csv(stringf("out_bin_phi_%d_%d.csv", iter, group));
             g.electro_fx.write_csv(stringf("out_bin_ex_%d_%d.csv", iter, group));

@@ -799,6 +799,7 @@ void write_bitstream(Context *ctx, std::string text_config_file)
     if (!text_config_file.empty()) {
         auto out_config = open_ofstream_and_log_error(text_config_file, "text config file");
         out_config << bitgen.cc;
+        close_ofstream_and_log_error(out_config, text_config_file, "text config file");
     }
 }
 

@@ -210,6 +210,13 @@ std::ofstream open_ofstream_and_log_error(std::string filename, const char *file
     return file;
 }
 
+void close_ofstream_and_log_error(std::ofstream &file, const std::string &filename, const char *file_description)
+{
+    file.close();
+    if (file.fail())
+        log_error("Failed to write %s '%s'.\n", file_description, filename.c_str());
+}
+
 void log_break()
 {
     if (log_newline_count < 2)

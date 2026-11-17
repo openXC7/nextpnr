@@ -281,6 +281,7 @@ void fabulous_write_fasm(const Context *ctx, const FabricConfig &cfg, const std:
 {
     FabFasmWriter wr(ctx, cfg, pip_tags, filename);
     wr.write_fasm();
+    close_ofstream_and_log_error(wr.out, filename, "fasm file");
 }
 
 NEXTPNR_NAMESPACE_END

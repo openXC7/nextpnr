@@ -775,6 +775,10 @@ template <typename FrontendType> struct GenericFrontend
     // parent nets
     void merge_nets(NetInfo *base, NetInfo *mergee)
     {
+        // Both indices can already refer to the same net (e.g. two ports of a submodule that share a net and are
+        // connected to the same parent net); merging a net into itself would erase it while it is still in use
+        if (base == mergee)
+            return;
         // Resolve drivers
         if (mergee->driver.cell != nullptr) {
             if (base->driver.cell != nullptr)

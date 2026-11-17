@@ -35,6 +35,7 @@ static void write_bitstream(const Context *ctx, std::string asc_file)
     auto out = open_ofstream_and_log_error(asc_file, "output file");
 
     write_asc(ctx, out);
+    close_ofstream_and_log_error(out, asc_file, "output file");
 }
 
 void arch_wrap_python(py::module &m)

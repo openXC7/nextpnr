@@ -523,6 +523,7 @@ void GateMateImpl::write_bitstream(const std::string &device, const std::string 
 
     BitstreamBackend be(ctx, this, device, out);
     be.write_bitstream();
+    close_ofstream_and_log_error(out, filename, "bitstream file");
 }
 
 NEXTPNR_NAMESPACE_END

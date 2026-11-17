@@ -68,6 +68,7 @@ void MistralCommandHandler::customBitstream(Context *ctx)
                       std::error_code(errno, std::generic_category()).message().c_str());
         }
         out.write(reinterpret_cast<const char *>(data.data()), data.size());
+        close_ofstream_and_log_error(out, filename, "RBF file");
     }
 }
 

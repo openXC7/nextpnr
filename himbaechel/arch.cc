@@ -101,13 +101,11 @@ void Arch::parse_vopt()
         std::string option_name = e.get_option_name();
         if (!option_name.empty() && option_name[0] == '-') {
             size_t start = option_name.find_first_not_of('-');
-            option_name = option_name.substr(start);
+            option_name = (start == std::string::npos) ? std::string() : option_name.substr(start);
         }
-        std::cerr << "Error: unrecognized --vopt option: " << option_name << std::endl;
-        exit(0);
+        log_error("unrecognized --vopt option: %s\n", option_name.c_str());
     } catch (std::exception &e) {
-        std::cout << e.what() << "\n";
-        exit(0);
+        log_error("%s\n", e.what());
     }
     if (args.options.count("help")) {
         print_vopt_help(vopt_desc);

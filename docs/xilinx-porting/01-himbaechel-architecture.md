@@ -171,7 +171,11 @@ Line counts are `wc -l` on the checkout.
 - **IDDR** ✅ → `ILOGICE3_IFF`; **ODDR** ✅ → `OLOGICE3_OUTFF/TFF` or `OLOGICE2_OUTFF/TFF`.
 - **ISERDESE2** ✅, **OSERDESE2** ✅ (master/slave cascade).
 - **IDELAYE2** ✅, **ODELAYE2** ✅, **IDELAYCTRL** ✅ (duplicated per bank).
-- Unconstrained IO is **not** supported (`pack_io.cc:361` — `log_error("FIXME: unconstrained IO not supported")`).
+- Unconstrained IO is **not** supported (`pack_io.cc` — `log_error("FIXME: unconstrained IO not supported")`),
+  except one port of a differential buffer whose other port is on a package pin: it goes on the
+  other pin of the pair (master P, slave N of one IOB tile), as in Vivado. The two ports of a
+  differential buffer share one `IOSTANDARD`: a port without one takes its partner's, and two
+  different ones are an error.
 
 ### Clocking
 
@@ -198,6 +202,12 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
   single property pairs; `[current_design]` and `INTERNAL_VREF` are warned-and-ignored.
   This is how `PACKAGE_PIN`/`LOC`, `IOSTANDARD`, `DRIVE`, `SLEW`, `PULLTYPE`, `IN_TERM`
   etc. reach the flow. `LOC` is aliased from `PACKAGE_PIN` (`pack_io.cc:341-343`).
+- **`BEL`** (a `(* BEL = "…" *)` attribute, `set_property BEL`, or a line of `-o preplaced`)
+  takes the himbaechel name, `<tile>/<site>.<bel>`, or the name `NEXTPNR_BEL` has in the
+  routed JSON, `<site>/<bel>` (`SLICE_X0Y0/AFF`, `IOB_X1Y177/IOB33S.PAD`), which
+  `resolve_user_bels()` rewrites before packing. It is a requirement: a flip-flop with a
+  `BEL` stays out of its LUT's cluster, and after placement a cell elsewhere, or one the
+  packer replaced without keeping its `BEL`, is an error (`check_user_bels()`).
 - **`create_clock`** with `-period` (ns) on `[get_ports]`/`[get_nets]`
   (`xdc.cc:208-254`): sets `NetInfo::clkconstr` (period + 50% duty). `-name`, `-waveform`,
   `-add` are warned-and-ignored.
@@ -342,7 +352,8 @@ the kintex7 code path is present but not wired into a default device.
 
 The most meaningful `TODO`/`FIXME`/`NPNR_ASSERT_FALSE` markers in `uarch/xilinx`:
 
-- **Unconstrained IO not supported** — `pack_io.cc:361` `log_error("FIXME: unconstrained IO not supported")`.
+- **Unconstrained IO not supported** — `pack_io.cc` `log_error("FIXME: unconstrained IO not supported")`
+  (one port of a differential pair is taken from its partner's pin).
 - **No true differential output** — `pack_io.cc:259` (`FIXME: true diff outputs`); diff outputs
   are emulated with an inverter into the N pin.
 - **MUXF9/F9MUX rejected** on xc7 — `pack.cc:442` (`log_error("MUXF9 is not supported on xc7!")`).

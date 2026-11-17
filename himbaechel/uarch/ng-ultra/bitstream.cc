@@ -698,6 +698,7 @@ void NgUltraImpl::write_bitstream_json(const std::string &filename)
 
     BitstreamJsonBackend be(ctx, this, out);
     be.write_json();
+    close_ofstream_and_log_error(out, filename, "bitstream json file");
 }
 
 NEXTPNR_NAMESPACE_END

@@ -112,6 +112,7 @@ void Ice40CommandHandler::customBitstream(Context *ctx)
         std::string filename = vm["asc"].as<std::string>();
         auto f = open_ofstream_and_log_error(filename, "ASC file");
         write_asc(ctx, f);
+        close_ofstream_and_log_error(f, filename, "ASC file");
     }
 }
 

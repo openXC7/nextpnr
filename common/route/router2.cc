@@ -2388,24 +2388,28 @@ struct Router2
                     std::string filename(cfg.heatmap + "_congestion_by_wiretype_" + std::to_string(iter) + ".csv");
                     auto cong_map = open_ofstream_and_log_error(filename, "congestion-by-wiretype heatmap");
                     write_congestion_by_wiretype_heatmap(cong_map);
+                    close_ofstream_and_log_error(cong_map, filename, "congestion-by-wiretype heatmap");
                     log_info("        wrote congestion-by-wiretype heatmap to %s.\n", filename.c_str());
                 }
                 {
                     std::string filename(cfg.heatmap + "_utilisation_by_wiretype_" + std::to_string(iter) + ".csv");
                     auto cong_map = open_ofstream_and_log_error(filename, "utilisation-by-wiretype heatmap");
                     write_utilisation_by_wiretype_heatmap(cong_map);
+                    close_ofstream_and_log_error(cong_map, filename, "utilisation-by-wiretype heatmap");
                     log_info("        wrote utilisation-by-wiretype heatmap to %s.\n", filename.c_str());
                 }
                 {
                     std::string filename(cfg.heatmap + "_congestion_by_coordinate_" + std::to_string(iter) + ".csv");
                     auto cong_map = open_ofstream_and_log_error(filename, "congestion-by-coordinate heatmap");
                     write_congestion_by_coordinate_heatmap(cong_map);
+                    close_ofstream_and_log_error(cong_map, filename, "congestion-by-coordinate heatmap");
                     log_info("        wrote congestion-by-coordinate heatmap to %s.\n", filename.c_str());
                 }
                 {
                     std::string filename(cfg.heatmap + "_congestion_by_net_" + std::to_string(iter) + ".csv");
                     auto cong_map = open_ofstream_and_log_error(filename, "congestion-by-net heatmap");
                     write_congestion_by_net_heatmap(cong_map);
+                    close_ofstream_and_log_error(cong_map, filename, "congestion-by-net heatmap");
                     log_info("        wrote congestion-by-net heatmap to %s.\n", filename.c_str());
                 }
             }

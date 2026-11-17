@@ -475,7 +475,10 @@ void CommandHandler::setupContext(Context *ctx)
     }
 
     if (vm.count("threads")) {
-        ctx->settings[ctx->id("threads")] = vm["threads"].as<int>();
+        int threads = vm["threads"].as<int>();
+        if (threads < 1)
+            log_error("--threads must be at least 1 (got %d).\n", threads);
+        ctx->settings[ctx->id("threads")] = threads;
     }
 
     if (vm.count("randomize-seed")) {
@@ -749,18 +752,21 @@ int CommandHandler::executeMain(std::unique_ptr<Context> ctx)
         auto f = open_ofstream_and_log_error(filename, "JSON '--write' file");
         if (!write_json_file(f, filename, ctx.get()))
             log_error("Saving design failed.\n");
+        close_ofstream_and_log_error(f, filename, "JSON '--write' file");
     }
 
     if (vm.count("sdf")) {
         std::string filename = vm["sdf"].as<std::string>();
         auto f = open_ofstream_and_log_error(filename, "SDF file");
         ctx->writeSDF(f, vm.count("sdf-cvc"));
+        close_ofstream_and_log_error(f, filename, "SDF file");
     }
 
     if (vm.count("report")) {
         std::string filename = vm["report"].as<std::string>();
         auto f = open_ofstream_and_log_error(filename, "report file");
         ctx->writeJsonReport(f);
+        close_ofstream_and_log_error(f, filename, "report file");
     }
 
 #ifndef NO_PYTHON
@@ -801,12 +807,25 @@ int CommandHandler::exec()
     SetConsoleOutputCP(CP_UTF8);
 #endif
 
+    // The log file is an output as well: a failed write must not go unnoticed, whichever way the run ends. Closes the
+    // file and turns a success into an error if the writes to it failed.
+    auto finish = [&](int rc) {
+        if (logfile.is_open()) {
+            logfile.close();
+            if (logfile.fail()) {
+                std::cerr << "ERROR: Failed to write log file '" << vm["log"].as<std::string>() << "'.\n";
+                return rc != 0 ? rc : 125;
+            }
+        }
+        return rc;
+    };
+
     try {
         if (!parseOptions())
-            return 125;
+            return finish(125);
 
         if (executeBeforeContext())
-            return 0;
+            return finish(0);
 
         dict<std::string, Property> values;
         std::unique_ptr<Context> ctx = createContext(values);
@@ -816,10 +835,14 @@ int CommandHandler::exec()
         printFooter();
         log_break();
         log_info("Program finished normally.\n");
-        return rc;
+        return finish(rc);
     } catch (log_execution_error_exception) {
         printFooter();
-        return 125;
+        return finish(125);
+    } catch (...) {
+        // Any other exception ends the process, but a log file that could not be written is reported first
+        finish(125);
+        throw;
     }
 }
 
