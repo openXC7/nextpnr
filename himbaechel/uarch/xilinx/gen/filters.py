@@ -103,6 +103,19 @@ def include_pip(tile_type, p):
             return False
         if "MMCM_CLK_FREQ_BB" in p.dst_wire().name():
             return False
+    # A block RAM's address can be taken from the block RAM above or below it
+    # (BRAM_CASCINBOT_ADDR* / BRAM_CASCINTOP_ADDR*), for a cascaded pair.  The
+    # router treats them as ordinary pips: a high-fanout address net (a ROM
+    # across hundreds of block RAMs) then reaches a column by entering one block
+    # RAM and chaining through the others, because reusing the net's own wires
+    # costs nothing; on vc707-litex-romlinux one address bit ran through 29 block
+    # RAMs in series, 15 ns.  A cascaded pair's address pins are on one net and
+    # reachable through the interconnect like any other, so these pips are not
+    # needed.
+    if tile_type in ("BRAM_L", "BRAM_R"):
+        src = p.src_wire().name()
+        if "CASCINBOT_ADDR" in src or "CASCINTOP_ADDR" in src:
+            return False
     return True
 
 def is_global_bel(bel):

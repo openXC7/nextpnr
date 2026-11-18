@@ -19,6 +19,11 @@
 #     placer timeouts, and cell shapes no small design instantiates.  A
 #     stretch failure is a bug report, not a merge blocker.
 #
+#   manual -- the `manual` job at the end: stretch entries too long to run
+#     on every push (vc707-heavyhash4, about six hours).  They run only on a
+#     workflow_dispatch with the `manual` input ticked, with the same steps
+#     as the gate (a YAML anchor), and are non-blocking like stretch.
+#
 # WHY ONE PRJXRAY REVISION (this replaces the separate virtex7 workflow)
 #
 # The Virtex-7 designs used to live in their own workflow because
@@ -92,6 +97,11 @@ name: demos
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      manual:
+        description: Also run the manual-only entries (vc707-heavyhash4, about 6 h)
+        type: boolean
+        default: false
 
 concurrency:
   group: demos-${{ github.ref }}
@@ -586,8 +596,8 @@ jobs:
             die: xc7vx485t
             timeout: 300
             pnr_flags: --placer-heap-timingweight 100 --placer-heap-congestion-spread -o delay-matrix=$EX/delay-matrix-xc7vx485t.txt
-            fom_max_worst: 6100
-            fom_max_p95: 5400
+            fom_max_worst: 5730
+            fom_max_p95: 5030
 
           # The lowRISC Sonata's Linux SoC: dual-core VexRiscv-SMP with a
           # shared FPU, 64 KiB I-caches and HyperRAM, on an xc7a50t.  It is
@@ -609,7 +619,7 @@ jobs:
             timeout: 120
             pnr_flags: --placer-heap-timingweight 60 --placer-heap-congestion-spread --freq 25
 
-    steps:
+    steps: &demo-steps
       - uses: actions/checkout@v4
         with:
           path: nextpnr
@@ -1012,8 +1022,8 @@ jobs:
       # block RAM placement rather than anything nextpnr reports.  The score
       # (bram_fom.py) is each block RAM's worst estimated read path to the
       # registers it feeds.  The worst score is the test: every placement that
-      # read its ROM on the board scored 5995 ps or less, the two that did not
-      # 6251 and 6961, and the limit sits between; the p95 limit is a backstop.  It also insists that the
+      # read its ROM on the board scored 5625 ps or less, the two that did not
+      # 5881 and 6591 (60 ps block RAM clock pin), and the limit sits between; the p95 limit is a backstop.  It also insists that the
       # clock-tree model and the block RAM pass ran, since a run without them
       # is the configuration that failed.
       - name: Block RAM placement figure of merit
@@ -1208,3 +1218,44 @@ jobs:
             ${{ matrix.name }}.fasm
             ${{ matrix.name }}.bit
           if-no-files-found: warn
+
+  # Entries too long for every push; see "manual" under TIERS.  The steps are
+  # the gate's own (the &demo-steps anchor), so the entry is built and
+  # checked exactly as it would be in the matrix above.
+  manual:
+    if: github.event_name == 'workflow_dispatch' && inputs.manual
+    name: ${{ matrix.tier }} / ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # A four-lane Kaspa kHeavyHash miner: 256 DSP48E1s in four compact,
+          # identical lanes behind a LiteEth SGMII MAC, 109k cells from
+          # Verilator's structural backend.  The design that showed HeAP's
+          # wirelength-only placement does not route at this density: with
+          # no flags, or with the timing weight the other stretch entries
+          # use, router2 never finishes its first pass.  Congestion-driven
+          # spreading on its own -- no timing weight, which on this design
+          # undoes the spread -- routes it to zero overuse, and beta 0.7
+          # brings the wirelength under Vivado's.  These flags are the board
+          # build's: that bitstream mined testnet-10 with every nonce
+          # verified.  --timing-allow-fail because the route closes under
+          # its 100 MHz constraint; the Fmax is printed, not gated.  About
+          # three hours on a 24-thread desktop, so it takes the full budget
+          # of a hosted runner.  See its README.
+          - name: vc707-heavyhash4
+            tier: stretch
+            source: netlist
+            design: vc707-heavyhash4
+            netlist: vc707_heavyhash4.json.gz
+            xdc: vc707_heavyhash4.xdc
+            family: virtex7
+            part: xc7vx485tffg1761-2
+            die: xc7vx485t
+            timeout: 360
+            pnr_flags: --placer-heap-beta 0.7 --placer-heap-congestion-spread
+
+    steps: *demo-steps

@@ -447,19 +447,39 @@ def import_sdf_timings(variant, sdfcell):
                 TimingValue(int(min(entry.rising.minv, entry.falling.minv)*1000),
                     int(max(entry.rising.maxv, entry.falling.maxv)*1000)))
 
-def import_bram_timings(timing, sdf, is_virtex7=False):
-    # RAMB18 hold figures read off Vivado's own probed paths on the VC707
-    # oracle (docs/extracted-timing.md), in place of the SDF's generic
-    # (and much wider) device-level hold envelope. No equivalent
-    # measurement exists for any other family.
-    def vivado_hold_ps(port):
-        if not is_virtex7: return None
-        table = {
+def import_bram_timings(timing, sdf, device):
+    # Block RAM input hold figures read off Vivado's own paths, in place of the
+    # SDF's generic (and much wider) device-level hold envelope, whose maximum
+    # (about 0.67 ns for the data inputs) the hold check would otherwise use.
+    #  - virtex7: Vivado's probed paths on the VC707 (xc7vx485t-2).
+    #  - kintex7 and artix7: Vivado 2020.1's Hold_ramb36e1_* library value,
+    #    the worst over its corners and over every pin of the group, for
+    #    flip-flops into each input of a true-dual-port RAMB36E1 routed on an
+    #    xc7k160t-1 and an xc7a50t-1; the two parts gave the same maxima.
+    #  - zynq7: the same table. A Zynq's fabric is artix7 (z010 to z020) or
+    #    kintex7 (z030 and up), and those two agree.
+    # Spartan-7 keeps the envelope until it is measured.
+    hold_tables = {
+        "virtex7": {
             "DIADI": 255, "DIPADIP": 255, "DIBDI": 296, "DIPBDIP": 296,
             "ADDRARDADDR": 183, "ADDRBWRADDR": 183,
             "ENARDEN": 96, "ENBWREN": 96,
             "WEA": 46, "WEBWE": 46,
-        }
+        },
+        "kintex7/artix7": {
+            "DIADI": 296, "DIPADIP": 296, "DIBDI": 296, "DIPBDIP": 296,
+            "ADDRARDADDR": 183, "ADDRBWRADDR": 183,
+            "ENARDEN": 96, "ENBWREN": 96,
+            "WEA": 89, "WEBWE": 89,
+        },
+    }
+    if device.startswith("xc7v"):
+        table = hold_tables["virtex7"]
+    elif device.startswith(("xc7k", "xc7a", "xc7z")):
+        table = hold_tables["kintex7/artix7"]
+    else:
+        table = {}
+    def vivado_hold_ps(port):
         # bram36's control-bus ports carry a trailing L/U (18K-half) suffix
         if port not in table and port[-1:] in ("L", "U") and port[:-1] in table:
             port = port[:-1]
@@ -489,9 +509,9 @@ def import_bram_timings(timing, sdf, is_virtex7=False):
     # WF = WRITE_FIRST), and READ_FIRST's setup and hold are shorter. DIADI and
     # DIPADIP take WRITE_MODE_A's entry, DIBDI and DIPBDIP WRITE_MODE_B's, so
     # each variant name ends in both modes; the uarch picks it per cell.
-    def import_data_in_sethold(cell, di_width, dip_width, wsdp, mode_a, mode_b):
-        # In SDP both halves of the data in are written by the port B clock.
-        clock_a = "CLKBWRCLK" if wsdp else "CLKARDCLK"
+    def import_data_in_sethold(cell, di_width, dip_width, wsdp, mode_a, mode_b, clk_sfx=""):
+        # In SDP both halves of the data in are written by the port B clock. clk_sfx: see the RAMB36 note below.
+        clock_a = ("CLKBWRCLK" if wsdp else "CLKARDCLK") + clk_sfx
         ram_mode = "RAMB18SDP" if wsdp else "RAMB18TDP"
         for port, mode in (("A", mode_a), ("B", mode_b)):
             sdfcell = sdf.cells[(f"RAMBFIFO36E1RAM_MODE_{ram_mode}_U_WRITE_MODE_U_{mode}_EN_ECC_READ_FALSE_EN_ECC_WRITE_FALSE", "RAMBFIFO36E1")]
@@ -499,8 +519,8 @@ def import_bram_timings(timing, sdf, is_virtex7=False):
                 if isinstance(entry, parse_sdf.SetupHoldCheck):
                     if port == "A" and entry.pin == "DIADIU": import_bus_sethold(cell, "DIADI", di_width, clock_a, entry)
                     if port == "A" and entry.pin == "DIPADIPU": import_bus_sethold(cell, "DIPADIP", dip_width, clock_a, entry)
-                    if port == "B" and entry.pin == "DIBDIU": import_bus_sethold(cell, "DIBDI", di_width, "CLKBWRCLK", entry)
-                    if port == "B" and entry.pin == "DIPBDIPU": import_bus_sethold(cell, "DIPBDIP", dip_width, "CLKBWRCLK", entry)
+                    if port == "B" and entry.pin == "DIBDIU": import_bus_sethold(cell, "DIBDI", di_width, "CLKBWRCLK" + clk_sfx, entry)
+                    if port == "B" and entry.pin == "DIPBDIPU": import_bus_sethold(cell, "DIPBDIP", dip_width, "CLKBWRCLK" + clk_sfx, entry)
 
     write_modes = ("NC", "RF", "WF")
     for wsdp, rsdp, mode_a, mode_b in itertools.product((False, True), (False, True), write_modes, write_modes):
@@ -530,12 +550,16 @@ def import_bram_timings(timing, sdf, is_virtex7=False):
                 if entry.to_pin == "DOPBDOPU": import_bus_clkq(bram18, "DOPBDOP", 2, "CLKARDCLK" if rsdp else "CLKBWRCLK", entry)
 
         bram36 = timing.add_cell_variant("DEFAULT", f"RAMB36E1_RAMB36E1_{variant}")
+        # The packed RAMB36 has no CLKARDCLK or CLKBWRCLK port, only the L and U halves (CLKARDCLKL/U, CLKBWRCLKL/U),
+        # which the packer connects to the same clock net. An arc that names the unsuffixed clock is dropped by the
+        # timing analyser without a word, which left every RAMB36 read (clock-to-out of DO*) and its address and
+        # data-in setup untimed. The full-width buses take the L clock; WE, EN and RSTRAM take their own half's.
 
         for u in ('L', 'U'):
             for entry in sdf.cells[("RAMBFIFO36E1", "RAMBFIFO36E1")].entries:
                 if isinstance(entry, parse_sdf.SetupHoldCheck):
-                    if entry.pin == "ADDRAU": import_bus_sethold(bram36, f"ADDRARDADDR{u}", 15 if u == 'L' else 14, "CLKARDCLK", entry)
-                    if entry.pin == "ADDRBU": import_bus_sethold(bram36, f"ADDRBWRADDR{u}", 15 if u == 'L' else 14, "CLKBWRCLK", entry)
+                    if entry.pin == "ADDRAU": import_bus_sethold(bram36, f"ADDRARDADDR{u}", 15 if u == 'L' else 14, f"CLKARDCLK{u}", entry)
+                    if entry.pin == "ADDRBU": import_bus_sethold(bram36, f"ADDRBWRADDR{u}", 15 if u == 'L' else 14, f"CLKBWRCLK{u}", entry)
                     if entry.pin == "WEAU": import_bus_sethold(bram36, f"WEA{u}", 4, f"CLKARDCLK{u}", entry)
                     if entry.pin == "WEBU": import_bus_sethold(bram36, f"WEBWE{u}", 8, f"CLKBWRCLK{u}", entry)
             for entry in sdf.cells[("RAMBFIFO36E1_ISFIFO_FALSE", "RAMBFIFO36E1")].entries:
@@ -544,15 +568,15 @@ def import_bram_timings(timing, sdf, is_virtex7=False):
                     if entry.pin == "ENBWRENU": import_pin_sethold(bram36, f"ENBWREN{u}", f"CLKBWRCLK{u}", entry)
                     if entry.pin == "RSTRAMAU": import_pin_sethold(bram36, f"RSTRAMARSTRAM{u}", f"CLKARDCLK{u}", entry)
                     if entry.pin == "RSTRAMBU": import_pin_sethold(bram36, f"RSTRAMB{u}", f"CLKBWRCLK{u}", entry)
-        import_data_in_sethold(bram36, 32, 4, wsdp, mode_a, mode_b)
+        import_data_in_sethold(bram36, 32, 4, wsdp, mode_a, mode_b, clk_sfx="L")
         for entry in sdf.cells[("RAMBFIFO36E1RAM_MODE_U_RAMB18SDP_U_DOA_REG_U_0_EN_ECC_READ_FALSE", "RAMBFIFO36E1")].entries:
             if isinstance(entry, parse_sdf.IOPath):
-                if entry.to_pin == "DOADOU": import_bus_clkq(bram36, "DOADO", 32, "CLKARDCLK", entry)
-                if entry.to_pin == "DOPADOPU": import_bus_clkq(bram36, "DOPADOP", 4, "CLKARDCLK", entry)
+                if entry.to_pin == "DOADOU": import_bus_clkq(bram36, "DOADO", 32, "CLKARDCLKL", entry)
+                if entry.to_pin == "DOPADOPU": import_bus_clkq(bram36, "DOPADOP", 4, "CLKARDCLKL", entry)
         for entry in sdf.cells[("RAMBFIFO36E1RAM_MODE_U_RAMB18TDP_U_DOB_REG_U_0_EN_ECC_READ_FALSE", "RAMBFIFO36E1")].entries:
             if isinstance(entry, parse_sdf.IOPath):
-                if entry.to_pin == "DOBDOU": import_bus_clkq(bram36, "DOBDO", 32, "CLKARDCLK" if rsdp else "CLKBWRCLK", entry)
-                if entry.to_pin == "DOPBDOPU": import_bus_clkq(bram36, "DOPBDOP", 4, "CLKARDCLK" if rsdp else "CLKBWRCLK", entry)
+                if entry.to_pin == "DOBDOU": import_bus_clkq(bram36, "DOBDO", 32, "CLKARDCLKL" if rsdp else "CLKBWRCLKL", entry)
+                if entry.to_pin == "DOPBDOPU": import_bus_clkq(bram36, "DOPBDOP", 4, "CLKARDCLKL" if rsdp else "CLKBWRCLKL", entry)
 
 def main():
     xlbase = path.join(path.dirname(path.realpath(__file__)), "..")
@@ -733,7 +757,7 @@ def main():
             for port, delay in clock_outs:
                 mem.add_clock_out("CLK", port, ClockEdge.RISING, delay)
 
-        import_bram_timings(ch.timing, parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "BRAM_L.sdf")), is_virtex7)
+        import_bram_timings(ch.timing, parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "BRAM_L.sdf")), args.device)
 
     # Import package pins
     for package_name, package in sorted(d.packages.items(), key=lambda x:x[0]):
