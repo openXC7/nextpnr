@@ -1053,6 +1053,102 @@ void XilinxImpl::fixup_routing()
     }
 
     /*
+     * Keep each net's route consistent with the remapping above. A used permutation pip runs from physical pin j's tile wire
+     * to logical pin i's site wire; the LUT port is now physical pin j, so the route must end at j's site wire, or
+     * Context::getNetinfoRouteDelay cannot walk from the sink back to the source and STA and the SDF fall back to
+     * predictArcDelay (an estimate) for every permuted LUT input. Replace each non-identity permutation pip with the identity
+     * pip from the same tile wire: same physical pin, so the same timing class, and FASM writes no permutation pips.
+     * Unbind all first: two nets can swap pins, and each new end is the other's old one.
+     */
+    {
+        std::vector<std::pair<NetInfo *, std::pair<PipId, PlaceStrength>>> swaps;
+        for (auto &net : ctx->nets) {
+            NetInfo *ni = net.second.get();
+            for (auto &wire : ni->wires) {
+                PipId pip = wire.second.pip;
+                const bool no_pip = pip == PipId();
+                if (no_pip)
+                    continue;
+                auto &pd = chip_pip_info(ctx->chip_info, pip);
+                const bool not_permutation = pd.flags != PIP_LUT_PERMUTATION;
+                if (not_permutation)
+                    continue;
+                int cfg = reinterpret_cast<const XlnxPipExtraDataPOD *>(pd.extra_data.get())->pip_config;
+                const bool already_identity = ((cfg >> 4) & 0xF) == (cfg & 0xF);
+                if (already_identity)
+                    continue;
+                swaps.push_back({ni, {pip, wire.second.strength}});
+            }
+        }
+        int unmatched = 0;
+        struct Rebind
+        {
+            NetInfo *net;
+            PipId old_pip, new_pip;
+            PlaceStrength strength;
+        };
+        std::vector<Rebind> binds;
+        for (auto &s : swaps) {
+            PipId pip = s.second.first;
+            int cfg = reinterpret_cast<const XlnxPipExtraDataPOD *>(chip_pip_info(ctx->chip_info, pip).extra_data.get())
+                              ->pip_config;
+            PipId ident;
+            for (PipId p : ctx->getPipsDownhill(ctx->getPipSrcWire(pip))) {
+                auto &qd = chip_pip_info(ctx->chip_info, p);
+                const bool not_permutation = qd.flags != PIP_LUT_PERMUTATION;
+                if (not_permutation)
+                    continue;
+                int qc = reinterpret_cast<const XlnxPipExtraDataPOD *>(qd.extra_data.get())->pip_config;
+                const bool is_identity_of_same_pin = (qc >> 8) == (cfg >> 8) &&
+                                                     ((qc >> 4) & 0xF) == ((cfg >> 4) & 0xF) &&
+                                                     (qc & 0xF) == ((cfg >> 4) & 0xF);
+                if (is_identity_of_same_pin) {
+                    ident = p;
+                    break;
+                }
+            }
+            const bool no_identity = ident == PipId();
+            if (no_identity) {
+                unmatched++;
+                continue;
+            }
+            binds.push_back({s.first, pip, ident, s.second.second});
+        }
+        for (auto &b : binds) // all old ends free before any new one is taken
+            ctx->unbindPip(b.old_pip);
+        // One physical pin can feed several logical pins of the same LUTs (a net on two inputs): its permutation pips then share
+        // one identity pip, which the net may also hold already (one of the logical pins was the physical one). Bind it once.
+        int shared = 0, conflict = 0;
+        for (auto &b : binds) {
+            NetInfo *pn = ctx->getBoundPipNet(b.new_pip);
+            const bool net_holds_it_already = pn == b.net;
+            if (net_holds_it_already) {
+                shared++;
+                continue;
+            }
+            NetInfo *wn = ctx->getBoundWireNet(ctx->getPipDstWire(b.new_pip));
+            const bool held_by_another_net = pn != nullptr || wn != nullptr;
+            if (held_by_another_net) {
+                conflict++;
+                log_warning("permuted LUT input of net '%s': identity pip %s is held by net '%s', not re-bound\n",
+                            b.net->name.c_str(ctx), ctx->nameOfPip(b.new_pip), (pn ? pn : wn)->name.c_str(ctx));
+                // The old pip was unbound above; put it back so the input keeps a route (timed as an estimate, as
+                // before this block), unless an identity pip bound earlier in this loop took its wire.
+                const bool old_end_is_free = ctx->getBoundPipNet(b.old_pip) == nullptr &&
+                                             ctx->getBoundWireNet(ctx->getPipDstWire(b.old_pip)) == nullptr;
+                if (old_end_is_free)
+                    ctx->bindPip(b.old_pip, b.net, b.strength);
+                continue;
+            }
+            ctx->bindPip(b.new_pip, b.net, b.strength);
+        }
+        lut_perm_rebound = int(binds.size()) - conflict;
+        log_info("    %d permuted LUT inputs re-bound to the identity pip of their physical pin (%d without one, %d sharing "
+                 "one, %d held by another net)\n",
+                 int(binds.size()), unmatched, shared, conflict);
+    }
+
+    /*
      * Legalise route through OSERDESE3s
      */
     for (auto &cell : ctx->cells) {

@@ -28,6 +28,7 @@
 #include "util.h"
 
 #include "placer_heap.h"
+#include "timing.h"
 #include "timing_opt.h"
 #include "placer_static.h"
 #include "router2.h"
@@ -219,6 +220,8 @@ void XilinxImpl::init(Context *ctx)
 {
     h.init(ctx);
     HimbaechelAPI::init(ctx);
+    for (int i = 0; i < 6; i++)
+        x_orig_port_ids[i] = ctx->id(stringf("X_ORIG_PORT_A%d", i + 1));
 
     // Resolve the repeated-name bel types once (the placer looks buckets up per
     // cell); everything else buckets as its own type.
@@ -1659,6 +1662,31 @@ void XilinxImpl::name_clocks_after_ports()
                  entry.second.c_str(ctx));
 }
 
+bool XilinxImpl::getCellDelay(const CellInfo *cell, IdString fromPort, IdString toPort, DelayQuad &delay) const
+{
+    // A 5LUT and a 6LUT in one position share pins A1-A5, and fixup_routing connects both cells to every net on them, so a
+    // cell can carry nets its function does not read (even its own output, through its partner). The packer names the
+    // inputs a LUT does read X_ORIG_PORT_<pin>; when a LUT has them, a pin without one has no arc to the output.
+    const bool is_lut = cell->type == id_SLICE_LUTX;
+    if (is_lut) {
+        static const IdString pins[6] = {id_A1, id_A2, id_A3, id_A4, id_A5, id_A6};
+        const IdString *orig = x_orig_port_ids; // this context's, not a static's from the first context
+        for (int i = 0; i < 6; i++) {
+            const bool other_pin = fromPort != pins[i];
+            if (other_pin)
+                continue;
+            bool named = false;
+            for (int k = 0; k < 6 && !named; k++)
+                named = cell->attrs.count(orig[k]) > 0;
+            const bool pin_not_read = named && !cell->attrs.count(orig[i]);
+            if (pin_not_read)
+                return false;
+            break;
+        }
+    }
+    return ctx->get_cell_delay_default(cell, fromPort, toPort, delay);
+}
+
 void XilinxImpl::postRoute()
 {
     // Insert feedthrough buffers on hold-violating arcs and reroute, before
@@ -1667,9 +1695,18 @@ void XilinxImpl::postRoute()
     // Again: the hold-fix buffers are LUT cells, and FASM is written next.
     check_part_limits();
     fixup_routing();
-    // After the last timing analysis (hold-fix runs one).
-    name_clocks_after_ports();
     ctx->assignArchInfo();
+    // The router's own timing report came before fixup_routing re-bound the permuted LUT inputs, so it used estimates for
+    // them; analyse again, so the logged Fmax and --report agree with the SDF.
+    const bool inputs_were_rebound = lut_perm_rebound > 0;
+    if (inputs_were_rebound) {
+        log_info("Timing after re-binding permuted LUT inputs:\n");
+        timing_analysis(ctx, false /*histogram*/, true /*fmax*/, ctx->detailed_timing_report /*path*/, false /*warn*/,
+                        true /*update_results*/);
+    }
+    // After the last timing analysis: hold-fix runs one, and so does the re-bind above, and each keys the results by
+    // net name again, while --report should carry the port names.
+    name_clocks_after_ports();
     const ArchArgs &args = ctx->args;
     if (args.options.count("fasm")) {
         write_fasm(args.options["fasm"].as<std::string>());
