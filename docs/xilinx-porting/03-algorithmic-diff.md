@@ -80,6 +80,24 @@ Steps (`place()` at `common/place/placer_heap.cc:175-418`):
 `chainRipup`, `cell_placement_timeout`, `get_cell_legalisation_weight`, `disableCtrlSet`,
 and the whole control-set API. Config ctor `:2161-2189`.
 
+**This tree** adds to HeAP: the cell-placement timeout computed in 64 bits
+(the `int` product overflowed past ~46k cells and left the limit at its
+floor); `--placer-heap-legalise-effort N` for the legaliser budget, with a
+give-up diagnostic listing the unplaced cells by type and region and a
+per-bucket log of how far the strict legaliser moved cells; fully pinned
+placements (a placement imported from another tool: an unresolvable BEL
+names the cell, a pinned cluster member whose bel is taken is released from
+the cluster and from the solver's cluster map, the control-set table is
+sized from all FF bels); `--placer-heap-seed FILE` to start the solver from
+external tile positions and `--placer-heap-legalise-only` to only spread,
+legalise and refine them.  On the xilinx uarch, placement is followed by
+`sparse_refine.cc` (DSP/BRAM site refinement) and `replicate.cc`
+(flip-flop replication) — see doc 01 §2.  On a dense 109k-cell design the
+configuration that routes is `--placer-heap-beta 0.7
+--placer-heap-congestion-spread` with **no** timing weight: the timing
+weight undoes the congestion spread there (the demos gate's
+`vc707-heavyhash4` entry pins this).
+
 ### 1.2 `common/place/placer1.cc` — SAPlacer (VPR-style simulated annealing)
 
 - `place()` at `:1245`; `placer1_refine` at `:1267` (re-runs SA in refine mode).
@@ -130,6 +148,18 @@ and the whole control-set API. Config ctor `:2161-2189`.
   `reserve_driver_wires_for_arc`/`reserve_sink_wires_for_arc` (`:597-700`).
 - Timing via shared `TimingAnalyser` (clock-skew enabled).
 - Multithreaded 4-quadrant partition; finishes with a `router1()` legality pass.
+  **This tree** cuts each quadrant again by its pin medians into a quadtree
+  (depth from the thread count, or `--router2-partition-depth`) and each
+  half into strips along the axis its nets do not cross, so a 24-thread
+  machine routes the short nets on 16 threads and the halves in parallel
+  before the serial phase; the deepest regions route first.  Results on
+  the quick set are unchanged.
+- **This tree** also indexes wires densely where the arch provides it
+  (`getWireDenseCount`/`getWireDenseIndex`, `tile_wire_base`; an arch
+  returning count 0 keeps the `dict<WireId,int>` path) — a third of the
+  time on a 109k-cell design was WireId hash lookups — and logs progress
+  per phase every two minutes (nets done, arcs, wires explored per arc,
+  unbounded retries), the timestamp an atomic so any worker may report.
 - `Router2Cfg` (`router2.h`): `backwards_max_iter`, `global_backwards_max_iter`,
   `bb_margin_{x,y}`, `ipin_cost_adder`, `bias_cost_factor`, `init_curr_cong_weight`,
   `hist_cong_weight`, `curr_cong_mult`, `estimate_weight`, `perf_profile`,

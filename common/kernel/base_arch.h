@@ -198,6 +198,8 @@ template <typename R> struct BaseArch : ArchAPI<R>
         return empty_if_possible<typename R::WireAttrsRangeT>();
     }
     virtual uint32_t getWireChecksum(WireId wire) const override { return wire.hash(); }
+    virtual int32_t getWireDenseIndex(WireId) const override { return -1; }
+    virtual int32_t getWireDenseCount() const override { return 0; }
 
     virtual void bindWire(WireId wire, NetInfo *net, PlaceStrength strength) override
     {
