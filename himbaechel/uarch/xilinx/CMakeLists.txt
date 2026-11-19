@@ -27,6 +27,7 @@ set(SOURCES
 set(TEST_SOURCES
     tests/bel_bucket_test.cc
     tests/fasm_test.cc
+    tests/json_frontend_test.cc
     tests/pack_test.cc
     tests/part_resources_test.cc
     tests/xdc_test.cc
