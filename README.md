@@ -216,6 +216,13 @@ sudo make install
 
 To build every available stable architecture, use `-DARCH=all`. To include experimental arches (currently nexus), use `-DARCH=all+alpha`.
 
+### Build cache
+
+If `ccache` (or `sccache`) is on `PATH`, CMake uses it as the C++ compiler launcher, so rebuilding after a branch switch, in a fresh build directory, or in a second checkout of the same revision only recompiles what actually changed. Pass `-DUSE_CCACHE=OFF` to disable this, or `-DCMAKE_CXX_COMPILER_LAUNCHER=...` to choose the launcher yourself. With `-DBUILD_RUST=ON` and `sccache` installed, `rustc` is wrapped too.
+
+The cache lives in `~/.cache/ccache` by default. To share it between machines or CI runners, point ccache at a remote store, for example `export CCACHE_REMOTE_STORAGE=redis://cache-host` or `file:/shared/ccache` (see the [ccache manual](https://ccache.dev/manual/latest.html#_remote_storage_backends)); sccache can use S3/GCS/Azure or the GitHub Actions cache instead. The generated chip databases (`chipdb-*.bba` / `.bin`, minutes of Python per device) are ordinary build outputs: keep the build directory, or in CI cache them keyed on the generator inputs, as `.github/workflows` does.
+
+
 ### Per-microarchitecture Himbächel
 
 To build a single nextpnr-himbachel executable for each of the supported microarchitectures, use `-DHIMBAECHEL_SPLIT`.
