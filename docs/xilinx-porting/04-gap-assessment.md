@@ -96,8 +96,8 @@ items to port (each maps to a fork commit):
 
 | Item | Fork | Upstream |
 |---|---|---|
-| Delay model | per-BEL SDF from prjxray timings/ (slicel/m, BRAM, carry4) | chipdb pip/node/cell timing; **LUT/FF stubbed** in gen; BRAM SDF-imported |
-| Speed grades | real parts' grades | single `DEFAULT` grade. Every grade (`1`, `2`, `2L`, `3`) is in its own timing directory (`HIMBAECHEL_XILINX_TIMING`, `gen/xilinx_timing.py`) |
+| Delay model | per-BEL SDF from prjxray timings/ (slicel/m, BRAM, carry4) | chipdb pip/node/cell timing; LUT/FF fixed figures, per-pin LUT costs and wire-class factors with `gen --timing-cal`; BRAM SDF-imported; or a timing directory's delays |
+| Speed grades | real parts' grades | single `DEFAULT` grade without a timing directory. Every grade (`1`, `2`, `2L`, `3`) is in its own timing directory (`HIMBAECHEL_XILINX_TIMING`, `gen/xilinx_timing.py`) |
 | DSP48E1 comb model | ✓ (`dsp48e1IsCombinational`) | ? (verify in doc 01 §5) |
 | Multicycle | `NEXTPNR_MCP_SETUP` in timing walk | upstream SDC path (verify) |
 | Final timing after router2 | ✓ (`7ea51730`) | ⚠ router2 hooks (doc 03 will confirm) |

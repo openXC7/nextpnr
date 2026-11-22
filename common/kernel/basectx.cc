@@ -221,6 +221,9 @@ void BaseCtx::attributesToArchInfo()
                 strength = (PlaceStrength)str->second.as_int64();
 
             BelId b = getCtx()->getBelByNameStr(val->second.as_string());
+            if (b == BelId())
+                log_error("cell '%s' has NEXTPNR_BEL '%s', which names no bel on this device\n", ci->name.c_str(this),
+                          val->second.as_string().c_str());
             getCtx()->bindBel(b, ci, strength);
         }
     }

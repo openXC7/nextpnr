@@ -179,6 +179,18 @@ Port in commit-sized units, each with a bitstream-hash check:
    does); verified post-route fmax report appears.
 6. Keep `fixupPlacement` as belt-and-braces only if WP1 proves insufficient;
    port the STRENGTH_USER-vs-STRONG skip distinction (doc 03 §6 risk 6).
+7. ✅ **Dense designs (the 4-lane kHeavyHash miner, 109k cells, 256 DSPs)**:
+   router2 dense wire index, quadtree and strip partitions, progress lines
+   (doc 03 §1.6); HeAP 64-bit timeout, legalise effort, pinned placements,
+   seed mode (doc 03 §1.1); carry DI on the bypass pin and FF route-through
+   legality with a single LUT route-through resource in the chipdb
+   (`pack_carry.cc`, `xilinx_place.cc`, `gen/xilinx_gen.py` — chipdb
+   regeneration required); `sparse_refine.cc`, `replicate.cc`,
+   `-o macro-region` (doc 01 §2).  Validated by the xilinx unit tests
+   (`tests/pack_test.cc`), the quick set with LVS, and on a VC707: the
+   demos gate's `vc707-heavyhash4` stretch entry carries the flags of the
+   bitstream that mined with every nonce verified.  Open: the route closes
+   at 97.8 MHz against 100; DSP-to-adder distance is still 5× Vivado's.
 
 ### WP5 — XDC parser improvements (small, user-visible) — 🔄 code done, build pending
 From coordinator note `drafts/00c`:

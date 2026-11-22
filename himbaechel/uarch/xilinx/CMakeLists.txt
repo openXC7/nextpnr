@@ -7,6 +7,7 @@ set(SOURCES
     extra_data.h
     fasm.cc
     hold_fix.cc
+    pr_window.cc
     mmcm_tables.cc
     pack_carry.cc
     pack.cc
@@ -18,6 +19,8 @@ set(SOURCES
     part_resources.cc
     pins.cc
     pins.h
+    replicate.cc
+    sparse_refine.cc
     xdc.cc
     xilinx.cc
     xilinx.h

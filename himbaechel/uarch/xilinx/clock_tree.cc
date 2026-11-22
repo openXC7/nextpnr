@@ -24,8 +24,8 @@
 // same at every sink (762 ps here) and nextpnr sees no skew at all.  The
 // silicon has plenty: on an xc7vx485t, Vivado's clock delays grow by about
 // 170 ps for each clock region row away from the BUFG's rows and 1.7 ps for
-// each tile column away from the spine, and a block RAM's clock pin is 430 ps
-// later than a flip-flop's.  On a design whose ROM block RAMs ended up at the
+// each tile column away from the spine, and a block RAM's clock pin is about
+// 60 ps later than a flip-flop's (see the rates below).  On a design whose ROM block RAMs ended up at the
 // top and bottom of the die that was the 0.4-0.9 ns which nextpnr reported as
 // met and the board did not.
 //
@@ -53,8 +53,14 @@ namespace {
 // and block RAMs in every clock region of a placed design), and the routed
 // delay nextpnr gives every global clock sink, for unrouted estimates
 const XilinxImpl::ClockTreeRates clock_tree_rates[] = {
-        // xc7vx485t-2, a VexRiscv LiteX SoC placed by Vivado 2020.1
-        {"xc7vx485t", 170, 17, 430, 762},
+        // xc7vx485t-2, a VexRiscv LiteX SoC placed by Vivado 2020.1.  The block RAM clock pin offset is Vivado's
+        // effective skew (DCD - SCD - CPR) between a flip-flop and a block RAM in one clock region, median over its
+        // sys-clock paths of a routed LiteX Linux SoC: hold FF->BRAM 61 ps (Fast) / 79 ps (Slow) against FF->FF
+        // 11 / 21 ps, setup BRAM->FF -62 / -78 ps.  It was 430, Vivado's destination clock delay difference without
+        // the common path pessimism removal: that difference is on-chip-variation pessimism (launch early, capture
+        // late on the shared clock path), which a single delay per wire does not have.  At 430 every FF->BRAM data
+        // input of a large design failed hold by ~0.25 ns and -o hold-fix could not route its buffers.
+        {"xc7vx485t", 170, 17, 60, 762},
 };
 } // namespace
 

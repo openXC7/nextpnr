@@ -193,6 +193,10 @@ make -j$(nproc)
 sudo make install
 ```
 
+#### xilinx
+
+For reserving a window of the fabric and loading circuits into it through `ICAPE2` at runtime, see [docs/xilinx-partial-reconfiguration.md](docs/xilinx-partial-reconfiguration.md).
+
 ### GUI
 
 The nextpnr GUI is not built by default, to reduce the number of dependencies for a standard headless build. To enable it, add `-DBUILD_GUI=ON` to the CMake command line and ensure that Qt6 and OpenGL are available:
