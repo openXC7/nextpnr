@@ -2011,8 +2011,24 @@ void XC7Packer::pack_gt()
                             port_net->name != ctx->id("$PACKER_GND_NET");
                 bool internal_refclk = false;
 
+                // GTEAST/GTWESTREFCLK0/1 (GTP) and GTNORTH/GTSOUTHREFCLK0/1 (GTX)
+                // are dedicated clock inputs from a neighbouring quad.
+                const bool is_neighbour_refclk = boost::starts_with(port_name, "GTEASTREFCLK") ||
+                                                 boost::starts_with(port_name, "GTWESTREFCLK") ||
+                                                 boost::starts_with(port_name, "GTNORTHREFCLK") ||
+                                                 boost::starts_with(port_name, "GTSOUTHREFCLK");
+                const bool tied_to_constant_net =
+                        port_net != nullptr &&
+                        (port_net->name == ctx->id("$PACKER_GND_NET") || port_net->name == ctx->id("$PACKER_VCC_NET"));
+                const bool neighbour_refclk_tied_to_constant = is_neighbour_refclk && tied_to_constant_net;
+
                 if (port_name == "DRPCLK") {
                     ci->params[ctx->id("_DRPCLK_USED")] = Property(used);
+                } else if (neighbour_refclk_tied_to_constant) {
+                    // The Vivado wizard ties these inputs to ground. They have
+                    // no route from the fabric, so leave them unconnected, as
+                    // for a GTREFCLK tied to a constant.
+                    ci->disconnectPort(port.first);
                 } else if (boost::starts_with(port_name, "GTREFCLK")) {
                     if (port_net == nullptr)
                         continue;

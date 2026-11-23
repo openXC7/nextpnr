@@ -146,6 +146,36 @@ TEST_F(XilinxPackTest, clocking_bufh_bufhce)
     }
 }
 
+TEST_F(XilinxPackTest, pack_gt_neighbour_refclk_tied_to_constant_is_disconnected)
+{
+    // GTEAST/GTWESTREFCLK of a GTPE2_COMMON come from a neighbouring quad and
+    // have no route from the fabric. Tied to a constant (as the Vivado wizard
+    // does) they are left unconnected; driven by a real net they stay.
+    XC7Packer p(ctx, xil);
+    p.pack_constants();
+
+    CellInfo *common = ctx->createCell(ctx->id("common"), id_GTPE2_COMMON);
+    for (auto port : {"GTEASTREFCLK0", "GTEASTREFCLK1", "GTWESTREFCLK0", "GTWESTREFCLK1"})
+        common->addInput(ctx->id(port));
+    NetInfo *gnd = ctx->nets.at(ctx->id("$PACKER_GND_NET")).get();
+    NetInfo *vcc = ctx->nets.at(ctx->id("$PACKER_VCC_NET")).get();
+    common->connectPort(ctx->id("GTEASTREFCLK0"), gnd);
+    common->connectPort(ctx->id("GTWESTREFCLK1"), vcc);
+
+    CellInfo *driver = ctx->createCell(ctx->id("driver"), id_BUFGCTRL);
+    driver->addOutput(id_O);
+    NetInfo *refclk = ctx->createNet(ctx->id("neighbour_refclk"));
+    driver->connectPort(id_O, refclk);
+    common->connectPort(ctx->id("GTWESTREFCLK0"), refclk);
+
+    p.pack_gt();
+
+    EXPECT_EQ(common->getPort(ctx->id("GTEASTREFCLK0")), nullptr);
+    EXPECT_EQ(common->getPort(ctx->id("GTWESTREFCLK1")), nullptr);
+    EXPECT_EQ(common->getPort(ctx->id("GTWESTREFCLK0")), refclk);
+    EXPECT_EQ(common->getPort(ctx->id("GTEASTREFCLK1")), nullptr);
+}
+
 TEST_F(XilinxPackTest, clocking_bufr)
 {
     // BUFR packs to BUFR_BUFR (WP2.6)

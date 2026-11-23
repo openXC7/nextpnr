@@ -218,6 +218,12 @@ pack plumbing ported as a follow-up (see below).
 Validated: GTPE2_CHANNEL+GTPE2_COMMON design (gtp-gtx-tests/gtp_channel)
 P&R on xc7a200tfbg484-1 completes with 171 GTPE2 FASM features emitted;
 blinky + litex-ddr-arty-s7 regressions and all 5 unit tests pass.
+`pack_gt` also leaves the neighbour-quad refclk inputs of a COMMON
+(GTEAST/GTWESTREFCLK on GTP, GTNORTH/GTSOUTHREFCLK on GTX) unconnected
+when they are tied to a constant, as it does for GTREFCLK: the Vivado
+wizard ties them to ground and they have no route from the fabric, so
+such designs failed to route (xc7a50t, xc7z015).  Covered by the
+`pack_gt_neighbour_refclk_tied_to_constant_is_disconnected` packer test.
 
 ### WP7b — PCIE_2_1 hard block — ✅ DONE
 Ported the 640-line `write_pcie_2_1` FASM writer (PG054 PCIe config
