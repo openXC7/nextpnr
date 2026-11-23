@@ -3518,25 +3518,25 @@ struct FasmBackend
             log_error("PLL1_REFCLK_DIV can only be 1 or 2, but is: %d\n", pll1_refclk_div);
         write_bit("PLL1_REFCLK_DIV[4]", pll1_refclk_div == 1);
 
-        auto pll0_fbdiv = int_or_default(ci->params, ctx->id("PLL0_FBDIV"), 1);
+        auto pll0_fbdiv = int_or_default(ci->params, ctx->id("PLL0_FBDIV"), 4);
         bool invalid_pll0_fbdiv = pll0_fbdiv < 1 || pll0_fbdiv > 5;
         if (invalid_pll0_fbdiv)
             log_error("PLL0_FBDIV can only be 1, 2, 3, 4 or 5, but is: %d\n", pll0_fbdiv);
         if (pll0_fbdiv == 1) write_bit("PLL0_FBDIV[4]");
         else write_int_vector("PLL0_FBDIV[1:0]", pll0_fbdiv - 2, 2);
-        auto pll1_fbdiv = int_or_default(ci->params, ctx->id("PLL1_FBDIV"), 1);
+        auto pll1_fbdiv = int_or_default(ci->params, ctx->id("PLL1_FBDIV"), 4);
         bool invalid_pll1_fbdiv = pll1_fbdiv < 1 || pll1_fbdiv > 5;
         if (invalid_pll1_fbdiv)
             log_error("PLL1_FBDIV can only be 1, 2, 3, 4 or 5, but is: %d\n", pll1_fbdiv);
         if (pll1_fbdiv == 1) write_bit("PLL1_FBDIV[4]");
         else write_int_vector("PLL1_FBDIV[1:0]", pll1_fbdiv - 2, 2);
 
-        auto pll0_fbdiv_45 = int_or_default(ci->params, ctx->id("PLL0_FBDIV_45"), 4);
+        auto pll0_fbdiv_45 = int_or_default(ci->params, ctx->id("PLL0_FBDIV_45"), 5);
         bool invalid_pll0_fbdiv_45 = pll0_fbdiv_45 < 4 || pll0_fbdiv_45 > 5;
         if (invalid_pll0_fbdiv_45)
             log_error("PLL0_FBDIV_45 can only be 4 or 5, but is: %d\n", pll0_fbdiv_45);
         write_bit("PLL0_FBDIV_45[0]", pll0_fbdiv_45 == 5);
-        auto pll1_fbdiv_45 = int_or_default(ci->params, ctx->id("PLL1_FBDIV_45"), 4);
+        auto pll1_fbdiv_45 = int_or_default(ci->params, ctx->id("PLL1_FBDIV_45"), 5);
         bool invalid_pll1_fbdiv_45 = pll1_fbdiv_45 < 4 || pll1_fbdiv_45 > 5;
         if (invalid_pll1_fbdiv_45)
             log_error("PLL1_FBDIV_45 can only be 4 or 5, but is: %d\n", pll1_fbdiv_45);
@@ -3583,7 +3583,7 @@ struct FasmBackend
 
         write_str_bool("ALIGN_COMMA_DOUBLE", "ALIGN_COMMA_DOUBLE");
 
-        auto align_comma_enable = int_or_default(ci->params, ctx->id("ALIGN_COMMA_ENABLE"), 0b1111111111);
+        auto align_comma_enable = int_or_default(ci->params, ctx->id("ALIGN_COMMA_ENABLE"), 0b0001111111);
         write_int_vector("ALIGN_COMMA_ENABLE[9:0]", align_comma_enable, 10);
 
         auto align_comma_word = int_or_default(ci->params, ctx->id("ALIGN_COMMA_WORD"), 1);
@@ -3595,22 +3595,22 @@ struct FasmBackend
         else
             write_bit("ALIGN_COMMA_WORD[1]");
 
-        write_str_bool("ALIGN_MCOMMA_DET", "ALIGN_MCOMMA_DET");
+        write_str_bool("ALIGN_MCOMMA_DET", "ALIGN_MCOMMA_DET", "TRUE");
         auto align_mcomma_value = int_or_default(ci->params, ctx->id("ALIGN_MCOMMA_VALUE"), 0b1010000011);
         write_int_vector("ALIGN_MCOMMA_VALUE[9:0]", align_mcomma_value, 10);
 
-        write_str_bool("ALIGN_PCOMMA_DET", "ALIGN_PCOMMA_DET");
+        write_str_bool("ALIGN_PCOMMA_DET", "ALIGN_PCOMMA_DET", "TRUE");
         auto align_pcomma_value = int_or_default(ci->params, ctx->id("ALIGN_PCOMMA_VALUE"), 0b0101111100);
         write_int_vector("ALIGN_PCOMMA_VALUE[9:0]", align_pcomma_value, 10);
 
         auto cbcc_data_source_sel = str_or_default(ci->params, ctx->id("CBCC_DATA_SOURCE_SEL"), "DECODED");
         if (cbcc_data_source_sel == "DECODED") write_bit("CBCC_DATA_SOURCE_SEL.DECODED");
 
-        auto cfok_cfg = get_or_default(ci->params, ctx->id("CFOK_CFG"), Property(int64_t(0))).as_int64();
+        auto cfok_cfg = get_or_default(ci->params, ctx->id("CFOK_CFG"), Property(int64_t(0b1001001000000000000000001000000111010000000LL))).as_int64();
         write_int_vector("CFOK_CFG[42:0]", cfok_cfg, 43);
-        auto cfok_cfg2 = int_or_default(ci->params, ctx->id("CFOK_CFG2"), 0);
+        auto cfok_cfg2 = int_or_default(ci->params, ctx->id("CFOK_CFG2"), 0b0100000);
         write_int_vector("CFOK_CFG2[6:0]", cfok_cfg2, 7);
-        auto cfok_cfg3 = int_or_default(ci->params, ctx->id("CFOK_CFG3"), 0);
+        auto cfok_cfg3 = int_or_default(ci->params, ctx->id("CFOK_CFG3"), 0b0100000);
         write_int_vector("CFOK_CFG3[6:0]", cfok_cfg3, 7);
         auto cfok_cfg4 = bool_or_default(ci->params, ctx->id("CFOK_CFG4"), false);
         write_bit("CFOK_CFG4[0]", cfok_cfg4);
@@ -3620,15 +3620,15 @@ struct FasmBackend
         write_int_vector("CFOK_CFG6[3:0]", cfok_cfg6, 4);
 
         write_str_bool("CHAN_BOND_KEEP_ALIGN", "CHAN_BOND_KEEP_ALIGN");
-        auto chan_bond_max_skew = int_or_default(ci->params, ctx->id("CHAN_BOND_MAX_SKEW"), 0);
+        auto chan_bond_max_skew = int_or_default(ci->params, ctx->id("CHAN_BOND_MAX_SKEW"), 7);
         bool invalid_chan_bond_max_skew = chan_bond_max_skew < 1 || 14 < chan_bond_max_skew;
         if (invalid_chan_bond_max_skew)
             log_error("CHAN_BOND_MAX_SKEW may only range from 1 to 14, but is: %d\n", chan_bond_max_skew);
         write_int_vector("CHAN_BOND_MAX_SKEW[3:0]", chan_bond_max_skew, 4);
 
-        auto chan_bond_seq_1_enable = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_ENABLE"), 0);
+        auto chan_bond_seq_1_enable = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_ENABLE"), 0b1111);
         write_int_vector("CHAN_BOND_SEQ_1_ENABLE[3:0]", chan_bond_seq_1_enable, 4);
-        auto chan_bond_seq_1_1 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_1"), 0);
+        auto chan_bond_seq_1_1 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_1"), 0b0101111100);
         write_int_vector("CHAN_BOND_SEQ_1_1[9:0]", chan_bond_seq_1_1, 10);
         auto chan_bond_seq_1_2 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_1_2"), 0);
         write_int_vector("CHAN_BOND_SEQ_1_2[9:0]", chan_bond_seq_1_2, 10);
@@ -3638,18 +3638,18 @@ struct FasmBackend
         write_int_vector("CHAN_BOND_SEQ_1_4[9:0]", chan_bond_seq_1_4, 10);
 
         write_str_bool("CHAN_BOND_SEQ_2_USE", "CHAN_BOND_SEQ_2_USE");
-        auto chan_bond_seq_2_enable = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_ENABLE"), 0);
+        auto chan_bond_seq_2_enable = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_ENABLE"), 0b1111);
         write_int_vector("CHAN_BOND_SEQ_2_ENABLE[3:0]", chan_bond_seq_2_enable, 4);
-        auto chan_bond_seq_2_1 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_1"), 0);
+        auto chan_bond_seq_2_1 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_1"), 0b0100000000);
         write_int_vector("CHAN_BOND_SEQ_2_1[9:0]", chan_bond_seq_2_1, 10);
-        auto chan_bond_seq_2_2 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_2"), 0);
+        auto chan_bond_seq_2_2 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_2"), 0b0100000000);
         write_int_vector("CHAN_BOND_SEQ_2_2[9:0]", chan_bond_seq_2_2, 10);
-        auto chan_bond_seq_2_3 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_3"), 0);
+        auto chan_bond_seq_2_3 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_3"), 0b0100000000);
         write_int_vector("CHAN_BOND_SEQ_2_3[9:0]", chan_bond_seq_2_3, 10);
-        auto chan_bond_seq_2_4 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_4"), 0);
+        auto chan_bond_seq_2_4 = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_2_4"), 0b0100000000);
         write_int_vector("CHAN_BOND_SEQ_2_4[9:0]", chan_bond_seq_2_4, 10);
 
-        auto chan_bond_seq_len = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_LEN"), 0);
+        auto chan_bond_seq_len = int_or_default(ci->params, ctx->id("CHAN_BOND_SEQ_LEN"), 1);
         bool invalid_chan_bond_seq_len = chan_bond_seq_len < 1 || 4 < chan_bond_seq_len;
         if (invalid_chan_bond_seq_len)
             log_error("CHAN_BOND_SEQ_LEN may only range from 1 to 4, but is: %d\n", chan_bond_seq_len);
@@ -3658,17 +3658,17 @@ struct FasmBackend
         auto clk_common_swing = bool_or_default(ci->params, ctx->id("CLK_COMMON_SWING"), false);
         write_bit("CLK_COMMON_SWING[0]", clk_common_swing);
         write_str_bool("CLK_COR_KEEP_IDLE", "CLK_COR_KEEP_IDLE");
-        auto clk_cor_max_lat = int_or_default(ci->params, ctx->id("CLK_COR_MAX_LAT"), 0);
+        auto clk_cor_max_lat = int_or_default(ci->params, ctx->id("CLK_COR_MAX_LAT"), 20);
         write_int_vector("CLK_COR_MAX_LAT[5:0]", clk_cor_max_lat, 6);
-        auto clk_cor_min_lat = int_or_default(ci->params, ctx->id("CLK_COR_MIN_LAT"), 0);
+        auto clk_cor_min_lat = int_or_default(ci->params, ctx->id("CLK_COR_MIN_LAT"), 18);
         write_int_vector("CLK_COR_MIN_LAT[5:0]", clk_cor_min_lat, 6);
-        write_str_bool("CLK_COR_PRECEDENCE", "CLK_COR_PRECEDENCE");
+        write_str_bool("CLK_COR_PRECEDENCE", "CLK_COR_PRECEDENCE", "TRUE");
         auto clk_cor_repeat_wait = int_or_default(ci->params, ctx->id("CLK_COR_REPEAT_WAIT"), 0);
         write_int_vector("CLK_COR_REPEAT_WAIT[4:0]", clk_cor_repeat_wait, 5);
 
-        auto clk_cor_seq_1_enable = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_ENABLE"), 0);
+        auto clk_cor_seq_1_enable = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_ENABLE"), 0b1111);
         write_int_vector("CLK_COR_SEQ_1_ENABLE[3:0]", clk_cor_seq_1_enable, 4);
-        auto clk_cor_seq_1_1 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_1"), 0);
+        auto clk_cor_seq_1_1 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_1"), 0b0100011100);
         write_int_vector("CLK_COR_SEQ_1_1[9:0]", clk_cor_seq_1_1, 10);
         auto clk_cor_seq_1_2 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_1_2"), 0);
         write_int_vector("CLK_COR_SEQ_1_2[9:0]", clk_cor_seq_1_2, 10);
@@ -3678,30 +3678,30 @@ struct FasmBackend
         write_int_vector("CLK_COR_SEQ_1_4[9:0]", clk_cor_seq_1_4, 10);
 
         write_str_bool("CLK_COR_SEQ_2_USE", "CLK_COR_SEQ_2_USE");
-        auto clk_cor_seq_2_enable = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_ENABLE"), 0);
+        auto clk_cor_seq_2_enable = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_ENABLE"), 0b1111);
         write_int_vector("CLK_COR_SEQ_2_ENABLE[3:0]", clk_cor_seq_2_enable, 4);
-        auto clk_cor_seq_2_1 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_1"), 0);
+        auto clk_cor_seq_2_1 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_1"), 0b0100000000);
         write_int_vector("CLK_COR_SEQ_2_1[9:0]", clk_cor_seq_2_1, 10);
-        auto clk_cor_seq_2_2 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_2"), 0);
+        auto clk_cor_seq_2_2 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_2"), 0b0100000000);
         write_int_vector("CLK_COR_SEQ_2_2[9:0]", clk_cor_seq_2_2, 10);
-        auto clk_cor_seq_2_3 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_3"), 0);
+        auto clk_cor_seq_2_3 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_3"), 0b0100000000);
         write_int_vector("CLK_COR_SEQ_2_3[9:0]", clk_cor_seq_2_3, 10);
-        auto clk_cor_seq_2_4 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_4"), 0);
+        auto clk_cor_seq_2_4 = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_2_4"), 0b0100000000);
         write_int_vector("CLK_COR_SEQ_2_4[9:0]", clk_cor_seq_2_4, 10);
 
-        auto clk_cor_seq_len = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_LEN"), 0);
+        auto clk_cor_seq_len = int_or_default(ci->params, ctx->id("CLK_COR_SEQ_LEN"), 1);
         bool invalid_clk_cor_seq_len = clk_cor_seq_len < 1 || 4 < clk_cor_seq_len;
         if (invalid_clk_cor_seq_len)
             log_error("CLK_COR_SEQ_LEN may only range from 1 to 4, but is: %d\n", clk_cor_seq_len);
         write_int_vector("CLK_COR_SEQ_LEN[1:0]", clk_cor_seq_len - 1, 2);
 
-        write_str_bool("CLK_CORRECT_USE", "CLK_CORRECT_USE");
+        write_str_bool("CLK_CORRECT_USE", "CLK_CORRECT_USE", "TRUE");
 
-        write_str_bool("DEC_MCOMMA_DETECT", "DEC_MCOMMA_DETECT");
-        write_str_bool("DEC_PCOMMA_DETECT", "DEC_PCOMMA_DETECT");
-        write_str_bool("DEC_VALID_COMMA_ONLY", "DEC_VALID_COMMA_ONLY");
+        write_str_bool("DEC_MCOMMA_DETECT", "DEC_MCOMMA_DETECT", "TRUE");
+        write_str_bool("DEC_PCOMMA_DETECT", "DEC_PCOMMA_DETECT", "TRUE");
+        write_str_bool("DEC_VALID_COMMA_ONLY", "DEC_VALID_COMMA_ONLY", "TRUE");
 
-        auto dmonitor_cfg = int_or_default(ci->params, ctx->id("DMONITOR_CFG"), 0x008101);
+        auto dmonitor_cfg = int_or_default(ci->params, ctx->id("DMONITOR_CFG"), 0x000A00);
         write_int_vector("DMONITOR_CFG[23:0]", dmonitor_cfg, 24);
 
         auto es_clk_phase_sel = bool_or_default(ci->params, ctx->id("ES_CLK_PHASE_SEL"), false);
@@ -3727,7 +3727,7 @@ struct FasmBackend
 
         auto fts_deskew_seq_enable = int_or_default(ci->params, ctx->id("FTS_DESKEW_SEQ_ENABLE"), 0b1111);
         write_int_vector("FTS_DESKEW_SEQ_ENABLE[3:0]", fts_deskew_seq_enable, 4);
-        auto fts_lane_deskew_cfg = int_or_default(ci->params, ctx->id("FTS_LANE_DESKEW_CFG"), 0);
+        auto fts_lane_deskew_cfg = int_or_default(ci->params, ctx->id("FTS_LANE_DESKEW_CFG"), 0b1111);
         write_int_vector("FTS_LANE_DESKEW_CFG[3:0]", fts_lane_deskew_cfg, 4);
         write_str_bool("FTS_LANE_DESKEW_EN", "FTS_LANE_DESKEW_EN");
 
@@ -3752,7 +3752,7 @@ struct FasmBackend
         auto loopback_cfg = bool_or_default(ci->params, ctx->id("LOOPBACK_CFG"), false);
         write_bit("LOOPBACK_CFG[0]", loopback_cfg);
 
-        auto outrefclk_sel_inv = int_or_default(ci->params, ctx->id("OUTREFCLK_SEL_INV"), 0);
+        auto outrefclk_sel_inv = int_or_default(ci->params, ctx->id("OUTREFCLK_SEL_INV"), 0b11);
         write_int_vector("OUTREFCLK_SEL_INV[1:0]", outrefclk_sel_inv, 2);
 
         write_str_bool("PCS_PCIE_EN", "PCS_PCIE_EN");
@@ -3760,18 +3760,18 @@ struct FasmBackend
         auto rsvd_attr = int_or_default(ci->params, ctx->id("PCS_RSVD_ATTR"), 0);
         write_int_vector("PCS_RSVD_ATTR[47:0]", rsvd_attr, 48);
 
-        auto pd_trans_time_from_p2 = int_or_default(ci->params, ctx->id("PD_TRANS_TIME_FROM_P2"), 0);
+        auto pd_trans_time_from_p2 = int_or_default(ci->params, ctx->id("PD_TRANS_TIME_FROM_P2"), 0x03C);
         write_int_vector("PD_TRANS_TIME_FROM_P2[11:0]", pd_trans_time_from_p2, 12);
-        auto pd_trans_time_none_p2 = int_or_default(ci->params, ctx->id("PD_TRANS_TIME_NONE_P2"), 0);
+        auto pd_trans_time_none_p2 = int_or_default(ci->params, ctx->id("PD_TRANS_TIME_NONE_P2"), 0x19);
         write_int_vector("PD_TRANS_TIME_NONE_P2[7:0]", pd_trans_time_none_p2, 8);
-        auto pd_trans_time_to_p2 = int_or_default(ci->params, ctx->id("PD_TRANS_TIME_TO_P2"), 0);
+        auto pd_trans_time_to_p2 = int_or_default(ci->params, ctx->id("PD_TRANS_TIME_TO_P2"), 0x64);
         write_int_vector("PD_TRANS_TIME_TO_P2[7:0]", pd_trans_time_to_p2, 8);
 
         auto pma_loopback_cfg = bool_or_default(ci->params, ctx->id("PMA_LOOPBACK_CFG"), false);
         write_bit("PMA_LOOPBACK_CFG[0]", pma_loopback_cfg);
-        auto pma_rsv = int_or_default(ci->params, ctx->id("PMA_RSV"), 0);
+        auto pma_rsv = int_or_default(ci->params, ctx->id("PMA_RSV"), 0x00000333);
         write_int_vector("PMA_RSV[31:0]", pma_rsv, 32);
-        auto pma_rsv2 = int_or_default(ci->params, ctx->id("PMA_RSV2"), 0);
+        auto pma_rsv2 = int_or_default(ci->params, ctx->id("PMA_RSV2"), 0x00002050);
         write_int_vector("PMA_RSV2[31:0]", pma_rsv2, 32);
         auto pma_rsv3 = int_or_default(ci->params, ctx->id("PMA_RSV3"), 0);
         write_int_vector("PMA_RSV3[1:0]", pma_rsv3, 2);
@@ -3784,18 +3784,18 @@ struct FasmBackend
         auto pma_rsv7 = bool_or_default(ci->params, ctx->id("PMA_RSV7"), false);
         write_bit("PMA_RSV7[0]", pma_rsv7);
 
-        auto rx_bias_cfg = int_or_default(ci->params, ctx->id("RX_BIAS_CFG"), 0);
+        auto rx_bias_cfg = int_or_default(ci->params, ctx->id("RX_BIAS_CFG"), 0b0000111100110011);
         write_int_vector("RX_BIAS_CFG[15:0]", rx_bias_cfg, 16);
 
         auto rx_buffer_cfg = int_or_default(ci->params, ctx->id("RX_BUFFER_CFG"), 0);
         write_int_vector("RX_BUFFER_CFG[5:0]", rx_buffer_cfg, 6);
-        auto rx_clkmux_en = bool_or_default(ci->params, ctx->id("RX_CLKMUX_EN"), false);
+        auto rx_clkmux_en = bool_or_default(ci->params, ctx->id("RX_CLKMUX_EN"), true);
         write_bit("RX_CLKMUX_EN[0]", rx_clkmux_en);
-        auto rx_cm_sel = int_or_default(ci->params, ctx->id("RX_CM_SEL"), 0);
+        auto rx_cm_sel = int_or_default(ci->params, ctx->id("RX_CM_SEL"), 0b11);
         write_int_vector("RX_CM_SEL[1:0]", rx_cm_sel, 2);
-        auto rx_cm_trim = int_or_default(ci->params, ctx->id("RX_CM_TRIM"), 0);
+        auto rx_cm_trim = int_or_default(ci->params, ctx->id("RX_CM_TRIM"), 0b0100);
         write_int_vector("RX_CM_TRIM[3:0]", rx_cm_trim, 4);
-        auto rx_data_width = int_or_default(ci->params, ctx->id("RX_DATA_WIDTH"), 0);
+        auto rx_data_width = int_or_default(ci->params, ctx->id("RX_DATA_WIDTH"), 20);
         switch (rx_data_width) {
             case 16:
                 rx_data_width = 2; break;
@@ -3813,26 +3813,26 @@ struct FasmBackend
         write_int_vector("RX_DDI_SEL[5:0]", rx_ddi_sel, 6);
         auto rx_debug_cfg = int_or_default(ci->params, ctx->id("RX_DEBUG_CFG"), 0);
         write_int_vector("RX_DEBUG_CFG[13:0]", rx_debug_cfg, 14);
-        write_str_bool("RX_DEFER_RESET_BUF_EN", "RX_DEFER_RESET_BUF_EN");
-        write_str_bool("RX_DISPERR_SEQ_MATCH", "RX_DISPERR_SEQ_MATCH");
-        auto rx_os_cfg = int_or_default(ci->params, ctx->id("RX_OS_CFG"), 0);
+        write_str_bool("RX_DEFER_RESET_BUF_EN", "RX_DEFER_RESET_BUF_EN", "TRUE");
+        write_str_bool("RX_DISPERR_SEQ_MATCH", "RX_DISPERR_SEQ_MATCH", "TRUE");
+        auto rx_os_cfg = int_or_default(ci->params, ctx->id("RX_OS_CFG"), 0b0001111110000);
         write_int_vector("RX_OS_CFG[12:0]", rx_os_cfg, 13);
-        auto rx_sig_valid_dly = int_or_default(ci->params, ctx->id("RX_SIG_VALID_DLY"), 0) - 1;
+        auto rx_sig_valid_dly = int_or_default(ci->params, ctx->id("RX_SIG_VALID_DLY"), 10) - 1;
         write_int_vector("RX_SIG_VALID_DLY[4:0]", rx_sig_valid_dly, 5);
-        auto rx_xclk_sel = str_or_default(ci->params, ctx->id("RX_XCLK_SEL"), "RXUSR");
+        auto rx_xclk_sel = str_or_default(ci->params, ctx->id("RX_XCLK_SEL"), "RXREC");
         bool invalid_rx_xclk_sel = rx_xclk_sel != "RXUSR" && rx_xclk_sel != "RXREC";
         if (invalid_rx_xclk_sel)
             log_error("RX_XCLK_SEL may only have values 'RXREC' or 'RXUSR' but is: '%s'\n", rx_xclk_sel.c_str());
         write_bit("RX_XCLK_SEL.RXUSR", rx_xclk_sel == "RXUSR");
-        auto rx_clk25_div = int_or_default(ci->params, ctx->id("RX_CLK25_DIV"), 0) - 1;
+        auto rx_clk25_div = int_or_default(ci->params, ctx->id("RX_CLK25_DIV"), 7) - 1;
         write_int_vector("RX_CLK25_DIV[4:0]", rx_clk25_div, 5);
 
-        auto rxbuf_addr_mode = str_or_default(ci->params, ctx->id("RXBUF_ADDR_MODE"), "PMA");
+        auto rxbuf_addr_mode = str_or_default(ci->params, ctx->id("RXBUF_ADDR_MODE"), "FULL");
         bool invalid_rxbuf_addr_mode = rxbuf_addr_mode != "FULL" && rxbuf_addr_mode != "FAST";
         if (invalid_rxbuf_addr_mode)
             log_error("RXBUF_ADDR_MODE may only have values 'FULL' or 'FAST' but is: '%s'\n", rxbuf_addr_mode.c_str());
         write_bit("RXBUF_ADDR_MODE.FAST", rxbuf_addr_mode == "FAST");
-        auto rxbuf_eidle_hi_cnt = int_or_default(ci->params, ctx->id("RXBUF_EIDLE_HI_CNT"), 0);
+        auto rxbuf_eidle_hi_cnt = int_or_default(ci->params, ctx->id("RXBUF_EIDLE_HI_CNT"), 0b1000);
         write_int_vector("RXBUF_EIDLE_HI_CNT[3:0]", rxbuf_eidle_hi_cnt, 4);
         auto rxbuf_eidle_lo_cnt = int_or_default(ci->params, ctx->id("RXBUF_EIDLE_LO_CNT"), 0);
         write_int_vector("RXBUF_EIDLE_LO_CNT[3:0]", rxbuf_eidle_lo_cnt, 4);
@@ -3842,15 +3842,17 @@ struct FasmBackend
         write_str_bool("RXBUF_RESET_ON_EIDLE", "RXBUF_RESET_ON_EIDLE");
         write_str_bool("RXBUF_RESET_ON_RATE_CHANGE", "RXBUF_RESET_ON_RATE_CHANGE", "TRUE");
         write_str_bool("RXBUF_THRESH_OVRD", "RXBUF_THRESH_OVRD");
-        auto rxbuf_thresh_ovflw = int_or_default(ci->params, ctx->id("RXBUF_THRESH_OVFLW"), 0);
+        auto rxbuf_thresh_ovflw = int_or_default(ci->params, ctx->id("RXBUF_THRESH_OVFLW"), 61);
         write_int_vector("RXBUF_THRESH_OVFLW[5:0]", rxbuf_thresh_ovflw, 6);
-        auto rxbuf_thresh_undflw = int_or_default(ci->params, ctx->id("RXBUF_THRESH_UNDFLW"), 0);
+        auto rxbuf_thresh_undflw = int_or_default(ci->params, ctx->id("RXBUF_THRESH_UNDFLW"), 4);
         write_int_vector("RXBUF_THRESH_UNDFLW[5:0]", rxbuf_thresh_undflw, 6);
-        auto rxbufreset_time = int_or_default(ci->params, ctx->id("RXBUFRESET_TIME"), 0);
+        auto rxbufreset_time = int_or_default(ci->params, ctx->id("RXBUFRESET_TIME"), 0b00001);
         write_int_vector("RXBUFRESET_TIME[4:0]", rxbufreset_time, 5);
 
-        auto rxcdr_cfg = get_or_default(ci->params, ctx->id("RXCDR_CFG"),
-            Property("00000000000000000000000000000000000000000000000000000000000000000000000000000000000"));
+        // Property::from_string() reads the bits MSB first, as the parameter is written.
+        auto rxcdr_cfg = get_or_default(
+                ci->params, ctx->id("RXCDR_CFG"),
+                Property::from_string("00000000000000000010000011111111110010000000110000000000001000001000001000000010000"));
         write_vector("RXCDR_CFG[82:0]", bits_from_string_default(rxcdr_cfg, 83));
         auto rxcdr_fr_reset_on_eidle = bool_or_default(ci->params, ctx->id("RXCDR_FR_RESET_ON_EIDLE"), false);
         write_bit("RXCDR_FR_RESET_ON_EIDLE[0]", rxcdr_fr_reset_on_eidle);
@@ -3858,40 +3860,40 @@ struct FasmBackend
         write_bit("RXCDR_PH_RESET_ON_EIDLE[0]", rxcdr_ph_reset_on_eidle);
         auto rxcdr_hold_during_eidle = bool_or_default(ci->params, ctx->id("RXCDR_HOLD_DURING_EIDLE"), false);
         write_bit("RXCDR_HOLD_DURING_EIDLE[0]", rxcdr_hold_during_eidle);
-        auto rxcdr_lock_cfg = int_or_default(ci->params, ctx->id("RXCDR_LOCK_CFG"), 0);
+        auto rxcdr_lock_cfg = int_or_default(ci->params, ctx->id("RXCDR_LOCK_CFG"), 0b001001);
         write_int_vector("RXCDR_LOCK_CFG[5:0]", rxcdr_lock_cfg, 6);
-        auto rxcdrfreqreset_time = int_or_default(ci->params, ctx->id("RXCDRFREQRESET_TIME"), 0);
+        auto rxcdrfreqreset_time = int_or_default(ci->params, ctx->id("RXCDRFREQRESET_TIME"), 0b00001);
         write_int_vector("RXCDRFREQRESET_TIME[4:0]", rxcdrfreqreset_time, 5);
-        auto rxcdrphreset_time = int_or_default(ci->params, ctx->id("RXCDRPHRESET_TIME"), 0);
+        auto rxcdrphreset_time = int_or_default(ci->params, ctx->id("RXCDRPHRESET_TIME"), 0b00001);
         write_int_vector("RXCDRPHRESET_TIME[4:0]", rxcdrphreset_time, 5);
 
-        auto rxdly_cfg = int_or_default(ci->params, ctx->id("RXDLY_CFG"), 0);
+        auto rxdly_cfg = int_or_default(ci->params, ctx->id("RXDLY_CFG"), 0x0010);
         write_int_vector("RXDLY_CFG[15:0]", rxdly_cfg, 16);
-        auto rxdly_lcfg = int_or_default(ci->params, ctx->id("RXDLY_LCFG"), 0);
+        auto rxdly_lcfg = int_or_default(ci->params, ctx->id("RXDLY_LCFG"), 0x020);
         write_int_vector("RXDLY_LCFG[8:0]", rxdly_lcfg, 9);
         auto rxdly_tap_cfg = int_or_default(ci->params, ctx->id("RXDLY_TAP_CFG"), 0);
         write_int_vector("RXDLY_TAP_CFG[15:0]", rxdly_tap_cfg, 16);
 
         write_str_bool("RXGEARBOX_EN", "RXGEARBOX_EN");
 
-        auto rxiscanreset_time = int_or_default(ci->params, ctx->id("RXISCANRESET_TIME"), 0);
+        auto rxiscanreset_time = int_or_default(ci->params, ctx->id("RXISCANRESET_TIME"), 0b00001);
         write_int_vector("RXISCANRESET_TIME[4:0]", rxiscanreset_time, 5);
 
         auto rxlpm_bias_startup_disable = bool_or_default(ci->params, ctx->id("RXLPM_BIAS_STARTUP_DISABLE"), false);
         write_bit("RXLPM_BIAS_STARTUP_DISABLE[0]", rxlpm_bias_startup_disable);
-        auto rxlpm_cfg = int_or_default(ci->params, ctx->id("RXLPM_CFG"), 0);
+        auto rxlpm_cfg = int_or_default(ci->params, ctx->id("RXLPM_CFG"), 0b0110);
         write_int_vector("RXLPM_CFG[3:0]", rxlpm_cfg, 4);
         auto rxlpm_cfg1 = int_or_default(ci->params, ctx->id("RXLPM_CFG1"), 0);
         write_int_vector("RXLPM_CFG1[0]", rxlpm_cfg1, 1);
         auto rxlpm_cm_cfg = int_or_default(ci->params, ctx->id("RXLPM_CM_CFG"), 0);
         write_int_vector("RXLPM_CM_CFG[0]", rxlpm_cm_cfg, 1);
-        auto rxlpm_gc_cfg = int_or_default(ci->params, ctx->id("RXLPM_GC_CFG"), 0);
+        auto rxlpm_gc_cfg = int_or_default(ci->params, ctx->id("RXLPM_GC_CFG"), 0b111100010);
         write_int_vector("RXLPM_GC_CFG[8:0]", rxlpm_gc_cfg, 9);
-        auto rxlpm_gc_cfg2 = int_or_default(ci->params, ctx->id("RXLPM_GC_CFG2"), 0);
+        auto rxlpm_gc_cfg2 = int_or_default(ci->params, ctx->id("RXLPM_GC_CFG2"), 0b001);
         write_int_vector("RXLPM_GC_CFG2[2:0]", rxlpm_gc_cfg2, 3);
-        auto rxlpm_hf_cfg = int_or_default(ci->params, ctx->id("RXLPM_HF_CFG"), 0);
+        auto rxlpm_hf_cfg = int_or_default(ci->params, ctx->id("RXLPM_HF_CFG"), 0b00001111110000);
         write_int_vector("RXLPM_HF_CFG[13:0]", rxlpm_hf_cfg, 14);
-        auto rxlpm_hf_cfg2 = int_or_default(ci->params, ctx->id("RXLPM_HF_CFG2"), 0);
+        auto rxlpm_hf_cfg2 = int_or_default(ci->params, ctx->id("RXLPM_HF_CFG2"), 0b01010);
         write_int_vector("RXLPM_HF_CFG2[4:0]", rxlpm_hf_cfg2, 5);
         auto rxlpm_hf_cfg3 = int_or_default(ci->params, ctx->id("RXLPM_HF_CFG3"), 0);
         write_int_vector("RXLPM_HF_CFG3[3:0]", rxlpm_hf_cfg3, 4);
@@ -3901,16 +3903,16 @@ struct FasmBackend
         write_bit("RXLPM_INCM_CFG[0]", rxlpm_incm_cfg);
         auto rxlpm_ipcm_cfg = bool_or_default(ci->params, ctx->id("RXLPM_IPCM_CFG"), false);
         write_bit("RXLPM_IPCM_CFG[0]", rxlpm_ipcm_cfg);
-        auto rxlpm_lf_cfg = int_or_default(ci->params, ctx->id("RXLPM_LF_CFG"), 0);
+        auto rxlpm_lf_cfg = int_or_default(ci->params, ctx->id("RXLPM_LF_CFG"), 0b000000001111110000);
         write_int_vector("RXLPM_LF_CFG[17:0]", rxlpm_lf_cfg, 18);
-        auto rxlpm_lf_cfg2 = int_or_default(ci->params, ctx->id("RXLPM_LF_CFG2"), 0);
+        auto rxlpm_lf_cfg2 = int_or_default(ci->params, ctx->id("RXLPM_LF_CFG2"), 0b01010);
         write_int_vector("RXLPM_LF_CFG2[4:0]", rxlpm_lf_cfg2, 5);
-        auto rxlpm_osint_cfg = int_or_default(ci->params, ctx->id("RXLPM_OSINT_CFG"), 0);
+        auto rxlpm_osint_cfg = int_or_default(ci->params, ctx->id("RXLPM_OSINT_CFG"), 0b100);
         write_int_vector("RXLPM_OSINT_CFG[2:0]", rxlpm_osint_cfg, 3);
-        auto rxlpmreset_time = int_or_default(ci->params, ctx->id("RXLPMRESET_TIME"), 0);
+        auto rxlpmreset_time = int_or_default(ci->params, ctx->id("RXLPMRESET_TIME"), 0b0001111);
         write_int_vector("RXLPMRESET_TIME[6:0]", rxlpmreset_time, 7);
 
-        auto rxoob_cfg = int_or_default(ci->params, ctx->id("RXOOB_CFG"), 0);
+        auto rxoob_cfg = int_or_default(ci->params, ctx->id("RXOOB_CFG"), 0b0000110);
         write_int_vector("RXOOB_CFG[6:0]", rxoob_cfg, 7);
         auto rxoob_clk_cfg = str_or_default(ci->params, ctx->id("RXOOB_CLK_CFG"), "PMA");
         bool invalid_rxoob_clk_cfg = rxoob_clk_cfg != "FABRIC" && rxoob_clk_cfg != "PMA";
@@ -3918,22 +3920,22 @@ struct FasmBackend
             log_error("RXOOB_CLK_CFG may only have values 'FABRIC' or 'PMA' but is: '%s'\n", rxoob_clk_cfg.c_str());
         write_bit("RXOOB_CLK_CFG.FABRIC", rxoob_clk_cfg == "FABRIC");
 
-        auto rxoscalreset_time = int_or_default(ci->params, ctx->id("RXOSCALRESET_TIME"), 0);
+        auto rxoscalreset_time = int_or_default(ci->params, ctx->id("RXOSCALRESET_TIME"), 0b00011);
         write_int_vector("RXOSCALRESET_TIME[4:0]", rxoscalreset_time, 5);
         auto rxoscalreset_timeout = int_or_default(ci->params, ctx->id("RXOSCALRESET_TIMEOUT"), 0);
         write_int_vector("RXOSCALRESET_TIMEOUT[4:0]", rxoscalreset_timeout, 5);
 
-        auto rxout_div = std::log2(int_or_default(ci->params, ctx->id("RXOUT_DIV"), 1));
+        auto rxout_div = std::log2(int_or_default(ci->params, ctx->id("RXOUT_DIV"), 2));
         write_int_vector("RXOUT_DIV[1:0]", rxout_div, 2);
 
-        auto rxpcsreset_time = int_or_default(ci->params, ctx->id("RXPCSRESET_TIME"), 0);
+        auto rxpcsreset_time = int_or_default(ci->params, ctx->id("RXPCSRESET_TIME"), 0b00001);
         write_int_vector("RXPCSRESET_TIME[4:0]", rxpcsreset_time, 5);
 
-        auto rxph_cfg = int_or_default(ci->params, ctx->id("RXPH_CFG"), 0);
+        auto rxph_cfg = int_or_default(ci->params, ctx->id("RXPH_CFG"), 0xC00002);
         write_int_vector("RXPH_CFG[23:0]", rxph_cfg, 24);
         auto rxph_monitor_sel = int_or_default(ci->params, ctx->id("RXPH_MONITOR_SEL"), 0);
         write_int_vector("RXPH_MONITOR_SEL[4:0]", rxph_monitor_sel, 5);
-        auto rxphdly_cfg = int_or_default(ci->params, ctx->id("RXPHDLY_CFG"), 0);
+        auto rxphdly_cfg = int_or_default(ci->params, ctx->id("RXPHDLY_CFG"), 0x084000);
         write_int_vector("RXPHDLY_CFG[23:0]", rxphdly_cfg, 24);
 
         auto rxpi_cfg0 = int_or_default(ci->params, ctx->id("RXPI_CFG0"), 0);
@@ -3943,7 +3945,7 @@ struct FasmBackend
         auto rxpi_cfg2 = bool_or_default(ci->params, ctx->id("RXPI_CFG2"), false);
         write_bit("RXPI_CFG2[0]", rxpi_cfg2);
 
-        auto rxpmareset_time = int_or_default(ci->params, ctx->id("RXPMARESET_TIME"), 0);
+        auto rxpmareset_time = int_or_default(ci->params, ctx->id("RXPMARESET_TIME"), 0b00011);
         write_int_vector("RXPMARESET_TIME[4:0]", rxpmareset_time, 5);
 
         auto rxprbs_err_loopback = bool_or_default(ci->params, ctx->id("RXPRBS_ERR_LOOPBACK"), false);
@@ -3967,28 +3969,28 @@ struct FasmBackend
         auto rxsync_skip_da = bool_or_default(ci->params, ctx->id("RXSYNC_SKIP_DA"), false);
         write_bit("RXSYNC_SKIP_DA[0]", rxsync_skip_da);
 
-        auto sas_max_com = int_or_default(ci->params, ctx->id("SAS_MAX_COM"), 0);
+        auto sas_max_com = int_or_default(ci->params, ctx->id("SAS_MAX_COM"), 64);
         write_int_vector("SAS_MAX_COM[6:0]", sas_max_com, 7);
-        auto sas_min_com = int_or_default(ci->params, ctx->id("SAS_MIN_COM"), 0);
+        auto sas_min_com = int_or_default(ci->params, ctx->id("SAS_MIN_COM"), 36);
         write_int_vector("SAS_MIN_COM[6:0]", sas_min_com, 7);
 
-        auto sata_burst_seq_len = int_or_default(ci->params, ctx->id("SATA_BURST_SEQ_LEN"), 0);
+        auto sata_burst_seq_len = int_or_default(ci->params, ctx->id("SATA_BURST_SEQ_LEN"), 0b1111);
         write_int_vector("SATA_BURST_SEQ_LEN[3:0]", sata_burst_seq_len, 4);
-        auto sata_burst_val = int_or_default(ci->params, ctx->id("SATA_BURST_VAL"), 0);
+        auto sata_burst_val = int_or_default(ci->params, ctx->id("SATA_BURST_VAL"), 0b100);
         write_int_vector("SATA_BURST_VAL[2:0]", sata_burst_val, 3);
-        auto sata_eidle_val = int_or_default(ci->params, ctx->id("SATA_EIDLE_VAL"), 0);
+        auto sata_eidle_val = int_or_default(ci->params, ctx->id("SATA_EIDLE_VAL"), 0b100);
         write_int_vector("SATA_EIDLE_VAL[2:0]", sata_eidle_val, 3);
-        auto sata_max_burst = int_or_default(ci->params, ctx->id("SATA_MAX_BURST"), 0);
+        auto sata_max_burst = int_or_default(ci->params, ctx->id("SATA_MAX_BURST"), 8);
         write_int_vector("SATA_MAX_BURST[5:0]", sata_max_burst, 6);
-        auto sata_max_init = int_or_default(ci->params, ctx->id("SATA_MAX_INIT"), 0);
+        auto sata_max_init = int_or_default(ci->params, ctx->id("SATA_MAX_INIT"), 21);
         write_int_vector("SATA_MAX_INIT[5:0]", sata_max_init, 6);
-        auto sata_max_wake = int_or_default(ci->params, ctx->id("SATA_MAX_WAKE"), 0);
+        auto sata_max_wake = int_or_default(ci->params, ctx->id("SATA_MAX_WAKE"), 7);
         write_int_vector("SATA_MAX_WAKE[5:0]", sata_max_wake, 6);
-        auto sata_min_burst = int_or_default(ci->params, ctx->id("SATA_MIN_BURST"), 0);
+        auto sata_min_burst = int_or_default(ci->params, ctx->id("SATA_MIN_BURST"), 4);
         write_int_vector("SATA_MIN_BURST[5:0]", sata_min_burst, 6);
-        auto sata_min_init = int_or_default(ci->params, ctx->id("SATA_MIN_INIT"), 0);
+        auto sata_min_init = int_or_default(ci->params, ctx->id("SATA_MIN_INIT"), 12);
         write_int_vector("SATA_MIN_INIT[5:0]", sata_min_init, 6);
-        auto sata_min_wake = int_or_default(ci->params, ctx->id("SATA_MIN_WAKE"), 0);
+        auto sata_min_wake = int_or_default(ci->params, ctx->id("SATA_MIN_WAKE"), 4);
         write_int_vector("SATA_MIN_WAKE[5:0]", sata_min_wake, 6);
         auto sata_pll_cfg = str_or_default(ci->params, ctx->id("SATA_PLL_CFG"), "VCO_3000MHZ");
         bool invalid_sata_pll_cfg =
@@ -3998,22 +4000,22 @@ struct FasmBackend
         write_bit("SATA_PLL_CFG.VCO_1500MHZ", sata_pll_cfg == "VCO_1500MHZ");
         write_bit("SATA_PLL_CFG.VCO_750MHZ",  sata_pll_cfg == "VCO_750MHZ");
 
-        write_str_bool("SHOW_REALIGN_COMMA", "SHOW_REALIGN_COMMA");
+        write_str_bool("SHOW_REALIGN_COMMA", "SHOW_REALIGN_COMMA", "TRUE");
 
-        auto term_rcal_cfg = int_or_default(ci->params, ctx->id("TERM_RCAL_CFG"), 0);
+        auto term_rcal_cfg = int_or_default(ci->params, ctx->id("TERM_RCAL_CFG"), 0b100001000010000);
         write_int_vector("TERM_RCAL_CFG[14:0]", term_rcal_cfg, 15);
         auto term_rcal_ovrd = int_or_default(ci->params, ctx->id("TERM_RCAL_OVRD"), 0);
         write_int_vector("TERM_RCAL_OVRD[2:0]", term_rcal_ovrd, 3);
 
-        auto trans_time_rate = int_or_default(ci->params, ctx->id("TRANS_TIME_RATE"), 0);
+        auto trans_time_rate = int_or_default(ci->params, ctx->id("TRANS_TIME_RATE"), 0x0E);
         write_int_vector("TRANS_TIME_RATE[7:0]", trans_time_rate, 8);
 
         auto tst_rsv = int_or_default(ci->params, ctx->id("TST_RSV"), 0);
         write_int_vector("TST_RSV[31:0]", tst_rsv, 32);
 
-        auto tx_clkmux_en = bool_or_default(ci->params, ctx->id("TX_CLKMUX_EN"), false);
+        auto tx_clkmux_en = bool_or_default(ci->params, ctx->id("TX_CLKMUX_EN"), true);
         write_bit("TX_CLKMUX_EN[0]", tx_clkmux_en);
-        auto tx_data_width = int_or_default(ci->params, ctx->id("TX_DATA_WIDTH"), 0);
+        auto tx_data_width = int_or_default(ci->params, ctx->id("TX_DATA_WIDTH"), 20);
         switch (tx_data_width) {
             case 16:
                 tx_data_width = 2; break;
@@ -4034,30 +4036,30 @@ struct FasmBackend
             log_error("TX_DRIVE_MODE may only have values 'PIPE' or 'DIRECT' but is: '%s'\n", tx_drive_mode.c_str());
         write_bit("TX_DRIVE_MODE.PIPE", tx_drive_mode == "PIPE");
 
-        auto tx_eidle_assert_delay = int_or_default(ci->params, ctx->id("TX_EIDLE_ASSERT_DELAY"), 0);
+        auto tx_eidle_assert_delay = int_or_default(ci->params, ctx->id("TX_EIDLE_ASSERT_DELAY"), 0b110);
         write_int_vector("TX_EIDLE_ASSERT_DELAY[2:0]", tx_eidle_assert_delay, 3);
-        auto tx_eidle_deassert_delay = int_or_default(ci->params, ctx->id("TX_EIDLE_DEASSERT_DELAY"), 0);
+        auto tx_eidle_deassert_delay = int_or_default(ci->params, ctx->id("TX_EIDLE_DEASSERT_DELAY"), 0b100);
         write_int_vector("TX_EIDLE_DEASSERT_DELAY[2:0]", tx_eidle_deassert_delay, 3);
 
         write_str_bool("TX_LOOPBACK_DRIVE_HIZ", "TX_LOOPBACK_DRIVE_HIZ");
 
         auto tx_maincursor_sel = bool_or_default(ci->params, ctx->id("TX_MAINCURSOR_SEL"), false);
         write_bit("TX_MAINCURSOR_SEL[0]", tx_maincursor_sel);
-        auto tx_margin_full_0 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_0"), 0b1001111);
+        auto tx_margin_full_0 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_0"), 0b1001110);
         write_int_vector("TX_MARGIN_FULL_0[6:0]", tx_margin_full_0, 7);
-        auto tx_margin_full_1 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_1"), 0b1001111);
+        auto tx_margin_full_1 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_1"), 0b1001001);
         write_int_vector("TX_MARGIN_FULL_1[6:0]", tx_margin_full_1, 7);
-        auto tx_margin_full_2 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_2"), 0b1001111);
+        auto tx_margin_full_2 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_2"), 0b1000101);
         write_int_vector("TX_MARGIN_FULL_2[6:0]", tx_margin_full_2, 7);
-        auto tx_margin_full_3 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_3"), 0b1000001);
+        auto tx_margin_full_3 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_3"), 0b1000010);
         write_int_vector("TX_MARGIN_FULL_3[6:0]", tx_margin_full_3, 7);
         auto tx_margin_full_4 = int_or_default(ci->params, ctx->id("TX_MARGIN_FULL_4"), 0b1000000);
         write_int_vector("TX_MARGIN_FULL_4[6:0]", tx_margin_full_4, 7);
-        auto tx_margin_low_0 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_0"), 0b1000111);
+        auto tx_margin_low_0 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_0"), 0b1000110);
         write_int_vector("TX_MARGIN_LOW_0[6:0]", tx_margin_low_0, 7);
-        auto tx_margin_low_1 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_1"), 0b1000110);
+        auto tx_margin_low_1 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_1"), 0b1000100);
         write_int_vector("TX_MARGIN_LOW_1[6:0]", tx_margin_low_1, 7);
-        auto tx_margin_low_2 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_2"), 0b1000100);
+        auto tx_margin_low_2 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_2"), 0b1000010);
         write_int_vector("TX_MARGIN_LOW_2[6:0]", tx_margin_low_2, 7);
         auto tx_margin_low_3 = int_or_default(ci->params, ctx->id("TX_MARGIN_LOW_3"), 0b1000000);
         write_int_vector("TX_MARGIN_LOW_3[6:0]", tx_margin_low_3, 7);
@@ -4065,42 +4067,42 @@ struct FasmBackend
         write_int_vector("TX_MARGIN_LOW_4[6:0]", tx_margin_low_4, 7);
         auto tx_predriver_mode = bool_or_default(ci->params, ctx->id("TX_PREDRIVER_MODE"), false);
         write_bit("TX_PREDRIVER_MODE", tx_predriver_mode);
-        auto tx_rxdetect_cfg = int_or_default(ci->params, ctx->id("TX_RXDETECT_CFG"), 0);
+        auto tx_rxdetect_cfg = int_or_default(ci->params, ctx->id("TX_RXDETECT_CFG"), 0x1832);
         write_int_vector("TX_RXDETECT_CFG[13:0]", tx_rxdetect_cfg, 14);
-        auto tx_rxdetect_ref = int_or_default(ci->params, ctx->id("TX_RXDETECT_REF"), 0);
+        auto tx_rxdetect_ref = int_or_default(ci->params, ctx->id("TX_RXDETECT_REF"), 0b100);
         write_int_vector("TX_RXDETECT_REF[2:0]", tx_rxdetect_ref, 3);
         auto tx_xclk_sel = str_or_default(ci->params, ctx->id("TX_XCLK_SEL"), "TXUSR");
         bool invalid_tx_xclk_sel = tx_xclk_sel != "TXUSR" && tx_xclk_sel != "TXOUT";
         if (invalid_tx_xclk_sel)
             log_error("TX_XCLK_SEL may only have values 'TXOUT' or 'TXUSR' but is: '%s'\n", tx_xclk_sel.c_str());
         write_bit("TX_XCLK_SEL.TXUSR", tx_xclk_sel == "TXUSR");
-        auto tx_clk25_div = int_or_default(ci->params, ctx->id("TX_CLK25_DIV"), 0) - 1;
+        auto tx_clk25_div = int_or_default(ci->params, ctx->id("TX_CLK25_DIV"), 7) - 1;
         write_int_vector("TX_CLK25_DIV[4:0]", tx_clk25_div, 5);
         auto tx_deemph0 = int_or_default(ci->params, ctx->id("TX_DEEMPH0"), 0);
         write_int_vector("TX_DEEMPH0[5:0]", tx_deemph0, 6);
         auto tx_deemph1 = int_or_default(ci->params, ctx->id("TX_DEEMPH1"), 0);
         write_int_vector("TX_DEEMPH1[5:0]", tx_deemph1, 6);
-        write_str_bool("TXBUF_EN", "TXBUF_EN");
-        write_str_bool("TXBUF_RESET_ON_RATE_CHANGE", "TXBUF_RESET_ON_RATE_CHANGE", "TRUE");
-        auto txdly_cfg = int_or_default(ci->params, ctx->id("TXDLY_CFG"), 0);
+        write_str_bool("TXBUF_EN", "TXBUF_EN", "TRUE");
+        write_str_bool("TXBUF_RESET_ON_RATE_CHANGE", "TXBUF_RESET_ON_RATE_CHANGE", "FALSE");
+        auto txdly_cfg = int_or_default(ci->params, ctx->id("TXDLY_CFG"), 0x0010);
         write_int_vector("TXDLY_CFG[15:0]", txdly_cfg, 16);
-        auto txdly_lcfg = int_or_default(ci->params, ctx->id("TXDLY_LCFG"), 0);
+        auto txdly_lcfg = int_or_default(ci->params, ctx->id("TXDLY_LCFG"), 0x020);
         write_int_vector("TXDLY_LCFG[8:0]", txdly_lcfg, 9);
         auto txdly_tap_cfg = int_or_default(ci->params, ctx->id("TXDLY_TAP_CFG"), 0);
         write_int_vector("TXDLY_TAP_CFG[15:0]", txdly_tap_cfg, 16);
         write_str_bool("TXGEARBOX_EN", "TXGEARBOX_EN");
         auto txoob_cfg = bool_or_default(ci->params, ctx->id("TXOOB_CFG"), false);
         write_bit("TXOOB_CFG[0]", txoob_cfg);
-        auto txout_div = std::log2(int_or_default(ci->params, ctx->id("TXOUT_DIV"), 1));
+        auto txout_div = std::log2(int_or_default(ci->params, ctx->id("TXOUT_DIV"), 2));
         write_int_vector("TXOUT_DIV[1:0]", txout_div, 2);
-        auto txpcsreset_time = int_or_default(ci->params, ctx->id("TXPCSRESET_TIME"), 0);
+        auto txpcsreset_time = int_or_default(ci->params, ctx->id("TXPCSRESET_TIME"), 0b00001);
         write_int_vector("TXPCSRESET_TIME[4:0]", txpcsreset_time, 5);
 
-        auto txph_cfg = int_or_default(ci->params, ctx->id("TXPH_CFG"), 0);
+        auto txph_cfg = int_or_default(ci->params, ctx->id("TXPH_CFG"), 0x0400);
         write_int_vector("TXPH_CFG[15:0]", txph_cfg, 16);
         auto txph_monitor_sel = int_or_default(ci->params, ctx->id("TXPH_MONITOR_SEL"), 0);
         write_int_vector("TXPH_MONITOR_SEL[4:0]", txph_monitor_sel, 5);
-        auto txphdly_cfg = int_or_default(ci->params, ctx->id("TXPHDLY_CFG"), 0);
+        auto txphdly_cfg = int_or_default(ci->params, ctx->id("TXPHDLY_CFG"), 0x084000);
         write_int_vector("TXPHDLY_CFG[23:0]", txphdly_cfg, 24);
 
         auto txpi_grey_sel = bool_or_default(ci->params, ctx->id("TXPI_GREY_SEL"), false);
@@ -4109,7 +4111,7 @@ struct FasmBackend
         write_bit("TXPI_INVSTROBE_SEL[0]", txpi_invstrobe_sel);
         auto txpi_ppm_cfg = int_or_default(ci->params, ctx->id("TXPI_PPM_CFG"), 0);
         write_int_vector("TXPI_PPM_CFG[7:0]", txpi_ppm_cfg, 8);
-        auto txpi_ppmclk_sel = str_or_default(ci->params, ctx->id("TXPI_PPMCLK_SEL"), "TXUSRCLK");
+        auto txpi_ppmclk_sel = str_or_default(ci->params, ctx->id("TXPI_PPMCLK_SEL"), "TXUSRCLK2");
         bool invalid_txpi_ppmclk_sel = txpi_ppmclk_sel != "TXUSRCLK" && txpi_ppmclk_sel != "TXUSRCLK2";
         if (invalid_txpi_ppmclk_sel)
             log_error("TXPI_PPMCLK_SEL may only have values 'TXUSRCLK2' or 'TXUSRCLK' but is: '%s'\n", txpi_ppmclk_sel.c_str());
@@ -4133,7 +4135,7 @@ struct FasmBackend
         write_bit("TXPI_CFG4[0]", txpi_cfg4);
         auto txpi_cfg5 = int_or_default(ci->params, ctx->id("TXPI_CFG5"), 0);
         write_int_vector("TXPI_CFG5[1:0]", txpi_cfg5, 2);
-        auto txpmareset_time = int_or_default(ci->params, ctx->id("TXPMARESET_TIME"), 0);
+        auto txpmareset_time = int_or_default(ci->params, ctx->id("TXPMARESET_TIME"), 0b00001);
         write_int_vector("TXPMARESET_TIME[4:0]", txpmareset_time, 5);
 
         auto txsync_multilane = bool_or_default(ci->params, ctx->id("TXSYNC_MULTILANE"), false);
