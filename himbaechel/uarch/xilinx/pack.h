@@ -147,6 +147,7 @@ struct XilinxPacker
                                 std::vector<NetInfo *> address, NetInfo *di, NetInfo *dout, bool o5, int z,
                                 const CellInfo *macro);
     void pack_dram();
+    void convert_dram_leaf_cells();
 
     // Constant pins
     dict<IdString, dict<IdString, bool>> tied_pins;

@@ -145,7 +145,7 @@ Line counts are `wc -l` on the checkout.
 ### Distributed RAM
 
 - `dram_types` declares: **RAM32X1S/D, RAM64X1S/D, RAM128X1S/D, RAM256X1S/D, RAM512X1S/D** (`pack_dram.cc:153-162`).
-- Actually packed: RAM64X1S, RAM64X1D, RAM32X1D, RAM128X1D, RAM256X1D, RAM128X1S, RAM256X1S, plus whole-slice **RAM32M / RAM64M** (`pack_dram.cc:250-523`).
+- Actually packed: RAM64X1S, RAM64X1D, RAM32X1D, RAM128X1D, RAM256X1D, RAM128X1S, RAM256X1S, plus whole-slice **RAM32M / RAM64M** (`pack_dram.cc:250-523`). The leaf cells **RAMS64E, RAMD64E, RAMS32, RAMD32** (as written out by Vivado) are first converted to RAM64X1S, RAM64X1D and RAM32X1D by `convert_dram_leaf_cells`; leaf cells of memories deeper than 64 are rejected.
 - **RAM512X1S/D are declared but have no packing branch** (they would survive packing unconverted — effectively unsupported). RAM32M16/RAM64M8/RAM32X2S/RAM64X8SW appear only in constids/pins.cc, not packed.
 
 ### Block RAM

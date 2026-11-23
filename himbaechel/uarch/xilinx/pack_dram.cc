@@ -21,6 +21,7 @@
 #include <boost/optional.hpp>
 #include <iterator>
 #include <queue>
+#include <regex>
 #include <unordered_set>
 #include "chain_utils.h"
 #include "design_utils.h"
@@ -157,10 +158,97 @@ void XilinxPacker::create_muxf_tree(CellInfo *base, const std::string &name_base
     constrain_muxf_tree(mux_root, base, zoffset);
 }
 
+// The distributed-RAM leaf cells, one per LUT, appear in netlists written by
+// Vivado and in hand-written designs; yosys never emits them.  Each becomes the
+// macro that does the same, so that the macros' packing below groups it with
+// the cells that share its write port and gives the site its write-address LUT:
+//   RAMS64E -> RAM64X1S, RAMS32 -> RAM32X1D (SPO only),
+//   RAMD64E -> RAM64X1D, RAMD32 -> RAM32X1D (SPO if the read address is the
+//   write address, else DPO).
+// Leaf cells of memories deeper than 64 (WADR6/WADR7 in use) are not supported.
+void XilinxPacker::convert_dram_leaf_cells()
+{
+    IdString gnd = ctx->id("$PACKER_GND_NET");
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        bool is_64 = ci->type.in(ctx->id("RAMS64E"), id_RAMD64E);
+        bool is_32 = ci->type.in(ctx->id("RAMS32"), id_RAMD32);
+        if (!is_64 && !is_32)
+            continue;
+        bool is_single_port = ci->type.in(ctx->id("RAMS64E"), ctx->id("RAMS32"));
+        int abits = is_64 ? 6 : 5;
+
+        if (is_64) {
+            for (const char *port : {"WADR6", "WADR7"}) {
+                NetInfo *net = ci->getPort(ctx->id(port));
+                bool is_unused = net == nullptr || net->name == gnd;
+                if (!is_unused)
+                    log_error("%s '%s' uses %s: distributed-RAM leaf cells of memories deeper than 64 are not "
+                              "supported\n",
+                              ci->type.c_str(ctx), ctx->nameOf(ci), port);
+                ci->disconnectPort(ctx->id(port));
+            }
+            auto mask = ci->params.find(ctx->id("RAM_ADDRESS_MASK"));
+            bool mask_is_zero = true;
+            if (mask != ci->params.end()) {
+                const Property &value = mask->second;
+                if (!value.is_string) {
+                    mask_is_zero = value.str.find('1') == std::string::npos;
+                } else {
+                    // A string value may be written in any base ("0", "2'b00", "0x0"); accept only zero.
+                    static const std::regex zero(" *(0+|[0-9]*'[bBoOdDhH]0+|0[xX]0+) *");
+                    mask_is_zero = std::regex_match(value.as_string(), zero);
+                }
+            }
+            if (!mask_is_zero)
+                log_error("%s '%s' has a non-zero RAM_ADDRESS_MASK: distributed-RAM leaf cells of memories deeper "
+                          "than 64 are not supported\n",
+                          ci->type.c_str(ctx), ctx->nameOf(ci));
+            ci->params.erase(ctx->id("RAM_ADDRESS_MASK"));
+            ci->params.erase(ctx->id("RAM_ADDRESS_SPACE"));
+        }
+
+        ci->renamePort(id_CLK, id_WCLK);
+        ci->renamePort(id_I, id_D);
+        if (ci->params.count(id_IS_CLK_INVERTED)) {
+            ci->params[id_IS_WCLK_INVERTED] = ci->params.at(id_IS_CLK_INVERTED);
+            ci->params.erase(id_IS_CLK_INVERTED);
+        }
+
+        bool reads_at_write_address = true;
+        if (is_single_port) {
+            for (int i = 0; i < abits; i++)
+                ci->renamePort(ctx->idf("ADR%d", i), ctx->idf("A%d", i));
+        } else {
+            for (int i = 0; i < abits; i++)
+                if (ci->getPort(ctx->idf("RADR%d", i)) != ci->getPort(ctx->idf("WADR%d", i)))
+                    reads_at_write_address = false;
+            for (int i = 0; i < abits; i++) {
+                ci->renamePort(ctx->idf("WADR%d", i), ctx->idf("A%d", i));
+                if (reads_at_write_address)
+                    ci->disconnectPort(ctx->idf("RADR%d", i));
+                else
+                    ci->renamePort(ctx->idf("RADR%d", i), ctx->idf("DPRA%d", i));
+            }
+        }
+
+        ci->attrs[ctx->id("X_DRAM_LEAF_CELL")] = 1;
+
+        bool becomes_ram64x1s = is_64 && is_single_port;
+        if (becomes_ram64x1s) {
+            ci->type = id_RAM64X1S;
+        } else {
+            ci->renamePort(id_O, reads_at_write_address ? id_SPO : id_DPO);
+            ci->type = is_64 ? id_RAM64X1D : id_RAM32X1D;
+        }
+    }
+}
+
 void XilinxPacker::pack_dram()
 {
 
     log_info("Packing DRAM..\n");
+    convert_dram_leaf_cells();
 
     dict<DRAMControlSet, std::vector<CellInfo *>> dram_groups;
     dict<IdString, DRAMType> dram_types;
@@ -261,6 +349,16 @@ void XilinxPacker::pack_dram()
     }
 
     int height = /*ctx->xc7 ? 4 : 8*/ 4;
+    // A leaf cell read at its write address goes first in its group, so that it
+    // becomes the site's write-address LUT instead of a separate one being added.
+    // A RAM64M or RAM32M that Vivado wrote out as leaf cells then fills one site.
+    for (auto &group : dram_groups) {
+        std::stable_partition(group.second.begin(), group.second.end(), [&](CellInfo *cell) {
+            bool is_leaf_cell = cell->attrs.count(ctx->id("X_DRAM_LEAF_CELL"));
+            return is_leaf_cell && cell->getPort(id_SPO) != nullptr && cell->getPort(id_DPO) == nullptr;
+        });
+    }
+
     // Grouped DRAM
     for (auto &group : dram_groups) {
         auto &cs = group.first;
