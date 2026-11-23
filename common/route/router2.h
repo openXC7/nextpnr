@@ -32,6 +32,10 @@ struct Router2Cfg
 {
     Router2Cfg(Context *ctx);
 
+    // Number of threads for the partitioned part of routing (the global
+    // "threads" setting); 1 routes the partitions one after another
+    int threads;
+
     // Maximum iterations for backwards routing attempt
     int backwards_max_iter;
     // Maximum iterations for backwards routing attempt for global nets
