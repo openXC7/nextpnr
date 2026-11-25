@@ -321,7 +321,7 @@ the kintex7 code path is present but not wired into a default device.
 - prjxray per-family DB (`HIMBAECHEL_PRJXRAY_DB/<artix7|kintex7|spartan7|zynq7>`), consumed by
   `gen/xilinx_gen.py --xray … --device …`:
   `tilegrid.json`, `tile_type_*.json` (wires/pips/sites + `src_to_dst` timing),
-  `*/package_pins.csv`, `tileconn.json`, `timings/*.sdf` (SLICEM/BRAM).
+  `*/package_pins.csv`, `tileconn.json`, and X-Ray timing tables. The generator reads `slicem.sdf` and `BRAM_L.sdf`; `CLBLL_L.sdf`, when present, also supplies SLICEL carry data-input arcs. Each missing DI arc spans the measured loads in both slice types.
 - nextpnr-xilinx meta: `site_type_*.json` (bels/pins/pips per site + variants) and
   `wire_intents.json`.
 - `constids.inc` for the IdString pool.

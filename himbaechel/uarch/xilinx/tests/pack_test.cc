@@ -235,6 +235,22 @@ TEST_F(XilinxPackTest, diff_pair_with_two_standards_is_an_error)
     EXPECT_THROW(p.pack_io(), log_execution_error_exception);
 }
 
+TEST_F(XilinxPackTest, carry_di_timing)
+{
+    // DI[i] can affect CO[i] and every subsequent carry and sum. O[i]
+    // depends on the incoming carry, before DI[i] enters the chain.
+    CellInfo *carry = ctx->createCell(ctx->id("carry"), id_CARRY4);
+    ctx->assignArchInfo();
+    DelayQuad delay;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            IdString di = ctx->idf("DI%d", i);
+            EXPECT_EQ(ctx->getCellDelay(carry, di, ctx->idf("CO%d", j), delay), j >= i);
+            EXPECT_EQ(ctx->getCellDelay(carry, di, ctx->idf("O%d", j), delay), j > i);
+        }
+    }
+}
+
 // Helper: create an SRLC32E with the ports a real (yosys) design carries.
 static CellInfo *create_srlc32e(Context *ctx, const char *name)
 {

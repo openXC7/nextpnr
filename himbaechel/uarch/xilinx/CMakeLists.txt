@@ -75,6 +75,14 @@ foreach (device ${HIMBAECHEL_XILINX_DEVICES})
     endif()
     set(TIMING_ARGS "")
     set(TIMING_FILES "")
+    # Kintex imports the Artix timing tables, as in xilinx_gen.py.
+    set(XRAY_TIMING_FAMILY ${XRAY_SUBDIR})
+    if (XRAY_SUBDIR STREQUAL "kintex7")
+        set(XRAY_TIMING_FAMILY artix7)
+    endif()
+    set(XRAY_TIMINGS ${HIMBAECHEL_PRJXRAY_DB}/${XRAY_TIMING_FAMILY}/timings)
+    file(GLOB XRAY_SDF_FILES CONFIGURE_DEPENDS
+        ${XRAY_TIMINGS}/slicem.sdf ${XRAY_TIMINGS}/CLBLL_L.sdf ${XRAY_TIMINGS}/BRAM_L.sdf)
     if (HIMBAECHEL_XILINX_TIMING AND EXISTS ${HIMBAECHEL_XILINX_TIMING}/${device})
         message(STATUS "Himbaechel-Xilinx: ${device} timed from ${HIMBAECHEL_XILINX_TIMING}/${device}")
         set(TIMING_ARGS --timing ${HIMBAECHEL_XILINX_TIMING}/${device})
@@ -107,6 +115,7 @@ foreach (device ${HIMBAECHEL_XILINX_DEVICES})
             ${CMAKE_CURRENT_SOURCE_DIR}/gen/parse_sdf.py
             ${CMAKE_CURRENT_SOURCE_DIR}/gen/xilinx_timing.py
             ${CMAKE_CURRENT_SOURCE_DIR}/constids.inc
+            ${XRAY_SDF_FILES}
             ${TIMING_FILES}
     )
 

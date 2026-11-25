@@ -5,6 +5,7 @@ import xilinx_device
 import filters
 import struct
 import itertools
+from collections import defaultdict
 import parse_sdf
 sys.path.append(path.join(path.dirname(__file__), "../../.."))
 from himbaechel_dbgen.chip import *
@@ -439,6 +440,25 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
             add_pip(dst, src, pip_class=PipClass.TILE_ROUTING, timing=backward,
                 pip_config=rt | rev_nb)
 
+def carry_di_arcs(slicem_sdf, slicel_sdf):
+    """Missing DI arcs, bounded over the measured slice and load variants."""
+    base = {(e.from_pin, e.to_pin) for e in slicem_sdf.cells[("CARRY4", "SLICEM")].entries
+            if isinstance(e, parse_sdf.IOPath)}
+    groups = defaultdict(list)
+    for sdf, site in ((slicem_sdf, "SLICEM"), (slicel_sdf, "SLICEL")):
+        for (kind, inst), cell in sdf.cells.items():
+            if inst != site or not kind.startswith("CARRY4_"):
+                continue
+            for e in cell.entries:
+                if isinstance(e, parse_sdf.IOPath) and e.from_pin in ("DI0", "DI1", "DI2", "DI3"):
+                    pair = (e.from_pin, e.to_pin)
+                    if pair not in base:
+                        groups[pair].append(e)
+    def envelope(delays):
+        return parse_sdf.Delay(min(d.minv for d in delays), None, max(d.maxv for d in delays))
+    return [parse_sdf.IOPath(src, dst, envelope([e.rising for e in arcs]), envelope([e.falling for e in arcs]))
+            for (src, dst), arcs in sorted(groups.items())]
+
 def import_sdf_timings(variant, sdfcell):
     # TODO: anything other than comb
     for entry in sdfcell.entries:
@@ -684,19 +704,20 @@ def main():
     timings_root = xraydb_root
     if "kintex7" in xraydb_root: # TODO: missing
         timings_root = xraydb_root.replace("kintex7", "artix7")
+    slicem_sdf = parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "slicem.sdf"))
+    slicel_path = path.join(timings_root, "timings", "CLBLL_L.sdf")
+    slicel_sdf = parse_sdf.parse_sdf_file(slicel_path) if path.exists(slicel_path) else parse_sdf.SDFData()
+    carry_di = carry_di_arcs(slicem_sdf, slicel_sdf)
     if timing_file:
         # An arc or check the directory lacks is X-Ray's: the carry chain's
-        # (CARRY4 in the SLICEM's SDF, and CARRY4_AX, which has DI, in the CLB
-        # tile's), the F7/F8 muxes', and the LUT-RAM's and shift register's (DI2
+        # (ordinary CARRY4 and its DI variants), the F7/F8 muxes', and the LUT-RAM's and shift register's (DI2
         # and O5 among them).
-        slicem_sdf = parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "slicem.sdf"))
-        clb_sdf = parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "CLBLL_L.sdf"))
         def xray(sdf, cell_type, *insts):
             return [e for inst in insts if (cell_type, inst) in sdf.cells for e in sdf.cells[(cell_type, inst)].entries]
         ram = xray(slicem_sdf, "LUT_OR_MEM6LRAM", "SLICEM/A6LUT", "SLICEM") + xray(slicem_sdf, "LUT_OR_MEM5LRAM", "SLICEM/A5LUT", "SLICEM")
         srl = xray(slicem_sdf, "LUT_OR_MEM6SHFREG", "SLICEM/A6LUT", "SLICEM") + xray(slicem_sdf, "LUT_OR_MEM5SHFREG", "SLICEM/A5LUT", "SLICEM")
         timing_file.cell_variants(fallback={
-            "CARRY4": xray(slicem_sdf, "CARRY4", "SLICEM") + xray(clb_sdf, "CARRY4_AX", "SLICEL"),
+            "CARRY4": xray(slicem_sdf, "CARRY4", "SLICEM") + carry_di,
             "SELMUX2_1": xray(slicem_sdf, "SELMUX2_1", "SLICEM/F7BMUX"),
             "SLICE_LUTX": ram + srl, "X_LUT_AS_DRAM": ram, "X_LUT_AS_SRL": srl})
     else:
@@ -730,11 +751,14 @@ def main():
         ff.add_clock_out("CK", "Q", ClockEdge.RISING, ff_clk_q)
 
         # Load SDF for carry and mux
-        slicem_sdf = parse_sdf.parse_sdf_file(path.join(timings_root, "timings", "slicem.sdf"))
         mux = ch.timing.add_cell_variant("DEFAULT", "SELMUX2_1")
         import_sdf_timings(mux, slicem_sdf.cells[("SELMUX2_1", "SLICEM/F7BMUX")])
         carry = ch.timing.add_cell_variant("DEFAULT", "CARRY4")
         import_sdf_timings(carry, slicem_sdf.cells[("CARRY4", "SLICEM")])
+        for e in carry_di:
+            carry.add_comb_arc(e.from_pin, e.to_pin, TimingValue(
+                round(e.rising.minv * 1000), round(e.rising.maxv * 1000),
+                round(e.falling.minv * 1000), round(e.falling.maxv * 1000)))
         # A LUT-RAM or SRL output also changes on the clock, after a write or a
         # shift. Those cells take one of these variants (assign_cell_tags in
         # xilinx.cc): the LUT arcs above plus clock-to-out, the slowest of the four
