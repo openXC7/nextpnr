@@ -742,21 +742,28 @@ void XilinxPacker::pack_srls()
             continue;
         std::string orig_type = str_or_default(ci->attrs, id_X_ORIG_TYPE);
         const bool is_srl16 = orig_type == "SRL16E" || orig_type == "SRLC16E";
-        if (is_srl16) {
-            for (int i = 3; i >= 0; i--) {
-                ci->renamePort(ctx->id("A" + std::to_string(i)), ctx->id("A" + std::to_string(i + 2)));
+        const bool is_srl32 = orig_type == "SRLC32E";
+        if (!is_srl16 && !is_srl32)
+            continue;
+        // Move the logical pin names along with the address nets. Timing looks
+        // up each physical input using its original (possibly bus-indexed) port.
+        for (int i = is_srl16 ? 3 : 4; i >= 0; --i) {
+            ci->renamePort(ctx->idf("A%d", i), ctx->idf("A%d", i + 2));
+            IdString from = ctx->idf("X_ORIG_PORT_A%d", i);
+            if (ci->attrs.count(from)) {
+                Property origin = ci->attrs.at(from);
+                ci->attrs.erase(from);
+                ci->attrs[ctx->idf("X_ORIG_PORT_A%d", i + 2)] = std::move(origin);
             }
+        }
+        if (is_srl16) {
             for (auto tp : {id_A1, id_A6}) {
                 ci->ports[tp].name = tp;
                 ci->ports[tp].type = PORT_IN;
                 ci->connectPort(tp, ctx->nets[ctx->id("$PACKER_VCC_NET")].get());
             }
         }
-        const bool is_srl32 = orig_type == "SRLC32E";
         if (is_srl32) {
-            for (int i = 4; i >= 0; i--) {
-                ci->renamePort(ctx->id("A" + std::to_string(i)), ctx->id("A" + std::to_string(i + 2)));
-            }
             for (auto tp : {id_A1}) {
                 ci->ports[tp].name = tp;
                 ci->ports[tp].type = PORT_IN;

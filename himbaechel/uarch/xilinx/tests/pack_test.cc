@@ -249,6 +249,38 @@ static CellInfo *create_srlc32e(Context *ctx, const char *name)
     return ci;
 }
 
+TEST_F(XilinxPackTest, pack_srl_address_origins)
+{
+    XC7Packer p(ctx, xil);
+    p.pack_constants();
+    for (std::string type : {"SRL16E", "SRLC16E", "SRLC32E"}) {
+        const bool bus = type == "SRLC32E";
+        const int bits = bus ? 5 : 4;
+        CellInfo *ci = ctx->createCell(ctx->id("test_" + type), ctx->id(type));
+        for (int i = 0; i < bits; ++i) {
+            IdString pin = ctx->idf(bus ? "A[%d]" : "A%d", i);
+            ci->addInput(pin);
+            ci->connectPort(pin, ctx->createNet(ctx->idf("%s_a%d", type.c_str(), i)));
+        }
+    }
+    p.pack_srls();
+    for (std::string type : {"SRL16E", "SRLC16E", "SRLC32E"}) {
+        SCOPED_TRACE(type);
+        const bool bus = type == "SRLC32E";
+        const int bits = bus ? 5 : 4;
+        CellInfo *ci = ctx->cells.at(ctx->id("test_" + type)).get();
+        EXPECT_FALSE(ci->attrs.count(ctx->id("X_ORIG_PORT_A0")));
+        EXPECT_FALSE(ci->attrs.count(ctx->id("X_ORIG_PORT_A1")));
+        if (!bus)
+            EXPECT_FALSE(ci->attrs.count(ctx->id("X_ORIG_PORT_A6")));
+        for (int i = 0; i < bits; ++i) {
+            EXPECT_EQ(ci->getPort(ctx->idf("A%d", i + 2)), ctx->nets.at(ctx->idf("%s_a%d", type.c_str(), i)).get());
+            EXPECT_EQ(str_or_default(ci->attrs, ctx->idf("X_ORIG_PORT_A%d", i + 2)),
+                      stringf(bus ? "A[%d]" : "A%d", i));
+        }
+    }
+}
+
 TEST_F(XilinxPackTest, pack_srl_cascade_pair)
 {
     // A two-deep SRLC32E chain (Q31 -> next D) must pack to SLICE_LUTX and be
