@@ -1997,10 +1997,11 @@ void XilinxImpl::assign_cell_tags()
             }
             ct.carry.x_sigs[0] = ci->getPort(id_CYINIT);
         } else if (ci->type == id_RAMB18E1_RAMB18E1 || ci->type == id_RAMB36E1_RAMB36E1) {
+            // SDP reads both output halves on port A and writes both input halves on port B.
             bool read_sdp = ((ci->type == id_RAMB18E1_RAMB18E1 &&
-                              int_or_default(ci->params, ctx->id("READ_WIDTH_B"), 0) == 36) ||
+                              int_or_default(ci->params, ctx->id("READ_WIDTH_A"), 0) == 36) ||
                              (ci->type == id_RAMB36E1_RAMB36E1 &&
-                              int_or_default(ci->params, ctx->id("READ_WIDTH_B"), 0) == 72));
+                              int_or_default(ci->params, ctx->id("READ_WIDTH_A"), 0) == 72));
             bool write_sdp = ((ci->type == id_RAMB18E1_RAMB18E1 &&
                                int_or_default(ci->params, ctx->id("WRITE_WIDTH_B"), 0) == 36) ||
                               (ci->type == id_RAMB36E1_RAMB36E1 &&

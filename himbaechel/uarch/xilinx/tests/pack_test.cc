@@ -352,6 +352,37 @@ TEST_F(XilinxPackTestK325t, pack_io_pcie_retype_preplace)
     EXPECT_EQ(ctx->getBelType(ci->bel), id_PCIE_2_1_PCIE_2_1);
 }
 
+TEST_F(XilinxPackTest, wide_bram_read_clock)
+{
+    for (IdString type : {id_RAMB18E1_RAMB18E1, id_RAMB36E1_RAMB36E1}) {
+        const int wide = type == id_RAMB18E1_RAMB18E1 ? 36 : 72;
+        for (bool sdp : {false, true}) {
+            CellInfo *ci = ctx->createCell(ctx->idf("ram%d_%d", wide, int(sdp)), type);
+            ci->params[ctx->id("READ_WIDTH_A")] = Property(sdp ? wide : wide / 2);
+            ci->params[ctx->id("READ_WIDTH_B")] = Property(sdp ? 0 : wide / 2);
+            ci->params[ctx->id("WRITE_WIDTH_B")] = Property(sdp ? wide : wide / 2);
+            for (const char *port : {"DOADO0", "DOPADOP0", "DOBDO0", "DOPBDOP0"})
+                ci->addOutput(ctx->id(port));
+        }
+    }
+    ctx->assignArchInfo();
+    xil->prePlace();
+    for (auto &cell : ctx->cells) {
+        auto *ci = cell.second.get();
+        const bool sdp = int_or_default(ci->params, ctx->id("READ_WIDTH_B"), 0) == 0;
+        const char *suffix = ci->type == id_RAMB36E1_RAMB36E1 ? "L" : "";
+        for (const char *port : {"DOADO0", "DOPADOP0", "DOBDO0", "DOPBDOP0"}) {
+            SCOPED_TRACE(ci->name.str(ctx) + "." + port);
+            const bool b_half = std::string(port) == "DOBDO0" || std::string(port) == "DOPBDOP0";
+            const char *clock = b_half && !sdp ? "CLKBWRCLK" : "CLKARDCLK";
+            int clocks = 0;
+            ASSERT_EQ(ctx->getPortTimingClass(ci, ctx->id(port), clocks), TMG_REGISTER_OUTPUT);
+            ASSERT_EQ(clocks, 1);
+            EXPECT_EQ(ctx->getPortClockingInfo(ci, ctx->id(port), 0).clock_port, ctx->idf("%s%s", clock, suffix));
+        }
+    }
+}
+
 // Helper: a RAMB36E1 as yosys emits it for a single-port-width memory.
 static CellInfo *create_ramb36e1(Context *ctx, const char *name, int write_width_a, int read_width_b)
 {
