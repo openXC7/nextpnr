@@ -37,6 +37,11 @@ add_nextpnr_himbaechel_microarchitecture(${uarch}
     TEST_SOURCES ${TEST_SOURCES}
 )
 
+if (BUILD_TESTS)
+    add_test(NAME xilinx-srl-input-checks
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_srl_input_checks.py)
+endif()
+
 set(HIMBAECHEL_PRJXRAY_DB "" CACHE STRING
     "Path to a project x-ray database")
 if (NOT HIMBAECHEL_PRJXRAY_DB AND NOT IMPORT_BBA_FILES)

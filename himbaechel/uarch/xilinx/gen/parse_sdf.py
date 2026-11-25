@@ -143,16 +143,18 @@ def parse_sdf_file(filename):
                     if check[0] == "SETUPHOLD":
                         cell.entries.append(
                             SetupHoldCheck(check[1], check[2], parse_delay(check[3][0]), parse_delay(check[4][0])))
-                    elif check[0] == "SETUP":
-                        setups[(check[1], check[2][1])] = parse_delay(check[3][0])
-                    elif check[0] == "HOLD":
-                        holds[(check[1], check[2][1])] = parse_delay(check[3][0])
+                    elif check[0] in ("SETUP", "HOLD"):
+                        # Match the full data and clock events, including their edge qualifiers.
+                        key = tuple(tuple(port) if isinstance(port, list) else port for port in check[1:3])
+                        if check[0] == "SETUP":
+                            setups[key] = check
+                        else:
+                            holds[key] = parse_delay(check[3][0])
                     elif check[0] == "WIDTH":
                         cell.entries.append(WidthCheck(check[1], parse_delay(check[2][0])))
         # merge setups and holds
-        for k, v in setups.items():
-            if k not in holds:
-                continue
-            cell.entries.append(SetupHoldCheck(k[0], k[1], v, holds[k]))
+        for key, setup in setups.items():
+            if key in holds:
+                cell.entries.append(SetupHoldCheck(setup[1], setup[2], parse_delay(setup[3][0]), holds[key]))
         sdf.cells[(celltype, inst)] = cell
     return sdf

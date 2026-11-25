@@ -195,7 +195,6 @@ class TimingDir:
                 seen.add(("comb", e.from_pin, e.to_pin))
                 cell.add_comb_arc(e.from_pin, e.to_pin, value(corners(e)))
             elif isinstance(e, parse_sdf.SetupHoldCheck):
-                # SETUPHOLD names the edge; X-Ray's SETUP and HOLD, merged, the clock alone
                 edge, clock = e.clock if isinstance(e.clock, list) else ("posedge", e.clock)
                 if edge == "posedge" and ("check", e.pin) not in seen:
                     seen.add(("check", e.pin))

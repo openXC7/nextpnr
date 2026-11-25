@@ -8,7 +8,7 @@ import itertools
 import parse_sdf
 sys.path.append(path.join(path.dirname(__file__), "../../.."))
 from himbaechel_dbgen.chip import *
-from xilinx_timing import TimingDir
+from xilinx_timing import TimingDir, value
 
 # The timing directory's delays, where one is given (`--timing`).
 timing_file = None
@@ -439,6 +439,22 @@ def import_tiletype(ch: Chip, tile: xilinx_device.Tile):
             add_pip(dst, src, pip_class=PipClass.TILE_ROUTING, timing=backward,
                 pip_config=rt | rev_nb)
 
+def srl_input_checks(sdf):
+    """Collect the data and enable checks of the packed O6 shift register."""
+    def envelope(delays):
+        lo = round(min(d.minv for d in delays) * 1000)
+        hi = round(max(d.maxv for d in delays) * 1000)
+        return value((lo, hi, lo, hi))
+
+    checks = {}
+    for pin in ("WE", "DI1", "DI2"):
+        entries = [e for (kind, _), cell in sdf.cells.items() if kind == "LUT_OR_MEM6SHFREG"
+                   for e in cell.entries if isinstance(e, parse_sdf.SetupHoldCheck)
+                   and e.clock in ("CLK", ["posedge", "CLK"]) and e.pin in (pin, ["posedge", pin], ["negedge", pin])]
+        if entries:
+            checks[pin] = (envelope([e.setup for e in entries]), envelope([e.hold for e in entries]))
+    return checks
+
 def import_sdf_timings(variant, sdfcell):
     # TODO: anything other than comb
     for entry in sdfcell.entries:
@@ -711,17 +727,18 @@ def main():
         ff_d_setup = TimingValue(34) if is_virtex7 else TimingValue(100, 100)
         ff_d_hold = TimingValue(87) if is_virtex7 else TimingValue(200, 200)
         ff_clk_q = TimingValue(100, 303) if is_virtex7 else TimingValue(300, 350)
-        def add_lut_timing(lut):
+        def add_lut_timing(lut, input_checks=None):
             for i in range(1, 6+1):
                 lut.add_comb_arc(f"A{i}", "O6", lut_delay or TimingValue(100, 125))
                 if i <= 5: lut.add_comb_arc(f"A{i}", "O5", lut_delay or TimingValue(120, 150))
             for i in range(1, 8+1):
                 lut.add_setup_hold("CLK", f"WA{i}", ClockEdge.RISING, TimingValue(100, 500), TimingValue(100, 200))
-            lut.add_setup_hold("CLK", "WE", ClockEdge.RISING, TimingValue(100, 600), TimingValue(100, 100))
-            lut.add_setup_hold("CLK", "DI1", ClockEdge.RISING, TimingValue(100, 100), TimingValue(100, 100))
             # DI2 is the data input of the O6 half of a 32-deep LUT-RAM (RAMD32 at
             # O6) and of an SRL16E: without a setup check those writes go untimed.
-            lut.add_setup_hold("CLK", "DI2", ClockEdge.RISING, TimingValue(100, 100), TimingValue(100, 100))
+            for pin in ("WE", "DI1", "DI2"):
+                default = (TimingValue(100, 600 if pin == "WE" else 100), TimingValue(100, 100))
+                setup, hold = (input_checks or {}).get(pin, default)
+                lut.add_setup_hold("CLK", pin, ClockEdge.RISING, setup, hold)
         add_lut_timing(ch.timing.add_cell_variant("DEFAULT", "SLICE_LUTX"))
         ff = ch.timing.add_cell_variant("DEFAULT", "SLICE_FFX")
         ff.add_setup_hold("CK", "CE", ClockEdge.RISING, TimingValue(100, 100), TimingValue(0, 0))
@@ -753,7 +770,7 @@ def main():
             if any(delay is None for port, delay in clock_outs):
                 continue
             mem = ch.timing.add_cell_variant("DEFAULT", variant)
-            add_lut_timing(mem)
+            add_lut_timing(mem, srl_input_checks(slicem_sdf) if variant == "X_LUT_AS_SRL" else None)
             for port, delay in clock_outs:
                 mem.add_clock_out("CLK", port, ClockEdge.RISING, delay)
 

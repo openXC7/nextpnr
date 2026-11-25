@@ -243,6 +243,10 @@ is a line-based, regex/`boost::split` parser supporting a narrow subset:
     Vivado's figure per family (`import_bram_timings`: virtex7 measured on the VC707; kintex7,
     artix7 and zynq7 the `Hold_ramb36e1_*` library values) in place of the SDF's device-level
     envelope (up to 0.67 ns on the data inputs).
+  - A packed O6 shift register (`X_LUT_AS_SRL`) takes its rising-clock `WE`, `DI1` and
+    `DI2` setup and hold ranges from `LUT_OR_MEM6SHFREG` in X-Ray's `slicem.sdf`.
+    The default model spans the signed minima and maxima across SLICEM sites. An input
+    with no matching check keeps its generic LUT value.
 - **Speed grades**: with X-Ray's delays alone there is one, `DEFAULT`, for every part.
   With a timing directory (`HIMBAECHEL_XILINX_TIMING`, `xilinx_gen.py --timing`,
   `gen/xilinx_timing.py`) the chipdb has every grade the directory has (`1`, `2`, `2L`,
@@ -395,8 +399,9 @@ The most meaningful `TODO`/`FIXME`/`NPNR_ASSERT_FALSE` markers in `uarch/xilinx`
 - **Missing pseudo-pips** — `fasm.cc:306` (`FIXME: PPIPs missing for DSPs`), `fasm.cc:312`
   (`FIXME: PPIPs missing for SING IOI3s`), `fasm.cc:224` (`FIXME: shouldn't these be in the
   X-RAY ppips database?`).
-- **Timing database gaps** — without a timing directory, single `DEFAULT` speed grade, stubbed LUT/FF
-  timing (`xilinx_gen.py:450-462`), `xilinx_gen.py:466` (`kintex7 … TODO: missing` → reuses
+- **Timing database gaps** — without a timing directory, ordinary LUT/FF delays still use
+  defaults. The SRL input checks use family-wide SDF ranges in the single `DEFAULT` grade.
+  Other gaps include `xilinx_gen.py:466` (`kintex7 … TODO: missing` → reuses
   artix7 timing), `xilinx_gen.py:276` (`TODO: anything other than comb` in SDF import),
   `xilinx_gen.py:485` (`TODO: bank` for pads).
 - **RapidWright-alignment hacks** — `fixup_routing` re-encodes LUT input permutations into
