@@ -1,0 +1,1 @@
+ERROR: illegal placement in logic tile X14Y31: 'ff_main' (X14Y31/SLICE_X0Y0.BFF), 'ff_five' (X14Y31/SLICE_X0Y0.B5FF)

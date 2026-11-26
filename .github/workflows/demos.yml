@@ -266,6 +266,24 @@ jobs:
             die: xc7vx485t
             timeout: 90
 
+          # RECORDED P&R FAILURE.  A main FF fed over the X bypass in the same
+          # quarter as a used 5FF: BFF takes cnt[5] over BX while B5FF takes
+          # the B5LUT's O5, pinned by BEL constraints in top.xdc.  The slice
+          # is legal -- Vivado routes it (BFFMUX.BX, B5FFMUX.IN_A) and picks
+          # the pairing by itself -- but xilinx_place.cc rejects it, because
+          # the router cannot bind BFFMUX from X with the 5FF in use.
+          # Closing it means teaching the router that mux; then delete
+          # .github/references/cmoda7-bypass-5ff.pnr-known-failure.  Stretch,
+          # so the known failure does not block the gate.
+          - name: cmoda7-bypass-5ff
+            tier: stretch
+            source: example
+            design: cmoda7-bypass-5ff
+            family: artix7
+            part: xc7a35tcpg236-1
+            die: xc7a50t
+            timeout: 60
+
           # Block RAM with per-byte write enables, spanning two RAMB36E1s so
           # the byte lanes are split across primitives.  This is the write
           # path every LiteX design depends on, and the one where a memory
