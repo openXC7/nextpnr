@@ -411,10 +411,46 @@ void XilinxImpl::parse_xdc(const std::string &filename)
                     if (ctx->debug)
                         log_info("applying property '%s' = '%s' to cell '%s' (on line %d)\n", pair.first.c_str(),
                                  pair.second.c_str(), c->name.c_str(ctx), lineno);
-                    if (c->attrs.find(id_prop) != c->attrs.end()) {
-                        log_nonfatal_error("found multiple properties '%s' for cell '%s' (on line %d)\n",
-                                           pair.first.c_str(), c->name.c_str(ctx), lineno);
-                        num_errors++;
+                    // Vivado's PULLUP/PULLDOWN/KEEPER TRUE (UG912) select the pull resistor of the
+                    // pad, as PULLTYPE does: the bitstream writer reads PULLTYPE only, and without
+                    // this an open-drain bus that relies on the pull-up (I2C) floats.
+                    const std::string property = boost::algorithm::to_upper_copy(pair.first);
+                    const bool is_pull_property =
+                            property == "PULLUP" || property == "PULLDOWN" || property == "KEEPER";
+                    if (is_pull_property) {
+                        const std::string value = boost::algorithm::to_upper_copy(strip_quotes(pair.second));
+                        const bool enabled = value == "TRUE" || value == "1";
+                        const bool disabled = value == "FALSE" || value == "0";
+                        if (!enabled && !disabled) {
+                            log_nonfatal_error("set_property %s expects TRUE or FALSE, not '%s' (on line %d)\n",
+                                               pair.first.c_str(), pair.second.c_str(), lineno);
+                            num_errors++;
+                            continue;
+                        }
+                        if (disabled)
+                            continue;
+                        auto pulltype = c->attrs.find(id_PULLTYPE);
+                        const bool other_pull = pulltype != c->attrs.end() && pulltype->second.as_string() != property;
+                        if (other_pull) {
+                            log_nonfatal_error("cell '%s' has PULLTYPE %s, and set_property %s TRUE (on line %d)\n",
+                                               c->name.c_str(ctx), pulltype->second.as_string().c_str(),
+                                               pair.first.c_str(), lineno);
+                            num_errors++;
+                            continue;
+                        }
+                        c->attrs[id_PULLTYPE] = property;
+                        continue;
+                    }
+                    auto existing = c->attrs.find(id_prop);
+                    if (existing != c->attrs.end()) {
+                        // PULLTYPE set again to the pull a PULLUP/PULLDOWN/KEEPER TRUE already selected.
+                        const bool same_pulltype =
+                                id_prop == id_PULLTYPE && existing->second.as_string() == std::string(pair.second);
+                        if (!same_pulltype) {
+                            log_nonfatal_error("found multiple properties '%s' for cell '%s' (on line %d)\n",
+                                               pair.first.c_str(), c->name.c_str(ctx), lineno);
+                            num_errors++;
+                        }
                     }
                     c->attrs[id_prop] = std::string(pair.second);
                     if (pair.first == "PACKAGE_PIN")

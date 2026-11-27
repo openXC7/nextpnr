@@ -113,3 +113,47 @@ TEST_F(XilinxXdcTest, a_positive_clock_period_constrains_the_net)
     EXPECT_EQ(clk->clkconstr->high.minDelay(), 5000);
     EXPECT_EQ(clk->clkconstr->low.minDelay(), 5000);
 }
+
+// Vivado's PULLUP/PULLDOWN/KEEPER TRUE on a port: the pull resistor the bitstream writer reads
+// from PULLTYPE. Without it, an open-drain bus with no external pull-up (I2C) floated.
+TEST_F(XilinxXdcTest, pullup_true_selects_the_pull_up)
+{
+    CellInfo *sda = ctx->createCell(ctx->id("sda"), ctx->id("$nextpnr_iobuf"));
+    parse("set_property PULLUP TRUE [get_ports sda]\n");
+    ASSERT_EQ(sda->attrs.count(ctx->id("PULLTYPE")), 1U);
+    EXPECT_EQ(sda->attrs.at(ctx->id("PULLTYPE")).as_string(), "PULLUP");
+}
+
+TEST_F(XilinxXdcTest, pulldown_and_keeper_in_a_dict_select_their_pull)
+{
+    CellInfo *a = ctx->createCell(ctx->id("a"), ctx->id("$nextpnr_ibuf"));
+    CellInfo *b = ctx->createCell(ctx->id("b"), ctx->id("$nextpnr_ibuf"));
+    parse("set_property -dict {PULLDOWN true IOSTANDARD LVCMOS33} [get_ports a]\n"
+          "set_property KEEPER 1 [get_ports b]\n");
+    EXPECT_EQ(a->attrs.at(ctx->id("PULLTYPE")).as_string(), "PULLDOWN");
+    EXPECT_EQ(a->attrs.at(ctx->id("IOSTANDARD")).as_string(), "LVCMOS33");
+    EXPECT_EQ(b->attrs.at(ctx->id("PULLTYPE")).as_string(), "KEEPER");
+}
+
+TEST_F(XilinxXdcTest, pullup_false_leaves_no_pull)
+{
+    CellInfo *sda = ctx->createCell(ctx->id("sda"), ctx->id("$nextpnr_iobuf"));
+    parse("set_property PULLUP FALSE [get_ports sda]\n");
+    EXPECT_EQ(sda->attrs.count(ctx->id("PULLTYPE")), 0U);
+}
+
+TEST_F(XilinxXdcTest, pullup_true_and_pulltype_pullup_agree)
+{
+    CellInfo *sda = ctx->createCell(ctx->id("sda"), ctx->id("$nextpnr_iobuf"));
+    parse("set_property PULLUP TRUE [get_ports sda]\n"
+          "set_property PULLTYPE PULLUP [get_ports sda]\n");
+    EXPECT_EQ(sda->attrs.at(ctx->id("PULLTYPE")).as_string(), "PULLUP");
+}
+
+TEST_F(XilinxXdcTest, two_different_pulls_are_an_error)
+{
+    ctx->createCell(ctx->id("sda"), ctx->id("$nextpnr_iobuf"));
+    EXPECT_THROW(parse("set_property PULLTYPE PULLDOWN [get_ports sda]\n"
+                       "set_property PULLUP TRUE [get_ports sda]\n"),
+                 log_execution_error_exception);
+}
