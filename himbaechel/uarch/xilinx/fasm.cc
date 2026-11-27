@@ -3412,6 +3412,19 @@ struct FasmBackend
             if (!boost::starts_with(tile_name, "CFG_CENTER_"))
                 continue;
 
+            // DNA_PORT sits in CFG_CENTER_TOP, a tile with no configuration frames: its enable
+            // is in the frames of CFG_CENTER_MID, as the one of the ICAP. Without it DOUT
+            // reads 0 (measured with Vivado on an XC7A200T).
+            if (ci->type == id_DNA_PORT_DNA_PORT) {
+                std::string cfg_center_mid = cfg_center_mid_tile();
+                if (cfg_center_mid.empty())
+                    log_error("DNA_PORT '%s': no CFG_CENTER_MID tile for its enable.\n", ci->name.c_str(ctx));
+                push(cfg_center_mid);
+                write_bit("DNA_PORT.IN_USE");
+                pop();
+                continue;
+            }
+
             push(tile_name);
             if (ci->type == id_BSCAN) {
                 push("BSCAN");
@@ -3451,6 +3464,17 @@ struct FasmBackend
             }
             pop();
         }
+    }
+
+    // The CFG_CENTER_MID tile of the device (one per device).
+    std::string cfg_center_mid_tile()
+    {
+        for (int tile = 0; tile < int(ctx->chip_info->tile_insts.ssize()); tile++) {
+            std::string name = uarch->tile_name(tile);
+            if (boost::starts_with(name, "CFG_CENTER_MID_"))
+                return name;
+        }
+        return "";
     }
 
     void write_ibufds_gte2(CellInfo * ci)
