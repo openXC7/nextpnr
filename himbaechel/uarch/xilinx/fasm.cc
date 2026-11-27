@@ -1138,6 +1138,35 @@ struct FasmBackend
 
     bool warned_dci = false;
 
+    // DIFF_TERM of the pair of a pad: set on the port in the XDC (set_property DIFF_TERM TRUE),
+    // or a parameter of the differential input buffer, which packing keeps on the input buffer of
+    // the pad.
+    bool pad_diff_term(const CellInfo *pad) const
+    {
+        auto is_true = [](const Property &value) {
+            if (value.is_string) {
+                std::string text = boost::algorithm::to_upper_copy(value.as_string());
+                return text == "TRUE" || text == "1";
+            }
+            return value.as_bool();
+        };
+        auto attr = pad->attrs.find(id_DIFF_TERM);
+        if (attr != pad->attrs.end())
+            return is_true(attr->second);
+        const NetInfo *pad_net = pad->getPort(id_PAD);
+        if (pad_net == nullptr)
+            return false;
+        for (auto &usr : pad_net->users) {
+            const bool user_is_inbuf = boost::contains(usr.cell->type.str(ctx), "INBUF");
+            if (!user_is_inbuf || usr.port != id_PAD)
+                continue;
+            auto param = usr.cell->params.find(id_DIFF_TERM);
+            if (param != usr.cell->params.end() && is_true(param->second))
+                return true;
+        }
+        return false;
+    }
+
     void write_io_config(CellInfo *pad)
     {
         NetInfo *pad_net = pad->getPort(id_PAD);
@@ -1649,6 +1678,11 @@ struct FasmBackend
                         write_bit("TMDS_33.IN_DIFF");
                 } else {
                     write_bit("LVDS_25_SSTL135_SSTL15.IN_DIFF");
+                    // The 100 ohm termination of an LVDS_25 input pair (DIFF_TERM TRUE, from the
+                    // XDC or the IBUFDS), configured on the P half as Vivado does. It needs a
+                    // database with the HR IOB33 LVDS_25.DIFF_TERM feature.
+                    if (is_lvds25 && is_master_half && pad_diff_term(pad))
+                        write_bit("LVDS_25.DIFF_TERM");
                 }
 
                 if (pad->attrs.count(id_IN_TERM))
