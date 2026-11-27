@@ -3453,6 +3453,39 @@ struct FasmBackend
         }
     }
 
+    // XADC: its configuration registers INIT_40..INIT_5F (16 bits each, one bitstream bit per
+    // register bit), its enable and its clock inversions, in the MONITOR_BOT tile (openXC7/prjxray-db, measured on an
+    // XC7A200T with Vivado). The DRP and the alarms are routed as any site pin.
+    void write_xadc()
+    {
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->type != id_XADC_XADC || ci->bel == BelId())
+                continue;
+            push(uarch->tile_name(ci->bel.tile));
+            push("XADC");
+            write_bit("IN_USE");
+            // The clock inputs are inverted unless their ZINV bit is set. A clock input tied to 0
+            // is VCC inverted after packing, as Vivado sets it (CONVSTCLK of a LiteX XADC).
+            for (auto pin : {"CONVSTCLK", "DCLK"}) {
+                const bool is_inverted =
+                        int_or_default(ci->params, ctx->id(std::string("IS_") + pin + "_INVERTED"), 0) != 0;
+                write_bit(std::string("ZINV_") + pin, !is_inverted);
+            }
+            for (int reg = 0x40; reg < 0x60; reg++) {
+                char name[8];
+                snprintf(name, sizeof(name), "INIT_%02X", reg);
+                const int64_t value = int_or_default(ci->params, ctx->id(name), 0);
+                if (value < 0 || value > 0xffff)
+                    log_error("XADC '%s': %s = %lld does not fit 16 bits.\n", ci->name.c_str(ctx), name,
+                              (long long)value);
+                for (int bit = 0; bit < 16; bit++)
+                    write_bit(std::string(name) + "[" + std::to_string(bit) + "]", (value >> bit) & 1);
+            }
+            pop(2);
+        }
+    }
+
     void write_ibufds_gte2(CellInfo * ci)
     {
         const std::string tile_name = uarch->tile_name(ci->bel.tile);
@@ -5587,6 +5620,7 @@ struct FasmBackend
         populate_bufgctrl_bound_slots(); // must run before any pip emission
         write_logic();
         write_cfg();
+        write_xadc();
         write_io();
         write_routing();
         // After write_routing: it is write_pip that fills pips_by_tile, and

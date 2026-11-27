@@ -1907,6 +1907,7 @@ void XC7Packer::pack_cfg()
     cfg_rules[id_FRAME_ECCE2].new_type = id_FRAME_ECC_FRAME_ECC;
     cfg_rules[id_STARTUPE2].new_type = id_STARTUP_STARTUP;
     cfg_rules[id_USR_ACCESSE2].new_type = id_USR_ACCESS_USR_ACCESS;
+    cfg_rules[id_XADC].new_type = id_XADC_XADC;
     generic_xform(cfg_rules);
 
     // Read once: which site serves which chain is a property of the device,
@@ -1945,9 +1946,35 @@ void XC7Packer::pack_cfg()
         // A BSCAN is not one of them: it is bound to the site its JTAG_CHAIN
         // selects, above -- leaving it to take any free BSCAN site is the bug
         // that binding exists to prevent.
+        // The analog inputs of the XADC (VP/VN, VAUXP/VAUXN) have dedicated analog routing, not
+        // reachable from the fabric: tied to a constant, they are left unconnected, as Vivado
+        // does (LiteX's S7SystemMonitor ties the unused ones to 0).
+        if (ci->type == id_XADC_XADC) {
+            std::vector<IdString> analog_tied_to_constant;
+            for (auto &port : ci->ports) {
+                const std::string name = port.first.str(ctx);
+                const bool is_analog = name == "VP" || name == "VN" || boost::starts_with(name, "VAUXP") ||
+                                       boost::starts_with(name, "VAUXN");
+                const NetInfo *net = port.second.net;
+                if (!is_analog || net == nullptr)
+                    continue;
+                const bool is_constant = net->name == ctx->id("$PACKER_GND_NET") ||
+                                         net->name == ctx->id("$PACKER_VCC_NET") ||
+                                         (net->driver.cell != nullptr &&
+                                          net->driver.cell->type.in(id_GND, id_VCC, id_PSEUDO_GND, id_PSEUDO_VCC));
+                if (is_constant)
+                    analog_tied_to_constant.push_back(port.first);
+                else
+                    log_error("XADC '%s': analog input %s driven by '%s' is not supported (dedicated analog "
+                              "routing).\n",
+                              ci->name.c_str(ctx), name.c_str(), net->name.c_str(ctx));
+            }
+            for (auto port : analog_tied_to_constant)
+                ci->disconnectPort(port);
+        }
         bool is_single_site_config_primitive =
                 ci->type.in(id_DCIRESET_DCIRESET, id_DNA_PORT_DNA_PORT, id_EFUSE_USR_EFUSE_USR, id_ICAP_ICAP,
-                            id_FRAME_ECC_FRAME_ECC, id_STARTUP_STARTUP, id_USR_ACCESS_USR_ACCESS);
+                            id_FRAME_ECC_FRAME_ECC, id_STARTUP_STARTUP, id_USR_ACCESS_USR_ACCESS, id_XADC_XADC);
         if (is_single_site_config_primitive)
             preplace_unique(ci);
     }
