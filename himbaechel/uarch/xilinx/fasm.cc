@@ -3454,7 +3454,7 @@ struct FasmBackend
     }
 
     // XADC: its configuration registers INIT_40..INIT_5F (16 bits each, one bitstream bit per
-    // register bit) and its enable, in the MONITOR_BOT tile (openXC7/prjxray-db, measured on an
+    // register bit), its enable and its clock inversions, in the MONITOR_BOT tile (openXC7/prjxray-db, measured on an
     // XC7A200T with Vivado). The DRP and the alarms are routed as any site pin.
     void write_xadc()
     {
@@ -3462,14 +3462,16 @@ struct FasmBackend
             CellInfo *ci = cell.second.get();
             if (ci->type != id_XADC_XADC || ci->bel == BelId())
                 continue;
-            for (auto inverted : {"IS_CONVSTCLK_INVERTED", "IS_DCLK_INVERTED"}) {
-                const bool is_inverted = int_or_default(ci->params, ctx->id(inverted), 0) != 0;
-                if (is_inverted)
-                    log_error("XADC '%s': %s is not supported.\n", ci->name.c_str(ctx), inverted);
-            }
             push(uarch->tile_name(ci->bel.tile));
             push("XADC");
             write_bit("IN_USE");
+            // The clock inputs are inverted unless their ZINV bit is set. A clock input tied to 0
+            // is VCC inverted after packing, as Vivado sets it (CONVSTCLK of a LiteX XADC).
+            for (auto pin : {"CONVSTCLK", "DCLK"}) {
+                const bool is_inverted =
+                        int_or_default(ci->params, ctx->id(std::string("IS_") + pin + "_INVERTED"), 0) != 0;
+                write_bit(std::string("ZINV_") + pin, !is_inverted);
+            }
             for (int reg = 0x40; reg < 0x60; reg++) {
                 char name[8];
                 snprintf(name, sizeof(name), "INIT_%02X", reg);
