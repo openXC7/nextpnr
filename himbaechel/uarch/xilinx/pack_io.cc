@@ -2142,6 +2142,31 @@ void XC7Packer::pack_gt()
 
                 if (port_name == "DRPCLK") {
                     ci->params[ctx->id("_DRPCLK_USED")] = Property(used);
+                } else if (boost::starts_with(port_name, "GTGREFCLK")) {
+                    // A fabric reference clock given as Vivado takes it, on GTGREFCLK (the
+                    // unused one tied to a constant): the input is enabled as for a clock
+                    // given on GTREFCLK from a BUFG, which is renamed to it below. Only
+                    // GTGREFCLK0 of a GTPE2_COMMON has an enable in the database, and Vivado
+                    // routes a fabric reference clock to it.
+                    if (port_net == nullptr)
+                        continue;
+                    if (!used) {
+                        ci->disconnectPort(port.first);
+                        continue;
+                    }
+                    const bool is_gtgrefclk1 = is_gtp && port_name == "GTGREFCLK1";
+                    if (is_gtgrefclk1) {
+                        const NetInfo *gtgrefclk0 = ci->getPort(id_GTGREFCLK0);
+                        const bool gtgrefclk0_has_a_clock = gtgrefclk0 != nullptr &&
+                                                            gtgrefclk0->name != ctx->id("$PACKER_GND_NET") &&
+                                                            gtgrefclk0->name != ctx->id("$PACKER_VCC_NET");
+                        if (gtgrefclk0_has_a_clock)
+                            log_error("GTPE2_COMMON '%s': GTGREFCLK0 and GTGREFCLK1 both have a clock, only one "
+                                      "fabric reference clock is supported\n",
+                                      ci->name.c_str(ctx));
+                        to_rename.emplace_back(port.first, id_GTGREFCLK0);
+                    }
+                    ci->params[ctx->id("_GTGREFCLK_USED")] = Property(1, 1);
                 } else if (boost::starts_with(port_name, "GTREFCLK")) {
                     if (port_net == nullptr)
                         continue;
