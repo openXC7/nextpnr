@@ -1907,6 +1907,7 @@ void XC7Packer::pack_cfg()
     cfg_rules[id_FRAME_ECCE2].new_type = id_FRAME_ECC_FRAME_ECC;
     cfg_rules[id_STARTUPE2].new_type = id_STARTUP_STARTUP;
     cfg_rules[id_USR_ACCESSE2].new_type = id_USR_ACCESS_USR_ACCESS;
+    cfg_rules[id_XADC].new_type = id_XADC_XADC;
     generic_xform(cfg_rules);
 
     // Read once: which site serves which chain is a property of the device,
@@ -1947,7 +1948,7 @@ void XC7Packer::pack_cfg()
         // that binding exists to prevent.
         bool is_single_site_config_primitive =
                 ci->type.in(id_DCIRESET_DCIRESET, id_DNA_PORT_DNA_PORT, id_EFUSE_USR_EFUSE_USR, id_ICAP_ICAP,
-                            id_FRAME_ECC_FRAME_ECC, id_STARTUP_STARTUP, id_USR_ACCESS_USR_ACCESS);
+                            id_FRAME_ECC_FRAME_ECC, id_STARTUP_STARTUP, id_USR_ACCESS_USR_ACCESS, id_XADC_XADC);
         if (is_single_site_config_primitive)
             preplace_unique(ci);
     }
