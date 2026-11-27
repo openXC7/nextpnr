@@ -472,6 +472,41 @@ bool XilinxPacker::can_add_ff_to_cluster(const CellInfo *lut, const CellInfo *ff
     return true;
 }
 
+// Carry clusters are laid out with absolute z: the root at BEL_CARRY4, its S/DI
+// LUTs and FFs at (bit << 4) | type.  A logic tile holds two slices, the second
+// one's bels at z + 0x40 (half << 6), so absolute z confines every carry chain to
+// the first slice of its tile -- half of the CARRY4 sites, which a carry-heavy
+// design runs out of ("Unable to find legal placement").  Keep the same layout
+// relative to the root instead, so a chain may use either slice.  Runs after
+// pack_lutffs(), which attaches FFs to these clusters with the root's z mode;
+// pinned (imported) chains keep their absolute constraints.
+void XilinxPacker::relativise_carry_clusters()
+{
+    int relativised = 0;
+    for (auto &cell : ctx->cells) {
+        CellInfo *root = cell.second.get();
+        if (root->type != id_CARRY4 || root->cluster != root->name || !root->constr_abs_z ||
+            root->constr_z != BEL_CARRY4)
+            continue;
+        auto pinned = [&](const CellInfo *c) { return c->bel != BelId() || c->attrs.count(id_BEL); };
+        bool any_pinned = pinned(root);
+        for (auto child : root->constr_children)
+            any_pinned |= pinned(child);
+        if (any_pinned)
+            continue;
+        for (auto child : root->constr_children) {
+            if (child->constr_abs_z) {
+                child->constr_z -= BEL_CARRY4;
+                child->constr_abs_z = false;
+            }
+        }
+        root->constr_abs_z = false;
+        root->constr_z = 0;
+        ++relativised;
+    }
+    log_info("Made %d carry chain(s) slice-relative.\n", relativised);
+}
+
 void XilinxPacker::pack_lutffs()
 {
     int pairs = 0;
@@ -1768,6 +1803,7 @@ void XilinxImpl::pack()
     packer.pack_ffs();
     packer.finalise_muxfs();
     packer.pack_lutffs();
+    packer.relativise_carry_clusters();
 
     // Now that LUT-FF clusters exist, keep the sinks of every placed regional
     // buffer (BUFIO/BUFR) inside the clock region that buffer drives.  The
